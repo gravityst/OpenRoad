@@ -696,7 +696,7 @@ function saveSettings(s) {
 }
 
 function applyAssists(car, s) {
-  car.aids.abs = s.abs === false ? 0 : 0.85;
+  car.aids.abs = s.abs === false ? 0 : 0.95;
   car.aids.tc = s.tc === false ? 0 : 0.55;
   car.aids.stability = s.esc === false ? 0 : 0.62;
 }

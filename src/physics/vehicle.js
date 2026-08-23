@@ -118,7 +118,9 @@ export function createVehicle(opts = {}) {
 
     steerAngle: 0,           // current road-wheel angle, rad, + = right
     input: { throttle: 0, brake: 0, steer: 0, handbrake: 0 },
-    aids: { abs: 0.7, tc: 0.55, stability: 0.35, autoGear: true },
+    // Defaults match what main.js applies for a new player, so the headless
+    // harnesses measure the car people actually drive.
+    aids: { abs: 0.95, tc: 0.55, stability: 0.62, autoGear: true },
 
     // readouts
     speed: 0,                // m/s along the ground
@@ -156,6 +158,19 @@ export function createVehicle(opts = {}) {
   /** Engine torque (N·m) at the crank for a given rpm and throttle. */
   function engineTorque(rpm, throttle) {
     const r = clamp(rpm, spec.idleRpm, spec.redline);
+
+    // An electric motor is not a small engine — it makes peak torque from a
+    // standstill and then holds constant power. Running one through the
+    // combustion curve below gives it a torque hole at zero rpm, which is the
+    // exact opposite of what makes an EV feel quick.
+    if (spec.cylinders === 0) {
+      const peak = spec.power / (spec.peakRpm * 2 * Math.PI / 60);
+      const flat = r <= spec.peakRpm ? 1 : spec.peakRpm / r;   // constant power above base
+      let t = peak * flat * throttle;
+      if (r >= spec.redline - 200) t *= 0.1;
+      t -= (1 - throttle) * peak * 0.09;                       // regenerative braking
+      return t;
+    }
     // Torque peaks below the power peak and tails off toward the limiter, which
     // is what makes a gearbox worth having.
     const n = r / spec.peakRpm;

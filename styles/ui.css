@@ -456,7 +456,34 @@
 }
 .or-wheels i.is-driven { background: var(--or-amber); }
 
-.or-swatch-row { display: flex; align-items: center; gap: 14px; }
+.or-figures {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+  margin: 0;
+}
+.or-figures dt {
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--or-text-3);
+}
+.or-figures dd {
+  margin: 2px 0 0;
+  font: 600 0.92rem/1.2 var(--or-body);
+}
+
+/* Pushed to the foot of the panel: paint is the one thing here you act on, so
+   it sits apart from the figures rather than trailing off the end of them. */
+.or-swatch-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: auto;
+  padding-top: 14px;
+  border-top: 1px solid var(--or-line);
+}
 .or-swatch-label {
   font-size: 0.66rem;
   font-weight: 600;

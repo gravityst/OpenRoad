@@ -53,7 +53,6 @@ const B_COMF = 2.8;       // m/s^2 they will plan to brake at for something they
 const B_MAX = 7.5;        // m/s^2 they will actually use when surprised
 const GAP_MIN = 2.6;      // m of standstill gap, bumper to bumper
 const SIGNAL_PERIOD = 13; // s per phase at a signalled junction
-const SCAN_R = 36;        // m of forward interest in other cars
 
 export function createTraffic(world, ground, opts = {}) {
   const rnd = mulberry(opts.seed ?? ((world.seed ^ 0x7a11c5) >>> 0));
@@ -217,6 +216,30 @@ export function createTraffic(world, ground, opts = {}) {
   // to the node takes the junction and everyone else waits for it. Both are
   // deliberately coarse — the point is that cars stop for each other at all,
   // not that the rules of the road are simulated.
+
+  // The through road at a junction does not stop. layout.js marks every node of
+  // degree three as a stop, which put traffic lights on the ring motorway and
+  // left cars sitting at a standstill on it. A node's top-ranked road, when
+  // exactly one road of that rank passes through, keeps its right of way.
+  const nodeTopRank = new Float32Array(nodes.length);
+  const nodeTopCount = new Uint8Array(nodes.length);
+  for (let i = 0; i < nodes.length; i++) {
+    const list = nodes[i].edges;
+    let top = 0, cnt = 0;
+    for (let k = 0; k < list.length; k++) {
+      const r = RANK[edges[list[k]].kind] ?? 1;
+      if (r > top + 1e-6) { top = r; cnt = 1; } else if (r > top - 1e-6) cnt++;
+    }
+    nodeTopRank[i] = top; nodeTopCount[i] = cnt;
+  }
+
+  /** Does a car on `slot` own the junction at the end of it? */
+  function priority(slot) {
+    const n = slot.endNode;
+    return nodeTopCount[n] <= 2
+      && (RANK[slot.e.kind] ?? 1) >= nodeTopRank[n] - 1e-6
+      && (slot.turnAtEnd < 0.6 && slot.turnAtEnd > -0.6);
+  }
 
   const claimOwner = new Int32Array(nodes.length).fill(-1);
   const claimAge = new Float32Array(nodes.length);
@@ -495,18 +518,24 @@ export function createTraffic(world, ground, opts = {}) {
     const fx = car.fx, fz = car.fz;
     const rx = -fz, rz = fx;
     const laneHalf = Math.min(2.8, car.route[0].laneOff * 0.88);
+    // Interest has to reach past where this car could still stop. A fixed
+    // radius is the classic way to get a motorway pile-up: at 39 m/s a car
+    // needs a hundred metres, and anything shorter means it first sees the
+    // stopped queue from inside its own braking distance.
+    const scan = Math.min(150, 16 + car.speed * 3.4);
+    const scan2 = scan * scan;
 
     for (let i = 0; i < cars.length; i++) {
       const o = cars[i];
       if (!o.active || o === car) continue;
       const dx = o.x - car.x, dz = o.z - car.z;
       const d2 = dx * dx + dz * dz;
-      if (d2 > SCAN_R * SCAN_R) continue;
+      if (d2 > scan2) continue;
       const fwd = dx * fx + dz * fz;
       if (fwd <= 0.2) continue;
       const dot = o.fx * fx + o.fz * fz;
       const same = dot > 0.35;
-      if (fwd > (same ? SCAN_R : 20)) continue;
+      if (fwd > (same ? scan : 22)) continue;
       const lat = dx * rx + dz * rz;
       // Cross traffic gets a narrower but unconditional corridor: a car coming
       // through a junction sideways is still something to stop for.
@@ -585,13 +614,16 @@ export function createTraffic(world, ground, opts = {}) {
 
       const slot = car.route[0];
       const node = nodes[slot.endNode];
-      if (!node.stop || node.signal) continue;
+      if (!node.stop) continue;
       const dNode = slot.len - car.s;
-      const range = Math.max(20, (car.speed * car.speed) / (2 * B_COMF) + 12);
-      if (dNode > range) continue;
+      // Reserve early enough that the claim is settled before the driver would
+      // otherwise have started braking for the line.
+      if (dNode > clamp(car.speed * 3 + 15, 25, 140)) continue;
       if (claimOwner[node.i] !== -1) continue;
 
-      const score = (RANK[slot.e.kind] ?? 1) * 100 - dNode;
+      // A car with right of way still takes the junction, so that side roads
+      // wait for it; it simply never stops for it.
+      const score = (RANK[slot.e.kind] ?? 1) * 100 - dNode + (priority(slot) ? 10000 : 0);
       let seen = -1;
       for (let b = 0; b < bidCount; b++) if (bidNode[b] === node.i) { seen = b; break; }
       if (seen < 0) {

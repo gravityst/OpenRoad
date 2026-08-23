@@ -266,10 +266,15 @@ export function createTerrain(world, ground, opts = {}) {
       const rim = a === 0 || a === last;
       for (let b = 0; b <= last; b++) {
         const lz = (b - 1) * step, z = oz + lz;
-        const s = ground.sample(x, z, gs);
         const v = a * D + b;
+        if (rim || b === 0 || b === last) {
+          // Outside the chunk proper: this point exists only to give the border
+          // vertices a neighbour, so its height is all anyone will ever read.
+          hgrid[v] = ground.heightAt(x, z);
+          continue;
+        }
+        const s = ground.sample(x, z, gs);
         hgrid[v] = s.y;
-        if (rim || b === 0 || b === last) continue;   // skirt vertex, written in endFill
         const o = v * 3;
         pos[o] = lx; pos[o + 1] = s.y; pos[o + 2] = lz;
         // Normals straight from the height field's own gradient. Averaging face

@@ -636,6 +636,7 @@ export function createHUD(root, opts = {}) {
     const range = span * 1.55;
     const villageRange = range > 1200 ? range : 1200;
     const edge = r * 0.74;
+    g.strokeStyle = COL_HALO;
     g.lineWidth = w * 0.013;
     for (let i = 0; i < places.length; i++) {
       const p = places[i];

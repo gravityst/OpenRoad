@@ -63,7 +63,14 @@ const KNEE = 0.36;
 const RISE_TAU = 0.30;   // s
 const FALL_TAU = 0.16;   // s
 
+// Null-prototype on purpose. A plain object literal would answer to
+// TIERS['constructor'] and TIERS['toString'] with something truthy, so a stray
+// settings string would sail past the `if (!TIERS[q])` guards below and then
+// read .dpr off Function.prototype — undefined, which turns the pixel ratio into
+// NaN and leaves the canvas with a zero-sized drawing buffer. Unknown tiers have
+// to be genuinely unknown.
 const TIERS = {
+  __proto__: null,
   // dpr is a per-tier ceiling; the real ratio is min(devicePixelRatio, dpr, 2).
   // bloomScale is a fraction of the framebuffer: UnrealBloomPass already halves
   // whatever it is given, so 1.0 means its first mip is quarter-area.
@@ -120,23 +127,40 @@ void main() {
   // Uniform-coherent branch: at town speeds the whole draw is a single tap.
   vec4 col;
   if (amt > 0.002) {
-    vec4 sum = vec4(0.0);
-    float wsum = 0.0;
+    vec3  csum = vec3(0.0);   // colour, accumulated with a per-channel weight
+    vec3  wsum = vec3(0.0);   // and the matching per-channel weight totals
+    float asum = 0.0;
+    float awsum = 0.0;
     for (int i = 0; i < TAPS; i++) {
       float t = float(i) / float(TAPS - 1);
       float w = 1.0 - 0.45 * t;
-      sum += texture2D(tDiffuse, vUv - d * (t * amt * uShift)) * w;
-      wsum += w;
-    }
-    col = sum / wsum;
+      vec4 s = texture2D(tDiffuse, vUv - d * (t * amt * uShift));
 
-    #if CHROMA
-      // Two taps of lateral dispersion at the frame edge. Cheap, and it is what
-      // keeps a heavy blur looking like a lens instead of like a low mip.
-      float ca = amt * uShift * 0.55;
-      col.r = mix(col.r, texture2D(tDiffuse, vUv + d * ca).r, 0.7);
-      col.b = mix(col.b, texture2D(tDiffuse, vUv - d * ca).b, 0.7);
-    #endif
+      // With CHROMA off this is a flat vec3(w) and the loop is the plain radial
+      // average it looks like.
+      vec3 cw = vec3(w);
+      #if CHROMA
+        // Lateral dispersion, done by moving each channel's centre of mass along
+        // the streak rather than by adding displaced taps: red is weighted toward
+        // the long end, blue toward the short end. Every channel is still an
+        // average of every tap, so all three come out equally blurred.
+        //
+        // The obvious alternative — sampling tDiffuse again at a displaced UV and
+        // mixing that into the blurred result — silently undoes the blur for the
+        // two channels it touches, because a single fetch is sharp no matter
+        // where it lands. That reads as a coloured double image sitting on top of
+        // a blurred one, not as a lens. This version also costs no extra fetches.
+        float bias = 0.9 * amt * (t - 0.5);   // |bias| <= 0.45, so weights stay positive
+        cw.r = w * (1.0 + bias);
+        cw.b = w * (1.0 - bias);
+      #endif
+
+      csum += s.rgb * cw;
+      wsum += cw;
+      asum += s.a * w;
+      awsum += w;
+    }
+    col = vec4(csum / wsum, asum / awsum);
   } else {
     col = texture2D(tDiffuse, vUv);
   }
@@ -157,7 +181,11 @@ void main() {
  *                         width, height, updateStyle
  */
 export function createEffects(renderer, scene, camera, opts = {}) {
-  const maxPixelRatio = Math.min(2, opts.maxPixelRatio ?? 2);
+  // Clamped rather than trusted: a zero, a negative or a non-number here would
+  // propagate into renderer.setPixelRatio() and size the drawing buffer to
+  // nothing, which looks like a dead canvas rather than like a bad option.
+  const askedRatio = Number(opts.maxPixelRatio);
+  const maxPixelRatio = Math.min(2, Math.max(0.5, askedRatio > 0 ? askedRatio : 2));
   // three's setSize would write inline width/height onto the canvas. The
   // stylesheet owns the canvas box here, so leave it alone unless asked.
   const updateStyle = opts.updateStyle === true;

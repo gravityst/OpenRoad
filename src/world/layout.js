@@ -97,8 +97,12 @@ export function makeTerrain(seed) {
     if (d < CITY_R * 0.9) return 'grass';
     const h = height(x, z);
     const n = fbm(x / 320, z / 320, s + 77, 3);
-    if (h < -9 && n < 0.15) return 'sand';
-    if (n > 0.34 && h > 12) return 'dirt';
+    // Sand belongs to the river valley, not to the farmland. The old threshold
+    // (h < -9) caught more than a quarter of the map, because the valley cuts
+    // to -18 over a wide corridor — the countryside read as desert rather than
+    // as country.
+    if (h < -12.5 && n < 0.10) return 'sand';
+    if (n > 0.40 && h > 16) return 'dirt';
     return 'grass';
   }
 

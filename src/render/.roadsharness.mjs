@@ -12,7 +12,7 @@ globalThis.document = { createElement: () => makeCanvas() };
 
 const { buildWorld, pointOnEdge } = await import('../world/layout.js');
 const { createGround } = await import('../world/ground.js');
-const { createRoads } = await import('./.check.mjs');
+const { createRoads } = await import('./.roadscheck.mjs');
 
 const world = buildWorld();
 const ground = createGround(world);
@@ -37,9 +37,10 @@ for (const m of roads.group.children) {
       }
   }
 }
-function covered(x, z) {
+function covered(x, z, want) {
   const L = cells.get(key(Math.floor(x / C), Math.floor(z / C)));
   if (!L) return null;
+  let best = null, hits = 0;
   for (const ti of L) {
     const [ax, az, bx, bz, cx, cz, y] = T[ti];
     const d = (bz - cz) * (ax - cx) + (cx - bx) * (az - cz);
@@ -47,10 +48,16 @@ function covered(x, z) {
     const l1 = ((bz - cz) * (x - cx) + (cx - bx) * (z - cz)) / d;
     const l2 = ((cz - az) * (x - cx) + (ax - cx) * (z - cz)) / d;
     const l3 = 1 - l1 - l2;
-    if (l1 >= -1e-4 && l2 >= -1e-4 && l3 >= -1e-4) return y;
+    if (l1 >= -1e-4 && l2 >= -1e-4 && l3 >= -1e-4) {
+      hits++;
+      if (best === null || (want !== undefined && Math.abs(y - want) < Math.abs(best - want))) best = y;
+    }
   }
-  return null;
+  overlaps += hits > 1 ? 1 : 0;
+  probes += hits > 0 ? 1 : 0;
+  return best;
 }
+let overlaps = 0, probes = 0;
 
 let holes = 0, tested = 0, worstLift = 0, liftBad = 0;
 const report = [];
@@ -75,7 +82,7 @@ for (const e of world.edges) {
     const p = pointOnEdge(e, s);
     const off = 0.35 * e.width * (s % 2 ? 1 : -1);
     const x = p.x + p.nx * off, z = p.z + p.nz * off;
-    const y = covered(x, z);
+    const y = covered(x, z, ground.heightAt(x, z) + 0.04);
     if (y === null) continue;
     const d = Math.abs(y - (ground.heightAt(x, z) + 0.04));
     if (d > worstLift) worstLift = d;
@@ -83,3 +90,4 @@ for (const e of world.edges) {
   }
 }
 console.log('worst |drawn - (heightAt + 0.04)| =', worstLift.toFixed(4), 'm; samples over 6 cm:', liftBad);
+console.log('probes landing on 2+ overlapping surfaces:', overlaps, '/', probes);

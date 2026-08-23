@@ -407,6 +407,33 @@ export function createTraffic(world, ground, opts = {}) {
   const probe = makeSlot();
 
   /**
+   * A road picked uniformly from the nine cells around (sx, sz). Half the cells
+   * in a 4 km world are empty countryside, so looking only in the cell the
+   * sample landed in throws away half of every spawn attempt.
+   */
+  function edgeNear(sx, sz) {
+    const cx = Math.floor(sx / SCELL), cz = Math.floor(sz / SCELL);
+    let total = 0;
+    for (let a = -1; a <= 1; a++) {
+      for (let b = -1; b <= 1; b++) {
+        const L = spawnCells.get(skey(cx + a, cz + b));
+        if (L) total += L.length;
+      }
+    }
+    if (!total) return null;
+    let r = (rnd() * total) | 0;
+    for (let a = -1; a <= 1; a++) {
+      for (let b = -1; b <= 1; b++) {
+        const L = spawnCells.get(skey(cx + a, cz + b));
+        if (!L) continue;
+        if (r < L.length) return edges[L[r]];
+        r -= L.length;
+      }
+    }
+    return null;
+  }
+
+  /**
    * One spawn attempt in the ring around the player. Pop-in is far more
    * noticeable ahead than behind, so the forward half of the ring is pushed out
    * to where a car arriving is a few pixels; the whole ring stays inside
@@ -420,9 +447,8 @@ export function createTraffic(world, ground, opts = {}) {
     const r = minR + rnd() * (radius * 0.15);
     const sx = px + ax * r, sz = pz + az * r;
 
-    const list = spawnCells.get(skey(Math.floor(sx / SCELL), Math.floor(sz / SCELL)));
-    if (!list || !list.length) return false;
-    const e = edges[list[(rnd() * list.length) | 0]];
+    const e = edgeNear(sx, sz);
+    if (!e) return false;
     if (rnd() > (RANK[e.kind] ?? 1) / 3.4) return false;    // arterials get the traffic
 
     // Nearest station on that edge to the sample point.
@@ -658,7 +684,7 @@ export function createTraffic(world, ground, opts = {}) {
       a = obstacles(car, a, playerX, playerZ, playerSpeed, phx, phz);
 
       const node = nodes[slot.endNode];
-      if (node.stop) {
+      if (node.stop && !priority(slot)) {
         const stopLine = dNode - (slot.e.width * 0.5 + 2.0);
         const mustStop = node.signal
           ? !signalGreen(node, dNode, car.speed, car.fx, car.fz)
@@ -765,18 +791,24 @@ export function createTraffic(world, ground, opts = {}) {
     }
 
     // ---- spawning -----------------------------------------------------------
-    let near = 0;
+    let near = 0, farIdx = -1, farD = radius * radius;
     for (let i = 0; i < cars.length; i++) {
       const car = cars[i];
       if (!car.active) continue;
       const dx = car.x - playerX, dz = car.z - playerZ;
-      if (dx * dx + dz * dz < radius * radius) near++;
+      const d2 = dx * dx + dz * dz;
+      if (d2 < radius * radius) near++;
+      else if (d2 > farD) { farD = d2; farIdx = i; }
     }
+    // A pool slot spent on a car the player is driving away from is a slot not
+    // spent on the road in front of them, so the outermost car gives way to a
+    // new one whenever the ring is short.
+    if (near < density && active >= maxCars && farIdx >= 0) despawn(cars[farIdx]);
     // Budgeted: a few attempts a frame is enough to refill the ring within a
     // second, and it keeps the worst-case frame flat. The first call gets a
     // much bigger budget, because a road that fills up over the player's first
     // two seconds of driving reads as cars materialising out of nothing.
-    const budget = primed ? 3 : 600;
+    const budget = primed ? 6 : 900;
     primed = true;
     for (let t = 0; t < budget && near < density && active < maxCars; t++) {
       if (trySpawn(playerX, playerZ, phx, phz)) near++;

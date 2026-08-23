@@ -397,7 +397,7 @@ void main() {
   // real cloud deck does. A dome hangs the same-sized puff overhead and at the
   // horizon and reads as a painted ceiling.
   //
-  // Sampled unconditionally rather than behind an `if (above > 0)`: a
+  // Sampled unconditionally rather than behind a visibility test: a
   // texture2D in non-uniform control flow has undefined derivatives, so the
   // mip level the far deck depends on would be garbage. The fade is a
   // multiply. High deck first — it is above the low one, so it is behind it.
@@ -533,7 +533,9 @@ const _zenith = { r: 0, g: 0, b: 0 };
 const _horizon = { r: 0, g: 0, b: 0 };
 const _trans = { r: 0, g: 0, b: 0 };
 const UP = new THREE.Vector3(0, 1, 0);
-const SIDE = new THREE.Vector3(0, 0, 1);
+// Fallback basis reference for the two moments a year the sun or moon passes
+// close enough to the zenith that cross(up, dir) degenerates.
+const ALT_UP = new THREE.Vector3(0, 0, 1);
 
 /**
  * Altitude and azimuth of a body at hour `hours`, written into `out` as a unit
@@ -667,7 +669,7 @@ export function createSky(scene, renderer, opts = {}) {
   let hours = opts.hours ?? 10;
   let elapsed = 0;
   let driftX0 = 0, driftY0 = 0, driftX1 = 0, driftY1 = 0;
-  let fogAzimuth = 0;
+  let fogX = 0, fogZ = -1;
 
   const state = {
     nightFactor: 0,
@@ -757,7 +759,7 @@ export function createSky(scene, renderer, opts = {}) {
 
     // Moon tangent basis on the CPU: the shader would otherwise need a
     // degenerate-cross guard for the nights the moon passes near the zenith.
-    _right.crossVectors(Math.abs(state.moonDir.y) > 0.99 ? SIDE : UP, state.moonDir).normalize();
+    _right.crossVectors(Math.abs(state.moonDir.y) > 0.99 ? ALT_UP : UP, state.moonDir).normalize();
     _up.crossVectors(state.moonDir, _right);
     uniforms.uMoonRight.value.copy(_right);
     uniforms.uMoonUp.value.copy(_up);
@@ -866,7 +868,7 @@ export function createSky(scene, renderer, opts = {}) {
       // resamples every frame as the car moves and every shadow edge crawls,
       // which at 40 m/s is far more obvious than any amount of aliasing.
       const texel = (2 * shadowRadius) / shadowSize;
-      _right.crossVectors(Math.abs(_v.y) > 0.99 ? SIDE : UP, _v).normalize();
+      _right.crossVectors(Math.abs(_v.y) > 0.99 ? ALT_UP : UP, _v).normalize();
       _up.crossVectors(_v, _right);
       const a = Math.round(_right.dot(cameraPos) / texel) * texel;
       const b = Math.round(_up.dot(cameraPos) / texel) * texel;
@@ -883,7 +885,6 @@ export function createSky(scene, renderer, opts = {}) {
     // fully saturated ambient makes white cars look painted. Ground is that
     // light bounced off earth, so it tracks the sun's colour, not a fixed brown.
     const zMax = Math.max(_zenith.r, _zenith.g, _zenith.b, 1e-4);
-    hemi.color.setRGB(1, 1, 1);
     hemi.skyColor.setRGB(
       lerp(_zenith.r / zMax, 1, 0.34),
       lerp(_zenith.g / zMax, 1, 0.34),

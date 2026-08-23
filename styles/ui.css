@@ -706,10 +706,16 @@
   font: 500 0.78rem/1 var(--or-mono);
   color: var(--or-text-3);
 }
+/* The world is square, so the panel is too: sizing it by width would leave a
+   wide band of empty glass either side of the map. Height drives the flex, and
+   aspect-ratio derives the width from it. */
 .or-map-frame {
   flex: 1 1 auto;
   min-height: 0;
-  width: min(1000px, 100%);
+  aspect-ratio: 1;
+  width: auto;
+  max-width: min(1000px, 100%);
+  margin-inline: auto;
   display: grid;
   place-items: center;
   padding: 10px;

@@ -6,17 +6,20 @@
 // but it also means a missing export fails SILENTLY into a stub — the game runs
 // and the sky is just gone. This is the thing that notices.
 //
-// Bare 'three' specifiers do not resolve in Node, so each module is rewritten
-// into a sibling temp file with the vendored path substituted, imported, and
-// deleted again. Relative project imports still resolve because the temp file
-// sits in the same directory as the original.
-import { readFileSync, writeFileSync, unlinkSync, existsSync } from 'node:fs';
+// Bare 'three' specifiers resolve through node_modules/three, a dev-only shim
+// that points at the vendored copy. Rewriting the specifier in the module under
+// test is not enough: the vendored addons import 'three' themselves, so the
+// resolution has to work transitively — exactly as the browser's importmap
+// makes it. Run tools/setup.mjs if the shim is missing.
+import { readFileSync, existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const THREE_MAIN = join(ROOT, 'vendor/three/build/three.module.js');
-const THREE_ADDONS = join(ROOT, 'vendor/three/addons/');
+if (!existsSync(join(ROOT, 'node_modules/three/package.json'))) {
+  console.error("node_modules/three shim missing — run: node tools/setup.mjs");
+  process.exit(2);
+}
 
 const MODULES = [
   { file: 'src/world/layout.js',      exports: ['buildWorld', 'makeTerrain', 'pointOnEdge', 'ROAD'] },
@@ -54,15 +57,8 @@ for (const m of MODULES) {
     continue;
   }
 
-  const tmp = path.replace(/\.js$/, `.__check${process.pid}.mjs`);
   try {
-    const src = readFileSync(path, 'utf8')
-      .replaceAll("from 'three/addons/", `from '${THREE_ADDONS}`)
-      .replaceAll('from "three/addons/', `from "${THREE_ADDONS}`)
-      .replaceAll("from 'three'", `from '${THREE_MAIN}'`)
-      .replaceAll('from "three"', `from "${THREE_MAIN}"`);
-    writeFileSync(tmp, src);
-    const mod = await import(pathToFileURL(tmp).href);
+    const mod = await import(pathToFileURL(path).href);
     const lacks = m.exports.filter((e) => !(e in mod));
     if (lacks.length) {
       console.log(`BAD      ${m.file}  missing exports: ${lacks.join(', ')}`);
@@ -74,8 +70,6 @@ for (const m of MODULES) {
   } catch (err) {
     console.log(`BROKEN   ${m.file}  ${err.message.split('\n')[0]}`);
     broken++;
-  } finally {
-    try { unlinkSync(tmp); } catch { /* already gone */ }
   }
 }
 

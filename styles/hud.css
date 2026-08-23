@@ -60,8 +60,16 @@
   position: absolute;
   inset: 0;
   display: grid;
-  grid-template-columns: 1fr auto 1fr;
-  grid-template-rows: auto 1fr auto;
+  /* The outer columns are content-sized and the middle one takes the slack, so
+   * the map and the cluster always get exactly the width they need. With
+   * `1fr auto 1fr` the compass — which shares column 2 with the toast — sets the
+   * middle column's width for every row, and on a narrow phone it squeezed the
+   * cluster clean off the right edge. Grid columns span all rows; the top strip
+   * must not be allowed to size the bottom one. And minmax(0, 1fr) rather than
+   * a bare 1fr, which has an automatic minimum and so refuses to shrink below
+   * the compass's own width — that puts the overflow straight back. */
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   gap: var(--hud-gap);
   padding:
     calc(var(--hud-gap) + env(safe-area-inset-top, 0px))
@@ -82,6 +90,7 @@
   align-items: center;
   gap: calc(var(--hud-u) * 0.4);
   width: min(46vw, calc(var(--hud-u) * 34));
+  max-width: 100%;
   min-width: 0;
 }
 
@@ -405,10 +414,13 @@
   .hud__nav { width: min(54vw, calc(var(--hud-u) * 28)); }
 }
 
-/* Portrait leaves no width for a heading tape; the place line carries on alone. */
+/* Portrait leaves no width for a heading tape; the place line carries on alone.
+ * Scoped through .hud so it outranks the `.hud canvas { display: block }` reset,
+ * which is a class plus a type and would otherwise win on specificity whatever
+ * the media query says. */
 @media (orientation: portrait) and (max-width: 600px) {
-  .hud__compass { display: none; }
-  .hud__nav::after { display: none; }
+  .hud .hud__compass { display: none; }
+  .hud .hud__nav::after { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {

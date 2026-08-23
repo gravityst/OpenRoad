@@ -346,7 +346,7 @@ export function createParticles(scene, opts = {}) {
   for (let i = 1; i < kAtt.length; i += 3) kAtt[i] = -1e6;   // born long ago = invisible
   let kCursor = 0;
   let kLo = -1, kHi = -1;
-  let laid = 0;                                          // quads written this frame                                // dirty span, in quads
+  let laid = 0;                                          // quads written this frame
 
   const skidGeo = new THREE.BufferGeometry();
   const attrKPos = new THREE.BufferAttribute(kPos, 3).setUsage(THREE.DynamicDrawUsage);
@@ -531,6 +531,11 @@ export function createParticles(scene, opts = {}) {
   // =========================================================================
   // Fractional debt, so a caller can ask for 0.4 of a puff every frame and get a
   // steady trickle instead of nothing.
+  //
+  // The emit guards reject a non-finite or absurd amount rather than adding it.
+  // Infinity | 0 is 0, so an Infinity that reached an accumulator would never
+  // drain out of it and that emitter would stay silent for the rest of the
+  // session — one bad physics frame killing dust permanently, with no error.
   let dustDebt = 0, smokeDebt = 0, sparkDebt = 0, splashDebt = 0, rainSplashDebt = 0;
 
   const SMOKE_R = srgbChannel(0.855), SMOKE_G = srgbChannel(0.855), SMOKE_B = srgbChannel(0.875);
@@ -622,7 +627,7 @@ export function createParticles(scene, opts = {}) {
   }
 
   function emitDust(x, y, z, amount, colourHex) {
-    if (!(amount > 0)) return;
+    if (!(amount > 0) || amount > 1e6) return;
     unpackColour(colourHex === undefined ? 0x8a7a5e : colourHex | 0);
     dustDebt += amount;
     let n = dustDebt | 0;
@@ -637,7 +642,7 @@ export function createParticles(scene, opts = {}) {
   }
 
   function emitSmoke(x, y, z, amount) {
-    if (!(amount > 0)) return;
+    if (!(amount > 0) || amount > 1e6) return;
     smokeDebt += amount;
     let n = smokeDebt | 0;
     smokeDebt -= n;
@@ -649,7 +654,7 @@ export function createParticles(scene, opts = {}) {
   }
 
   function splash(x, y, z, amount) {
-    if (!(amount > 0)) return;
+    if (!(amount > 0) || amount > 1e6) return;
     splashDebt += amount;
     let n = splashDebt | 0;
     splashDebt -= n;
@@ -660,7 +665,7 @@ export function createParticles(scene, opts = {}) {
   }
 
   function emitSparks(x, y, z, amount, dirX, dirZ) {
-    if (!(amount > 0)) return;
+    if (!(amount > 0) || amount > 1e6) return;
     sparkDebt += amount;
     let n = sparkDebt | 0;
     sparkDebt -= n;
@@ -733,8 +738,9 @@ export function createParticles(scene, opts = {}) {
    * Pass a stable `lane` per wheel (0..skidLanes-1) and consecutive calls are
    * welded into a continuous ribbon whose segments share an edge — no gaps at
    * speed, no double-darkened overlaps at a crawl. Omit it and each call stamps
-   * an independent oriented patch, which is fine for one-off marks but will
-   * zigzag if several wheels share the default lane.
+   * an independent oriented patch. Several wheels may safely omit it — the
+   * stamps are independent, not a shared lane — but consecutive stamps overlap
+   * and double-darken, so pass a lane wherever the mark should look continuous.
    */
   function addSkid(x, y, z, yaw, intensity, lane) {
     const a = clamp(intensity ?? 1, 0, 1);
@@ -806,7 +812,11 @@ export function createParticles(scene, opts = {}) {
   const stats = { billows: 0, sparks: 0, skidsLaid: 0, rainDrops: 0 };
 
   function update(dt, cameraPos) {
-    if (!(dt > 0)) dt = 0;
+    // Infinity is the one non-finite dt that survives `dt > 0`, and it would
+    // pin `now` at Infinity forever: every skid mark's age becomes Infinity and
+    // the whole layer goes invisible for good. Large finite steps are left
+    // alone — ageing 30 s of marks after a backgrounded tab is correct.
+    if (!(dt > 0) || dt === Infinity) dt = 0;
     now += dt;
 
     let cx = camPos.x, cy = camPos.y, cz = camPos.z;

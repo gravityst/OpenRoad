@@ -24,7 +24,7 @@
   --gas: 0;
   --brake: 0;
 
-  --lock: 78deg;                                  /* must match settings.wheelLock */
+  --lock: 78deg;                                  /* fallback; touch.js sets this from settings.wheelLock */
   --wheel: clamp(8rem, 27vmin, 13rem);
   --travel: clamp(3rem, 10vw, 5rem);
   --pad: clamp(4.4rem, 15vmin, 6.6rem);
@@ -113,6 +113,14 @@
 .touch[data-layout="slider"] .touch__slider,
 .touch[data-layout="tilt"] .touch__slider { display: block; }
 .touch[data-layout="tilt"] .touch__cal { display: flex; }
+
+/* A refused or missing sensor drops tilt back to the slider — and takes the
+   calibration block, and with it the line explaining what just happened, off
+   screen. touch.js flags .has-note whenever there is something to say, so the
+   message survives the layout switch that caused it. The chips are tilt-only
+   and stay hidden: there is nothing to centre or invert on a slider. */
+.touch.has-note .touch__cal { display: flex; }
+.touch.has-note:not([data-layout="tilt"]) .touch__chip { display: none; }
 
 /* --- the wheel --- */
 

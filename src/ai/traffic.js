@@ -52,7 +52,7 @@ const A_LAT = 3.2;        // m/s^2 of lateral acceleration a traffic driver will
 const B_COMF = 2.8;       // m/s^2 they will plan to brake at for something they can see
 const B_MAX = 7.5;        // m/s^2 they will actually use when surprised
 const GAP_MIN = 2.6;      // m of standstill gap, bumper to bumper
-const SIGNAL_PERIOD = 13; // s per phase at a signalled junction
+const SIGNAL_PERIOD = 10; // s per phase at a signalled junction
 
 export function createTraffic(world, ground, opts = {}) {
   const rnd = mulberry(opts.seed ?? ((world.seed ^ 0x7a11c5) >>> 0));
@@ -248,6 +248,15 @@ export function createTraffic(world, ground, opts = {}) {
   const bidScore = new Float32Array(maxCars);
   let bidCount = 0;
 
+  // "A car with right of way is about to come through here", stamped with the
+  // frame number so it needs no clearing pass. Through traffic announces itself
+  // this way instead of taking the claim: two cars going opposite ways along
+  // the same main road never conflict, and making them queue for one token was
+  // bringing the ring motorway to a halt.
+  const busyStamp = new Int32Array(nodes.length).fill(-1);
+  const busyEta = new Float32Array(nodes.length);   // s until it arrives
+  let frameNo = 0;
+
   function releaseClaim(car) {
     if (car.holdNode >= 0) {
       if (claimOwner[car.holdNode] === car.id) claimOwner[car.holdNode] = -1;
@@ -256,12 +265,42 @@ export function createTraffic(world, ground, opts = {}) {
     car.holdDist = 0;
   }
 
+  // Which of the two phases each approach belongs to, worked out once from the
+  // geometry of the roads themselves.
+  //
+  // Deriving it per frame from the car's own heading looked equivalent and was
+  // not: a car part-way into its turn reads as the other axis and its light
+  // changes underneath it. Worse, layout.js marks any three-way junction as
+  // signalled, including ones where every road runs the same way — and a
+  // "crossing" with only one axis goes all-red together, so nobody moves for
+  // ten seconds at a time and then everybody moves at once. Those revert to
+  // give-way, which is what they always were.
+  const edgePhase = new Int8Array(edges.length * 2);
+  const nodeSignal = new Uint8Array(nodes.length);
+  for (let i = 0; i < nodes.length; i++) {
+    const n = nodes[i];
+    if (!n.signal) continue;
+    let ref = NaN, seen = 0;
+    for (let k = 0; k < n.edges.length; k++) {
+      const e = edges[n.edges[k]];
+      const away = e.a === i ? 1 : -1;          // heading out of the node
+      endTangent(e, away, false, _h2);
+      const ang = Math.atan2(_h2.tz, _h2.tx);
+      if (Number.isNaN(ref)) ref = ang;
+      // Roads are two-way, so opposite headings are the same axis: mod pi.
+      let d = Math.abs(ang - ref) % Math.PI;
+      if (d > Math.PI / 2) d = Math.PI - d;
+      const group = d < Math.PI / 4 ? 0 : 1;
+      edgePhase[e.i * 2 + (away > 0 ? 0 : 1)] = group;
+      seen |= 1 << group;
+    }
+    nodeSignal[i] = seen === 3 ? 1 : 0;
+  }
+
   /** Green for this approach? Amber counts as red if you cannot make the line. */
-  function signalGreen(node, dNode, speed, tx, tz) {
+  function signalGreen(node, group, dNode, speed) {
     const t = time / SIGNAL_PERIOD + node.i * 0.37;
-    const phase = Math.floor(t) & 1;
-    const axis = Math.abs(tx) > Math.abs(tz) ? 1 : 0;
-    if (axis !== phase) return false;
+    if ((Math.floor(t) & 1) !== group) return false;
     const remain = (1 - (t - Math.floor(t))) * SIGNAL_PERIOD;
     return !(remain < 2.2 && dNode > speed * remain + 3);
   }
@@ -328,6 +367,11 @@ export function createTraffic(world, ground, opts = {}) {
       yaw: 0, pitch: 0, roll: 0,
       speed: 0,
       spec,
+      // The catalogue key as well as the spec itself: main.js rebuilds a spec
+      // from an id when it attaches a model, and without this every traffic car
+      // is drawn on the starter car's wheelbase, track and wheel radius — a van
+      // body on a city-car chassis, with wheels turning at the wrong rate.
+      specId: spec.id,
       body: spec.body,
       colour: spec.colour,
       braking: false,
@@ -358,6 +402,8 @@ export function createTraffic(world, ground, opts = {}) {
       holdDist: 0,
       indHold: 0,
       stuck: 0,
+      waiting: 0,
+      fused: 0,
     });
   }
 
@@ -376,7 +422,7 @@ export function createTraffic(world, ground, opts = {}) {
   }
 
   /** Places `car` at travel station `s` on `e`, already up to speed. */
-  function place(car, e, dir, s) {
+  function place(car, e, dir, s, vCap) {
     setSlot(car.route[0], e, dir);
     for (let i = 1; i < 4; i++) fillSlot(car.route[i], car.route[i - 1]);
     car.s = clamp(s, 0, car.route[0].len);
@@ -390,7 +436,7 @@ export function createTraffic(world, ground, opts = {}) {
     car.pitch = Math.atan(_pt.grade);
     car.roll = 0;
     car.y = ground.heightAt(car.x, car.z) + car.rideHeight;
-    car.speed = Math.min(e.speed * car.eager, e.speed * 0.9);
+    car.speed = Math.min(e.speed * 0.9, vCap ?? e.speed);
     car.kappa = 0;
     car.steerAngle = 0;
     car.indicator = 0;
@@ -399,6 +445,8 @@ export function createTraffic(world, ground, opts = {}) {
     car.holdNode = -1;
     car.holdDist = 0;
     car.stuck = 0;
+    car.waiting = 0;
+    car.fused = 0;
     car.active = true;
     car.respawnId++;
     active++;
@@ -468,21 +516,37 @@ export function createTraffic(world, ground, opts = {}) {
     const travel = dir > 0 ? bs : e.length - bs;
     if (travel < 6 || travel > e.length - 6) return false;
 
-    // Never inside the player's field of view, and never on top of anyone.
     const slot = probe;
     setSlot(slot, e, dir);
     laneAt(slot, travel, _pt);
     const ddx = _pt.x - px, ddz = _pt.z - pz;
     if (ddx * ddx + ddz * ddz < radius * radius * 0.24) return false;
+
+    // Arriving at the speed limit twenty metres behind a queue is a crash the
+    // new car cannot avoid, and it was the single biggest source of traffic
+    // driving through traffic. So the lane is checked in both directions and
+    // the newcomer joins at a speed that fits what is already there.
+    const sfx = _pt.tx, sfz = _pt.tz;
+    let vCap = e.speed;
     for (let i = 0; i < cars.length; i++) {
       const o = cars[i];
       if (!o.active) continue;
       const ox = o.x - _pt.x, oz = o.z - _pt.z;
-      if (ox * ox + oz * oz < 576) return false;            // 24 m of elbow room
+      const d2 = ox * ox + oz * oz;
+      if (d2 < 400) return false;                     // never materialise alongside
+      if (d2 > 25600) continue;                       // 160 m
+      const lat = ox * -sfz + oz * sfx;
+      if (lat < -3.5 || lat > 3.5) continue;
+      const fwd = ox * sfx + oz * sfz;
+      if (fwd > 0) {
+        const v = Math.sqrt(o.speed * o.speed + 8 * Math.max(0, fwd - 12));
+        if (v < vCap) vCap = v;
+      } else if (-fwd < 14 + o.speed * 1.5) return false;   // no room for the car behind
     }
+    if (vCap < 2) return false;
 
     for (let i = 0; i < cars.length; i++) {
-      if (!cars[i].active) { place(cars[i], e, dir, travel); return true; }
+      if (!cars[i].active) { place(cars[i], e, dir, travel, vCap); return true; }
     }
     return false;
   }
@@ -538,12 +602,22 @@ export function createTraffic(world, ground, opts = {}) {
     return Math.max(v0, 2.5);
   }
 
+  // Gap to the nearest thing obstacles() found, so the caller can tell "waiting
+  // behind a queue" from "waiting for no reason anyone can see", and whether
+  // this car is sharing its patch of road with another one.
+  let closestGap = Infinity;
+  let abreast = false;
+
   /** Everything ahead that this car has to not hit. */
   function obstacles(car, a0, px, pz, pSpeed, pfx, pfz) {
     let a = a0;
+    closestGap = Infinity;
+    abreast = false;
     const fx = car.fx, fz = car.fz;
     const rx = -fz, rz = fx;
     const laneHalf = Math.min(2.8, car.route[0].laneOff * 0.88);
+    // The far edge of the cone below, so it can never reach the oncoming lane.
+    const oncomingMax = car.route[0].laneOff * 1.2;
     // Interest has to reach past where this car could still stop. A fixed
     // radius is the classic way to get a motorway pile-up: at 39 m/s a car
     // needs a hundred metres, and anything shorter means it first sees the
@@ -558,33 +632,64 @@ export function createTraffic(world, ground, opts = {}) {
       const d2 = dx * dx + dz * dz;
       if (d2 > scan2) continue;
       const fwd = dx * fx + dz * fz;
+      const lat = dx * rx + dz * rz;
+
+      // Abreast. A forward-only test cannot see a car alongside, and pure
+      // pursuit is meanwhile steering both of them onto the same lane line, so
+      // two cars that merge level with each other quietly fuse. Whoever is
+      // slower drops back; ties go by id so the pair never both yield and never
+      // both hold station. The window is only as long as the overlap itself:
+      // widen it and every car in a queue emergency-brakes at the one ahead.
+      if (fwd > -3.2 && fwd < 3.2 && lat > -2.6 && lat < 2.6
+          && (o.speed > car.speed + 0.05 || (o.speed > car.speed - 0.05 && o.id < car.id))) {
+        abreast = true;
+        if (a > -3.5) a = -3.5;
+      }
+
       if (fwd <= 0.2) continue;
       const dot = o.fx * fx + o.fz * fz;
       const same = dot > 0.35;
-      if (fwd > (same ? scan : 22)) continue;
-      const lat = dx * rx + dz * rz;
-      // Cross traffic gets a narrower but unconditional corridor: a car coming
-      // through a junction sideways is still something to stop for.
-      const half = same ? laneHalf : Math.min(2.2, laneHalf);
+      if (fwd > (same ? scan : Math.min(70, 12 + car.speed * 1.8))) continue;
+      // A parallel-sided corridor only catches cars already alongside our path,
+      // which is too late for anything merging or crossing. Widening it with
+      // distance makes it a cone, so a car converging from a slip road is seen
+      // while there is still room to lift off.
+      // The cone must never reach across the centreline. The oncoming lane sits
+      // 2 * laneOff away, and on the narrow roads — rural, dirt, track, which
+      // are most of the countryside — an unbounded cone touches it at forty
+      // metres. A car coming the other way reads as closing at zero (its
+      // velocity along our heading is negative), so it is scored as a stopped
+      // obstacle and the driver stands on the brakes for traffic it was always
+      // going to pass cleanly. Growth is capped just short of the centreline;
+      // anything merging at a shallow angle is `same` and is unaffected.
+      let half = (same ? laneHalf : Math.min(2.2, laneHalf)) + fwd * 0.055;
+      if (!same && half > oncomingMax) half = oncomingMax;
       if (lat < -half || lat > half) continue;
       // Its closing speed is its velocity along OUR heading, so a car crossing
       // our path correctly reads as an obstacle standing still in front of us.
       const vl = Math.max(0, o.speed * dot);
       const g = fwd - o.halfLen - car.halfLen;
+      if (g < closestGap) closestGap = g;
       const q = follow(car, g, vl, GAP_MIN, car.timeGap);
       if (q < a) a = q;
     }
 
     // The player. Wider corridor, longer headway, bigger standstill gap: this
-    // is the one obstacle that will do something unexpected.
+    // is the one obstacle that will do something unexpected — including sitting
+    // still in the outside lane of a motorway, which is why the range is the
+    // same braking-distance one the other cars get and not a fixed number.
     const dx = px - car.x, dz = pz - car.z;
     const fwd = dx * fx + dz * fz;
-    if (fwd > -2.5 && fwd < 42) {
+    if (fwd > -2.5 && fwd < scan) {
       const lat = dx * rx + dz * rz;
       const alat = lat < 0 ? -lat : lat;
-      if (alat < 5.0) {
+      // Barely a cone: opening it further makes traffic flinch at an oncoming
+      // player two lanes over, which reads as timid rather than careful.
+      if (alat < 4.6 + fwd * 0.012) {
         const vl = Math.max(0, pSpeed * (pfx * fx + pfz * fz));
-        const q = follow(car, fwd - car.halfLen - 2.4, vl, GAP_MIN + 2.6, car.timeGap + 0.55);
+        const g = fwd - car.halfLen - 2.4;
+        if (g < closestGap) closestGap = g;
+        const q = follow(car, g, vl, GAP_MIN + 2.6, car.timeGap + 0.55);
         if (q < a) a = q;
         // Player parked across the lane, or arriving faster than the following
         // law can absorb: stand on it rather than drive through them.
@@ -605,6 +710,7 @@ export function createTraffic(world, ground, opts = {}) {
     if (!(dt > 0)) return;
     if (dt > 0.1) dt = 0.1;                // a tab that was in the background
     time += dt;
+    frameNo++;
 
     // The signature does not carry a player heading, so derive one from where
     // the player actually went. main.js may pass car.yaw as a fifth argument
@@ -633,23 +739,37 @@ export function createTraffic(world, ground, opts = {}) {
 
       if (car.holdNode >= 0) {
         claimAge[car.holdNode] += dt;
-        // Deadlock guard: a car that claimed a junction and then stopped dead
-        // (blocked by a queue on the far side) must eventually let go.
-        if (claimAge[car.holdNode] > 9 && car.speed < 0.6) releaseClaim(car);
+        // Deadlock guard: a car that reserved a junction and still has not
+        // entered it six seconds later has had its turn. A car already in the
+        // box (holdDist counting down) keeps the claim until it is out.
+        if (claimAge[car.holdNode] > 6 && car.holdDist <= 0) releaseClaim(car);
       }
 
       const slot = car.route[0];
       const node = nodes[slot.endNode];
       if (!node.stop) continue;
       const dNode = slot.len - car.s;
+
+      if (priority(slot)) {
+        // Publish how soon it arrives rather than a yes/no, so a side road can
+        // decide for itself what gap it is prepared to accept.
+        const eta = dNode / Math.max(3, car.speed);
+        if (eta < 6 && (busyStamp[node.i] !== frameNo || eta < busyEta[node.i])) {
+          busyStamp[node.i] = frameNo;
+          busyEta[node.i] = eta;
+        }
+        continue;
+      }
+      // At a signalled junction the phase already separates the two axes, so
+      // only a left turn needs the box reserved. Letting the straight-on
+      // traffic take the claim as well would starve the turners for good.
+      if (nodeSignal[node.i] && slot.turnAtEnd >= -0.5) continue;
       // Reserve early enough that the claim is settled before the driver would
       // otherwise have started braking for the line.
       if (dNode > clamp(car.speed * 3 + 15, 25, 140)) continue;
       if (claimOwner[node.i] !== -1) continue;
 
-      // A car with right of way still takes the junction, so that side roads
-      // wait for it; it simply never stops for it.
-      const score = (RANK[slot.e.kind] ?? 1) * 100 - dNode + (priority(slot) ? 10000 : 0);
+      const score = (RANK[slot.e.kind] ?? 1) * 100 - dNode;
       let seen = -1;
       for (let b = 0; b < bidCount; b++) if (bidNode[b] === node.i) { seen = b; break; }
       if (seen < 0) {
@@ -684,16 +804,40 @@ export function createTraffic(world, ground, opts = {}) {
       a = obstacles(car, a, playerX, playerZ, playerSpeed, phx, phz);
 
       const node = nodes[slot.endNode];
+      let held = false;
       if (node.stop && !priority(slot)) {
+        // The gap a driver insists on shrinks the longer they have been sat
+        // there. Without that, a side road onto a busy ring never gets a gap
+        // it considers big enough and waits until it is recycled.
+        const need = Math.max(1.2, 3.2 - car.waiting * 0.5);
+        const busy = busyStamp[node.i] === frameNo && busyEta[node.i] < need;
+        let mustStop;
+        if (nodeSignal[node.i]) {
+          const group = edgePhase[slot.e.i * 2 + (slot.dir > 0 ? 1 : 0)];
+          // On green you may go straight or turn right freely; turning left
+          // crosses oncoming traffic, so that needs the junction to yourself.
+          mustStop = !signalGreen(node, group, dNode, car.speed) || busy
+            || (slot.turnAtEnd < -0.5 && claimOwner[node.i] !== car.id);
+        } else {
+          mustStop = busy || claimOwner[node.i] !== car.id;
+        }
+
         const stopLine = dNode - (slot.e.width * 0.5 + 2.0);
-        const mustStop = node.signal
-          ? !signalGreen(node, dNode, car.speed, car.fx, car.fz)
-          : claimOwner[node.i] !== car.id;
         if (mustStop && stopLine > -2) {
+          held = true;
           const q = follow(car, stopLine, 0, 0.6, 0.7);
           if (q < a) a = q;
         }
       }
+
+      // Nose out. Two cars can each be the only reason the other never moves,
+      // and a give-way that nobody ever releases is a permanent roadblock in
+      // the middle of the city. A driver who has sat still for six seconds with
+      // fourteen clear metres in front starts to creep, which breaks the
+      // standoff without anyone driving through anyone. Being held at a light
+      // or waiting for a main road is not a standoff, so those are exempt.
+      car.waiting = car.speed < 0.5 ? car.waiting + dt : 0;
+      if (car.waiting > 6 && closestGap > 14 && !held && a < 0.5) a = 0.5;
 
       if (a > car.accel) a = car.accel;
       if (a < -B_MAX) a = -B_MAX;
@@ -731,9 +875,22 @@ export function createTraffic(world, ground, opts = {}) {
       routeAt(car, 0, _sta);
       const ex = _sta.x - car.x, ez = _sta.z - car.z;
       const el = clamp(ex * _sta.tx + ez * _sta.tz, -8, 8);
-      let ds = car.speed - el * 1.8;
+      // A car thrown wide — by a junction sharper than its steering, or by
+      // giving way to someone alongside — converges on a target standing still
+      // far faster than on one walking away from it, so the station waits.
+      const err2 = ex * ex + ez * ez;
+      let ds = err2 > 324 ? 0 : car.speed - el * 1.8;
       if (ds < 0) ds = 0;
       car.s += ds * dt;
+      // The station must never cross a junction ahead of the car it belongs to.
+      // Through a corner the car makes less progress along the road than along
+      // its own heading, and the longitudinal error goes blind exactly then,
+      // because the road's tangent has swung away from the car. Left alone the
+      // station strolls onto the next road and the car spends the whole corner
+      // chasing a lane it is nowhere near. Straight-line distance cannot be
+      // fooled that way, so it holds the station at the junction until the car
+      // has caught up with it.
+      if (err2 > 36 && car.s > car.route[0].len) car.s = car.route[0].len;
 
       let guard = 0;
       while (car.s >= car.route[0].len && guard++ < 4) {
@@ -746,11 +903,13 @@ export function createTraffic(world, ground, opts = {}) {
         if (car.holdNode === crossed.endNode) {
           car.holdDist = crossed.e.width * 0.6 + car.halfLen * 2 + 4;
         }
-        const recycled = car.route[0];
+        // Rotate the window by moving references, not contents: the slot that
+        // falls off the front is the one refilled at the back, so a junction
+        // costs one road choice and no allocation.
         car.route[0] = car.route[1];
         car.route[1] = car.route[2];
         car.route[2] = car.route[3];
-        car.route[3] = recycled;
+        car.route[3] = crossed;
         fillSlot(car.route[3], car.route[2]);
       }
 
@@ -784,8 +943,15 @@ export function createTraffic(world, ground, opts = {}) {
       // so far off its lane that pure pursuit will never recover it.
       const pdx = car.x - playerX, pdz = car.z - playerZ;
       car.stuck = Math.max(0, car.stuck + (car.speed < 0.4 ? dt : -dt * 3));
+      // Dropping back separates two cars that have ended up sharing a patch of
+      // road — unless both are already stationary, in which case nothing can:
+      // there is no reverse gear here and neither is the one holding up the
+      // queue. Recycling the yielder is the only way out, and a few seconds is
+      // long enough to be sure the pair is not simply passing.
+      car.fused = abreast && car.speed < 0.6 ? car.fused + dt : 0;
       const off = (car.x - _sta.x) * (car.x - _sta.x) + (car.z - _sta.z) * (car.z - _sta.z);
-      if (pdx * pdx + pdz * pdz > despawnR * despawnR || car.stuck > 25 || off > 900) {
+      if (pdx * pdx + pdz * pdz > despawnR * despawnR || car.stuck > 25
+          || car.fused > 4 || off > 900) {
         despawn(car);
       }
     }

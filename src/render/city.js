@@ -25,7 +25,7 @@
 // covers (in metres), the repeat is rounded to whole windows so nothing is cut
 // in half at a corner, and the vertex shader picks the right pair of counts for
 // the face it is on. Windows are therefore the same size everywhere, and the
-// whole city is 22 draw calls.
+// whole city is 23 draw calls.
 //
 // Night is the same trick again. The emissive map does not store "lit", it
 // stores a per-window random KEY, and the shader lights a window when the key
@@ -82,12 +82,12 @@ const REFRESH_MOVE = 26;
 
 // Invented, every one of them. No real trader's name appears in this city.
 const SHOP_NAMES = [
-  'MARLOWE & SONS', 'TIDEWATER COFFEE', 'PELLINGTON BOOKS', 'HALCROW GROCER',
+  'MARLOWE & SONS', 'TIDEWATER COFFEE', 'PELLINGTON BOOKS', 'BRACKENFORD GROCER',
   'NORTHVANE PHARMACY', 'SABLE & FERN', 'CRESSET HARDWARE', 'OKONJO BAKERY',
   'VELLA LAUNDRY', 'GRIMSBRO RECORDS', 'AMBERLING DELI', 'QUINTARO NOODLES',
   'FOXWORTH TAILORS', 'BRINDLE OPTICAL', 'LANTERNWAY DINER', 'HOLLOWAY FLORIST',
   'CINDERHILL PIZZA', 'MORROWGATE BANK', 'DUSKWATER TEA', 'ARBENTINE SHOES',
-  'KETTLEMARK PRINT', 'SEVERIN CYCLES', 'PADDOCK & VANE', 'WREXHOLM SUPPLY',
+  'KETTLEMARK PRINT', 'CASTERWAY CYCLES', 'PADDOCK & VANE', 'WREXHOLM SUPPLY',
 ];
 
 // Tinted textures are drawn light so the per-instance colour supplies the hue
@@ -96,7 +96,7 @@ const HOUSE_PAINT = [
   0xe9e3d6, 0xd8ccb4, 0xc7d2cd, 0xe0c9a8, 0xbfc9d4,
   0xd3bfae, 0xcbd6c4, 0xefe6e0, 0xb9a894, 0xdfd2c0,
 ];
-const ROOF_PAINT = [0x8a6350, 0x9a7358, 0x625f5c, 0x776c66, 0xa8705237 & 0xffffff, 0x53585c];
+const ROOF_PAINT = [0x8a6350, 0x9a7358, 0x625f5c, 0x776c66, 0xa87052, 0x53585c];
 const WARE_PAINT = [0xb9bec4, 0xa7b2b8, 0xc2c0b6, 0x9aa6ae, 0xb0aca2, 0x8f9aa2];
 const TRIM_TINT = [0xd8d5cf, 0xcfccc6, 0xc4c2bd, 0xdedbd4];
 const GLASS_TINT = [0xffffff, 0xe8f0f4, 0xf4ece0, 0xdfe8ee];
@@ -302,7 +302,10 @@ function towerFacade(v, rnd, aniso) {
   return texture(ctx, true, aniso);
 }
 
-function towerWindows(v, rnd, aniso) {
+// The window maps do not vary with the glass variant — the pattern of lit
+// offices has nothing to do with what colour the glazing is — so each call just
+// draws a fresh arrangement from the shared sequence.
+function towerWindows(rnd, aniso) {
   const T = TILE.tower, cols = 8, rows = 6;
   const ctx = tileCtx(512, 512, T.u, T.v);
   const cw = T.u / cols, ch = T.v / rows;
@@ -377,7 +380,7 @@ function blockFacade(v, rnd, aniso) {
   return texture(ctx, true, aniso);
 }
 
-function blockWindows(v, rnd, aniso) {
+function blockWindows(rnd, aniso) {
   const T = TILE.block, bays = 4, floors = 4;
   const ctx = tileCtx(512, 512, T.u, T.v);
   const bw = T.u / bays, fh = T.v / floors;
@@ -403,7 +406,10 @@ function shopFacade(v, rnd, aniso) {
   const sx = pxW / T.u, sy = pxH / T.v;
   const sw = T.u / shops;
 
-  ctx.fillStyle = '#3b3a37';
+  // Variant 0 is a painted timber parade, variant 1 anodised metal with a
+  // canopy — enough difference that two of them next to each other read as two
+  // different terraces rather than one repeated asset.
+  ctx.fillStyle = v === 0 ? '#3b3a37' : '#54585c';
   ctx.fillRect(0, 0, T.u, T.v);
 
   for (let i = 0; i < shops; i++) {
@@ -435,6 +441,12 @@ function shopFacade(v, rnd, aniso) {
     ctx.fillRect(x + 0.05, 3.1, sw - 0.10, T.v - 3.1);
     ctx.fillStyle = 'rgba(0,0,0,0.35)';
     ctx.fillRect(x + 0.05, 3.02, sw - 0.10, 0.12);           // shadow under it
+    if (v === 1) {                                           // canopy
+      ctx.fillStyle = shade(accent, 1.5);
+      ctx.fillRect(x + 0.05, 2.86, sw - 0.10, 0.2);
+      ctx.fillStyle = 'rgba(0,0,0,0.28)';
+      ctx.fillRect(x + 0.05, 2.6, sw - 0.10, 0.26);
+    }
     label(ctx, name, x + sw / 2, 3.75, sw - 0.5, 0.52, '#f3efe6', sx, sy);
 
     ctx.fillStyle = 'rgba(0,0,0,0.5)';                       // party mullion
@@ -444,7 +456,7 @@ function shopFacade(v, rnd, aniso) {
   return texture(ctx, true, aniso);
 }
 
-function shopWindows(v, rnd, aniso) {
+function shopWindows(rnd, aniso) {
   const T = TILE.shop, shops = 3;
   const ctx = tileCtx(512, 256, T.u, T.v);
   const sw = T.u / shops;
@@ -508,7 +520,7 @@ function houseWall(v, rnd, aniso) {
   return texture(ctx, true, aniso);
 }
 
-function houseWindows(v, rnd, aniso) {
+function houseWindows(rnd, aniso) {
   const T = TILE.house, bays = 2, floors = 2;
   const ctx = tileCtx(256, 192, T.u, T.v);
   const bw = T.u / bays, fh = T.v / floors;
@@ -796,7 +808,6 @@ export function createCity(world, ground, opts = {}) {
   const shells = buildShells();
   const group = new THREE.Group();
   group.name = 'city';
-  group.matrixAutoUpdate = false;
 
   const maxAniso = opts.maxAnisotropy ?? 8;
   let tier = QUALITY[opts.quality] ? opts.quality : 'high';
@@ -814,13 +825,13 @@ export function createCity(world, ground, opts = {}) {
   const keep = (t) => { textures.push(t); return t; };
 
   const towerMap = [0, 1, 2].map((v) => keep(towerFacade(v, trnd, aniso)));
-  const towerWin = [0, 1, 2].map((v) => keep(towerWindows(v, trnd, aniso)));
+  const towerWin = [0, 1, 2].map(() => keep(towerWindows(trnd, aniso)));
   const blockMap = [0, 1, 2].map((v) => keep(blockFacade(v, trnd, aniso)));
-  const blockWin = [0, 1, 2].map((v) => keep(blockWindows(v, trnd, aniso)));
+  const blockWin = [0, 1, 2].map(() => keep(blockWindows(trnd, aniso)));
   const shopMap = [0, 1].map((v) => keep(shopFacade(v, trnd, aniso)));
-  const shopWin = [0, 1].map((v) => keep(shopWindows(v, trnd, aniso)));
+  const shopWin = [0, 1].map(() => keep(shopWindows(trnd, aniso)));
   const houseMap = [0, 1].map((v) => keep(houseWall(v, trnd, aniso)));
-  const houseWin = [0, 1].map((v) => keep(houseWindows(v, trnd, aniso)));
+  const houseWin = [0, 1].map(() => keep(houseWindows(trnd, aniso)));
   const wareMap = [0, 1].map((v) => keep(wareWall(v, trnd, aniso)));
   const gableMap = keep(gableSkin(trnd, aniso));
   const tilesMap = keep(roofTiles(trnd, aniso));
@@ -1006,12 +1017,15 @@ export function createCity(world, ground, opts = {}) {
     put(pBlock[v], 0, shopH + wallH / 2, 0, 0, w, wallH, d, tint,
       rep4(reps(w, T.u), reps(d, T.u), reps(wallH, T.v), 1), occ, CULL.block);
 
-    // Cornice, standing 0.35 m proud of the deck so it reads as a parapet.
+    // Cornice: a hollow band projecting 0.4 m past the wall, which is what
+    // reads as a parapet from a car.
     put(pTrim, 0, h - 0.1, 0, 0, w + 0.8, 0.9, d + 0.8, trim,
       rep4(reps(w, TILE.trim.u), reps(d, TILE.trim.u), 1, 1), 0, CULL.block);
-    put(pTrimCap, 0, h + 0.35, 0, 0, w + 0.8, 1, d + 0.8, trim,
-      rep4(1, 1, 1, reps(Math.min(w, d), TILE.trim.u)), 0, CULL.block);
-    put(pFlat, 0, h - 0.2, 0, 0, w, 1, d, 0xffffff,
+    // The roof deck closes the top of that band. It has to BE the top: `cap` is
+    // a full quad, not a ring, so the trim lid that used to sit at h + 0.35
+    // buried the ballast deck 0.55 m underneath it — every midtown roof read as
+    // a blank pale slab and 149 flat-roof instances drew for nothing.
+    put(pFlat, 0, h + 0.35, 0, 0, w + 0.8, 1, d + 0.8, 0xffffff,
       rep4(1, 1, 1, reps(Math.min(w, d), TILE.flat.u)), 0, CULL.block);
   }
 
@@ -1051,16 +1065,19 @@ export function createCity(world, ground, opts = {}) {
       oz * (out + away) + (sideways ? along : 0)];
     const boxScale = (across, deep) => (sideways ? [deep, across] : [across, deep]);
 
-    if (front > 10.5 && rnd() < 0.62) {
+    const garage = front > 10.5 && rnd() < 0.62;
+    if (garage) {
+      // Half-buried in the house, so it only projects as far as the front
+      // garden and never over the kerb.
       const gw = 3.5, gd = 4.8, gh = 2.65;
       const along = (front / 2 - gw / 2 - 0.5) * (rnd() < 0.5 ? -1 : 1);
-      const [gx, gz] = at(along, gd * 0.34);
+      const [gx, gz] = at(along, gd * 0.22);
       const [sx, sz] = boxScale(gw, gd);
       put(pHouse[v], gx, gh / 2, gz, 0, sx, gh, sz, paint,
         rep4(reps(sx, T.u), reps(sz, T.u), 1, 1), 0, CULL.house);
       put(pTrimCap, gx, gh, gz, 0, sx + 0.35, 1, sz + 0.35, trim,
         rep4(1, 1, 1, 1), 0, CULL.house);
-      const [dx, dz] = at(along, gd * 0.84 + 0.03);
+      const [dx, dz] = at(along, gd * 0.72 + 0.03);
       put(pPanel, dx, (gh - 0.3) / 2, dz, yaw, gw - 0.5, gh - 0.3, 1, 0xdadad4,
         rep4(1, 1, 1, 1), 0, CULL.detail);
     }
@@ -1077,7 +1094,9 @@ export function createCity(world, ground, opts = {}) {
     put(pPanel, fx, 1.05, fz, yaw, 1.05, 2.1, 1, HOUSE_PAINT[(rnd() * 4) | 0],
       rep4(1, 1, 1, 1), 0, CULL.detail);
 
-    if (rnd() < 0.7) {
+    // Garden wall only where there is no garage: the two occupy the same strip
+    // of front garden, and a wall crossing a garage door looks like a mistake.
+    if (!garage && rnd() < 0.7) {
       const [wx, wz] = at(0, 3.4);
       const [wsx, wsz] = boxScale(front + 1.6, 0.3);
       put(pTrim, wx, 0.28, wz, 0, wsx, 0.56, wsz, trim,

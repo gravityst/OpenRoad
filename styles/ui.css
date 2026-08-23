@@ -277,11 +277,14 @@
 
 /* ---- garage ------------------------------------------------------------ */
 
+/* minmax(0, 1fr) rather than 1fr: a 1fr track floors at its content's
+   min-content width, and the horizontally scrolling car list has a very wide
+   one, so a plain 1fr pushes the whole garage off the side of a phone. */
 .or-garage-grid {
   flex: 1 1 auto;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(220px, 270px) 1fr minmax(280px, 340px);
+  grid-template-columns: minmax(220px, 270px) minmax(0, 1fr) minmax(280px, 340px);
   grid-template-areas: "list stage spec";
   gap: clamp(12px, 1.6vw, 22px);
 }
@@ -289,7 +292,7 @@
 /* Deliberately empty: the 3D car goes here, and stageRect() reports it. */
 .or-stage { grid-area: stage; pointer-events: none; }
 
-.or-carlist-wrap { grid-area: list; overflow: hidden; padding: 8px; }
+.or-carlist-wrap { grid-area: list; min-width: 0; overflow: hidden; padding: 8px; }
 .or-carlist {
   height: 100%;
   overflow-y: auto;
@@ -358,6 +361,7 @@
 
 .or-spec {
   grid-area: spec;
+  min-width: 0;
   padding: clamp(16px, 1.8vw, 24px);
   overflow-y: auto;
   display: flex;
@@ -538,6 +542,10 @@
   padding-right: 4px;
   scrollbar-width: thin;
   scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
+  /* Fades the cut edge, so a group sliced off at the bottom reads as "there is
+     more below" rather than as a clipping bug. */
+  mask-image: linear-gradient(to bottom, transparent 0, #000 14px,
+                              #000 calc(100% - 22px), transparent 100%);
 }
 .or-groups::-webkit-scrollbar { width: 6px; }
 .or-groups::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.18); border-radius: 3px; }
@@ -551,9 +559,12 @@
   text-transform: uppercase;
   color: var(--or-amber);
 }
+/* 300px is what the widest segmented control (five weather options) needs to
+   stay on one line; below that "Fog" wraps onto a row of its own and the
+   control stops reading as a single switch. */
 .or-row {
   display: grid;
-  grid-template-columns: 1fr minmax(180px, 260px);
+  grid-template-columns: 1fr minmax(180px, 300px);
   align-items: center;
   gap: 16px;
   padding: 11px 0;
@@ -651,9 +662,9 @@
 .or-seg input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 .or-seg-item {
   flex: 1 1 auto;
-  padding: 7px 11px;
+  padding: 7px 8px;
   border-radius: 7px;
-  font-size: 0.74rem;
+  font-size: 0.73rem;
   font-weight: 600;
   letter-spacing: 0.06em;
   text-align: center;
@@ -753,7 +764,7 @@
 
 @media (max-width: 900px) {
   .or-garage-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(90px, 1fr) auto auto;
     grid-template-areas: "stage" "spec" "list";
   }
@@ -770,6 +781,9 @@
   .or-row { grid-template-columns: 1fr; gap: 10px; }
   .or-control { justify-content: flex-start; }
   .or-seg { width: 100%; }
+  /* Portrait has height to spare and none to waste sideways, so the map is
+     sized from its width here instead of from the leftover column height. */
+  .or-map-frame { flex: 0 1 auto; width: 100%; margin-block: auto; }
 }
 
 @media (max-width: 560px) {
@@ -780,11 +794,14 @@
   .or-map-foot .or-hint { display: none; }
 }
 
-/* Coarse pointers get bigger targets; there is no hover to lean on. */
+/* Coarse pointers get bigger targets; there is no hover to lean on. And no
+   keyboard, so the key hints are just clutter taking up a row. */
 @media (any-pointer: coarse) {
   .or-btn { min-height: 52px; }
   .or-swatch { width: 36px; height: 36px; }
   .or-car { min-height: 60px; }
+  .or-title-foot,
+  .or-garage-foot .or-hint { display: none; }
 }
 
 /* ---- reduced motion ---------------------------------------------------- */

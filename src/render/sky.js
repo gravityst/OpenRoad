@@ -71,10 +71,12 @@ const BETA_R = [0.0465, 0.1082, 0.2650];
 const BETA_M = [0.0050, 0.0054, 0.0058];
 const MIE_G = 0.76;          // Henyey-Greenstein asymmetry: strongly forward
 const ATMO_R = 758.0;        // Earth radius / atmospheric scale height
-// Very long sun paths are softened toward this knee. Untouched, the sunset sky
-// loses green entirely and goes a flat monochrome red.
-const SUN_PATH_KNEE = 34.0;
-// Above this, a straight-up view stops seeing any extra sun path at all.
+// Sun paths longer than this are where single scattering starts to lie, so
+// their growth is softened. The softening still has to DIVERGE: the first
+// version of this used m/(1+m/K), which asymptotes, and the consequence was a
+// sun that never finished setting and a midnight sky the colour of a sunset.
+const SUN_PATH_KNEE = 12.0;
+// The sun path seen by the high-altitude air a straight-up view looks through.
 const HIGH_PATH = 2.2;
 // Multiple scattering is bluish-white; it is what survives after the direct
 // beam has been reddened away.
@@ -89,6 +91,11 @@ const MS_TINT = [0.19, 0.33, 0.62];
 function airMass(cosZ) {
   const s2 = Math.max(0, 1 - cosZ * cosZ);
   return Math.sqrt((ATMO_R + 1) * (ATMO_R + 1) - ATMO_R * ATMO_R * s2) - ATMO_R * cosZ;
+}
+
+/** Air mass with long paths compressed. Linear near zero, sqrt-slow far out. */
+function softPath(m) {
+  return SUN_PATH_KNEE * (Math.sqrt(1 + (2 * m) / SUN_PATH_KNEE) - 1);
 }
 
 /**
@@ -107,10 +114,26 @@ export function skyRadiance(out, dx, dy, dz, sx, sy, sz, turbidity, sunI, ms) {
   const phaseM = (1 - g * g) / (hg * Math.sqrt(hg));         // 4pi * HG/(4pi)
 
   const viewMass = airMass(dy);
-  const rawSun = airMass(sy);
-  const softSun = rawSun / (1 + rawSun / SUN_PATH_KNEE);
+  const softSun = softPath(airMass(sy));
   const lift = clamp(dy, 0, 1);
+  // High air is still in sunlight for a few degrees after ground level has lost
+  // it, and that lag IS twilight. So a steep view gets the short, barely
+  // reddened sun path — but only in proportion to how much of the column above
+  // it is still lit, and that proportion is what has to fall to zero, not the
+  // path length. Stretching the path instead (the first attempt) turns the
+  // zenith through brown on its way to black, because differential extinction
+  // always goes warm before it goes dark.
+  //
+  // The shortening is therefore keyed on `lift` ALONE and never on `twilight`.
+  // Fading both together was the remaining half of that same bug: it leaves the
+  // zenith lit by a long, reddened path right through civil twilight, and a
+  // reddened beam times a blue-weighted in-scatter is neutral. The zenith went
+  // to #1E1D22 — flat grey — at a sun elevation of -5 degrees, which is exactly
+  // the mush this whole model exists to avoid. Only `lit` falls to zero, and
+  // day and full night are bit-identical either way.
+  const twilight = smoothstep(-0.26, 0.02, sy);
   const sunPath = lerp(softSun, Math.min(softSun, HIGH_PATH), lift * lift);
+  const lit = lerp(1, twilight, lift * lift);
   const msLift = 0.35 + 0.65 * lift;
 
   for (let c = 0; c < 3; c++) {
@@ -119,8 +142,12 @@ export function skyRadiance(out, dx, dy, dz, sx, sy, sz, turbidity, sunI, ms) {
     const total = bR + bM;
     const trans = 1 - Math.exp(-total * viewMass);           // 1 - view transmittance
     const inScatter = ((bR * phaseR + bM * phaseM) / total) * trans;
-    const sunAtten = Math.exp(-total * sunPath);
-    const v = sunI * (inScatter * sunAtten + MS_TINT[c] * ms * msLift * trans);
+    const sunAtten = Math.exp(-total * sunPath) * lit;
+    // Multiple-scattered light is the same sunlight and reddens with it, just
+    // far more gently for having taken many shorter paths. Without the tilt,
+    // the sky 30 degrees above a rising sun comes out grey instead of peach.
+    const msAtten = Math.pow(sunAtten, 0.18);
+    const v = sunI * (inScatter * sunAtten + MS_TINT[c] * ms * msLift * trans * msAtten);
     if (c === 0) out.r = v; else if (c === 1) out.g = v; else out.b = v;
   }
   return out;
@@ -141,8 +168,7 @@ function addNightFloor(out, dy, night) {
 
 /** Direct sunlight transmittance at the sun's elevation, into `out`. */
 function sunTransmittance(out, sy, turbidity) {
-  const m = airMass(sy);
-  const soft = m / (1 + m / SUN_PATH_KNEE);
+  const soft = softPath(airMass(sy));
   out.r = Math.exp(-(BETA_R[0] + BETA_M[0] * turbidity) * soft);
   out.g = Math.exp(-(BETA_R[1] + BETA_M[1] * turbidity) * soft);
   out.b = Math.exp(-(BETA_R[2] + BETA_M[2] * turbidity) * soft);
@@ -246,7 +272,7 @@ const vec3 BETA_R = vec3(0.0465, 0.1082, 0.2650);
 const vec3 BETA_M = vec3(0.0050, 0.0054, 0.0058);
 const float MIE_G = 0.76;
 const float ATMO_R = 758.0;
-const float SUN_PATH_KNEE = 34.0;
+const float SUN_PATH_KNEE = 12.0;
 const float HIGH_PATH = 2.2;
 const vec3 MS_TINT = vec3(0.19, 0.33, 0.62);
 // Angular radius of the moon disc. Life size is 0.0045 rad, which reads as a
@@ -258,6 +284,12 @@ const float MOON_R = 0.016;
 float airMass(float cosZ) {
   float s2 = max(0.0, 1.0 - cosZ * cosZ);
   return sqrt((ATMO_R + 1.0) * (ATMO_R + 1.0) - ATMO_R * ATMO_R * s2) - ATMO_R * cosZ;
+}
+
+// Long paths compressed: linear near zero, sqrt-slow far out. It has to keep
+// growing, or the sun never finishes setting.
+float softPath(float m) {
+  return SUN_PATH_KNEE * (sqrt(1.0 + 2.0 * m / SUN_PATH_KNEE) - 1.0);
 }
 
 float hash13(vec3 p) {
@@ -328,19 +360,28 @@ void main() {
   vec3 betaM = BETA_M * uTurbidity;
   vec3 total = BETA_R + betaM;
 
-  float rawSun = airMass(uSunDir.y);
-  float softSun = rawSun / (1.0 + rawSun / SUN_PATH_KNEE);
+  float softSun = softPath(airMass(uSunDir.y));
   float lift = clamp(dir.y, 0.0, 1.0);
   // Scattering along a steep ray happens high up, where the sun's slant path is
   // still short; along a shallow ray it happens at ground level, at the end of
   // the full reddened crossing. One sun path for the whole sky would turn
-  // sunset uniformly orange instead of leaving the zenith blue.
+  // sunset uniformly orange instead of leaving the zenith blue. High air stays
+  // lit for a few degrees after the ground loses the sun — that lag is
+  // twilight — so what fades at dusk is how much of the column is still lit,
+  // not the length of the path through it. So lift alone weights the shortening:
+  // fading it by twilight as well leaves the zenith on a long reddened path all
+  // through civil twilight, and reddened light times a blue-weighted in-scatter
+  // is flat grey. Kept in step with skyRadiance() above.
+  float twilight = smoothstep(-0.26, 0.02, uSunDir.y);
   float sunPath = mix(softSun, min(softSun, HIGH_PATH), lift * lift);
 
   vec3 trans = 1.0 - exp(-total * airMass(dir.y));
   vec3 inScatter = ((BETA_R * phaseR + betaM * phaseM) / total) * trans;
-  vec3 sunAtten = exp(-total * sunPath);
-  vec3 col = uSunI * (inScatter * sunAtten + MS_TINT * uMs * (0.35 + 0.65 * lift) * trans);
+  vec3 sunAtten = exp(-total * sunPath) * mix(1.0, twilight, lift * lift);
+  // Multiple-scattered light reddens with the direct beam, just far more
+  // gently; untilted, the sky above a rising sun comes out grey, not peach.
+  vec3 col = uSunI * (inScatter * sunAtten
+    + MS_TINT * uMs * (0.35 + 0.65 * lift) * trans * pow(sunAtten, vec3(0.18)));
 
   // ---- night floor, stars, milky way, moon --------------------------------
   if (uNight > 0.002) {
@@ -402,12 +443,16 @@ void main() {
   // mip level the far deck depends on would be garbage. The fade is a
   // multiply. High deck first — it is above the low one, so it is behind it.
   float above = smoothstep(0.02, 0.075, dir.y);
+  // Scaled into uv BEFORE the long multiply: a grazing ray reaches 80 km out,
+  // and 80000 metres carried in a float has metre-scale error left in it.
   float ray = 1.0 / max(dir.y, 0.012);
-  vec2 hi = deck((uCamXZ + dir.xz * (3400.0 * ray)) / 6500.0 + uDrift.xy, uCover.x, 1.0);
+  vec2 hi = deck(uCamXZ * (1.0 / 6500.0) + dir.xz * (3400.0 / 6500.0 * ray) + uDrift.xy,
+                 uCover.x, 1.0);
   col = mix(col, shadeDeck(hi, mu, uCloudLit * 1.14, uCloudDark * 1.3, uShade * 0.55),
             hi.x * uOpacity.x * above);
 
-  vec2 lo = deck((uCamXZ + dir.xz * (950.0 * ray)) / 2200.0 + uDrift.zw, uCover.y, 0.0);
+  vec2 lo = deck(uCamXZ * (1.0 / 2200.0) + dir.xz * (950.0 / 2200.0 * ray) + uDrift.zw,
+                 uCover.y, 0.0);
   col = mix(col, shadeDeck(lo, mu, uCloudLit, uCloudDark, uShade),
             lo.x * uOpacity.y * above);
 
@@ -497,7 +542,11 @@ function makeCloudTexture(size, seed, anisotropy) {
   // its mean, so without this a coverage threshold of 0.8 selects nothing at
   // all and one of 0.2 selects everything — the weather presets would have no
   // usable range to work in.
-  const scale = [255 / (hi[0] - lo[0]), 255 / (hi[1] - lo[1]), 255 / (hi[2] - lo[2])];
+  const scale = [
+    255 / Math.max(1e-6, hi[0] - lo[0]),
+    255 / Math.max(1e-6, hi[1] - lo[1]),
+    255 / Math.max(1e-6, hi[2] - lo[2]),
+  ];
   for (let i = 0, p = 0, q = 0; i < n; i++, p += 3, q += 4) {
     data[q] = (field[p] - lo[0]) * scale[0];
     data[q + 1] = (field[p + 1] - lo[1]) * scale[1];
@@ -515,7 +564,6 @@ function makeCloudTexture(size, seed, anisotropy) {
   // Noise, not colour. Letting three sRGB-decode it would bend the coverage
   // threshold into the wrong part of the curve.
   tex.colorSpace = THREE.NoColorSpace;
-  tex.needsUpdate = true;
   return tex;
 }
 
@@ -527,7 +575,6 @@ function makeCloudTexture(size, seed, anisotropy) {
 const _v = new THREE.Vector3();
 const _right = new THREE.Vector3();
 const _up = new THREE.Vector3();
-const _axis = new THREE.Vector3();
 const _m4 = new THREE.Matrix4();
 const _zenith = { r: 0, g: 0, b: 0 };
 const _horizon = { r: 0, g: 0, b: 0 };
@@ -569,7 +616,7 @@ export function createSky(scene, renderer, opts = {}) {
   const moonLag = opts.moonLag ?? 11.0;
   const moonDec = -(opts.declination ?? 12) * DEG;
 
-  const skyBrightness = opts.skyBrightness ?? 3.0;
+  const skyBrightness = opts.skyBrightness ?? 2.0;
   const sunPeak = opts.sunIntensity ?? 3.2;
   const moonPeak = opts.moonIntensity ?? 0.16;
   const hemiPeak = opts.ambientIntensity ?? 1.15;
@@ -624,7 +671,11 @@ export function createSky(scene, renderer, opts = {}) {
     depthTest: false,
     fog: false,
   });
-  const geometry = new THREE.BoxGeometry(20, 20, 20);
+  // Size is irrelevant while update() re-centres this on the camera each frame,
+  // which is the contract — but making it larger than the world costs nothing
+  // and means a caller who forgets to pass cameraPos gets a slightly skewed sky
+  // rather than finding themselves outside the box looking at its far wall.
+  const geometry = new THREE.BoxGeometry(200000, 200000, 200000);
   const mesh = new THREE.Mesh(geometry, material);
   mesh.frustumCulled = false;
   mesh.renderOrder = -1000;
@@ -671,6 +722,10 @@ export function createSky(scene, renderer, opts = {}) {
   let driftX0 = 0, driftY0 = 0, driftX1 = 0, driftY1 = 0;
   let fogX = 0, fogZ = -1;
 
+  // The celestial pole: due north, at an altitude equal to the latitude. Fixed
+  // for the life of the sky, so it is built once rather than every frame.
+  const poleAxis = new THREE.Vector3(0, Math.sin(latRad), -Math.cos(latRad));
+
   const state = {
     nightFactor: 0,
     fogColour: new THREE.Color(),
@@ -715,7 +770,10 @@ export function createSky(scene, renderer, opts = {}) {
 
   function update(dt, cameraPos, cameraDir) {
     const step = Math.min(0.1, Math.max(0, dt));
-    elapsed += step;
+    // Only the star twinkle reads this, and a phase jump in twinkle is by
+    // definition invisible, so wrapping it costs nothing and keeps sin() out of
+    // the range where a float32 argument has lost its low bits.
+    elapsed = (elapsed + step) % 1024;
     if (dayLength > 0) setTime(hours + (step * 24) / dayLength);
 
     // ---- weather blend ----------------------------------------------------
@@ -764,17 +822,19 @@ export function createSky(scene, renderer, opts = {}) {
     uniforms.uMoonRight.value.copy(_right);
     uniforms.uMoonUp.value.copy(_up);
 
-    // Stars wheel about the celestial pole, which sits due north at an altitude
-    // equal to the latitude. 15 degrees an hour, the same clock as the sun.
-    _axis.set(0, Math.sin(latRad), -Math.cos(latRad)).normalize();
-    _m4.makeRotationAxis(_axis, (hours / 24) * TAU);
+    // Stars wheel about the pole at 15 degrees an hour, the same clock the sun
+    // keeps, so the night sky turns instead of hanging there like wallpaper.
+    _m4.makeRotationAxis(poleAxis, (hours / 24) * TAU);
     uniforms.uStarRot.value.setFromMatrix4(_m4);
 
     // ---- clouds -----------------------------------------------------------
-    driftX0 += windX * step * 0.0016;
-    driftY0 += windZ * step * 0.0016;
-    driftX1 += windX * step * 0.0009;
-    driftY1 += windZ * step * 0.0009;
+    // Wrapped to one tile: the texture repeats anyway, and an accumulator left
+    // to grow all session eventually loses enough float precision to make the
+    // clouds visibly stutter.
+    driftX0 = (driftX0 + windX * step * 0.0016) % 1;
+    driftY0 = (driftY0 + windZ * step * 0.0016) % 1;
+    driftX1 = (driftX1 + windX * step * 0.0009) % 1;
+    driftY1 = (driftY1 + windZ * step * 0.0009) % 1;
     uniforms.uDrift.value.set(driftX0, driftY0, driftX1, driftY1);
     uniforms.uCover.value.set(now.coverHi, now.coverLo);
     uniforms.uOpacity.value.set(now.opacityHi, now.opacityLo);
@@ -802,10 +862,13 @@ export function createSky(scene, renderer, opts = {}) {
     // Cloud tops take direct sun, bases take sky. Both from the atmosphere
     // above, which is the whole reason sunset clouds come out pink.
     const litGain = 2.1 * lerp(0.35, 1, daylight) + 0.10;
+    // Cloud tops still catch the moon. Without this term a cloudy night is a
+    // hole in the star field rather than cloud.
+    const moonLit = uniforms.uMoonBright.value * night * 0.030;
     uniforms.uCloudLit.value.set(
-      _trans.r * litGain + _zenith.r * 0.85,
-      _trans.g * litGain + _zenith.g * 0.85,
-      _trans.b * litGain + _zenith.b * 0.85,
+      _trans.r * litGain + _zenith.r * 0.85 + moonLit * 0.88,
+      _trans.g * litGain + _zenith.g * 0.85 + moonLit * 0.94,
+      _trans.b * litGain + _zenith.b * 0.85 + moonLit,
     );
     const darkGain = lerp(0.75, 0.42, now.shade);
     uniforms.uCloudDark.value.set(
@@ -837,28 +900,40 @@ export function createSky(scene, renderer, opts = {}) {
     // The one directional light follows the sun by day and the moon by night.
     // Both ramps reach zero at the same sun elevation, so the handover happens
     // while the light contributes nothing and cannot be seen.
-    const lunar = (1 - smoothstep(-0.20, -0.09, sy)) * smoothstep(-0.03, 0.16, state.moonDir.y);
+    const lunarRamp = 1 - smoothstep(-0.20, -0.09, sy);
+    const lunar = lunarRamp * smoothstep(-0.03, 0.16, state.moonDir.y);
     const useMoon = sy <= -0.09;
     if (useMoon) {
       _v.copy(state.moonDir);
       sun.intensity = moonPeak * lunar * lerp(1, 0.35, now.fogGrey);
-      state.sunLightColour.setRGB(0.55, 0.66, 0.95);
     } else {
       _v.copy(state.sunDir);
       sun.intensity = sunPeak * daylight * now.light;
-      // pow(T, 0.3) rather than T itself: the raw transmittance at sunset is so
-      // close to monochrome red that every surface in the world turns tomato.
-      // The softened version is a warm orange, which is what low sun looks like.
-      const r = Math.pow(Math.max(_trans.r, 1e-4), 0.3);
-      const g = Math.pow(Math.max(_trans.g, 1e-4), 0.3);
-      const b = Math.pow(Math.max(_trans.b, 1e-4), 0.3);
-      const m = Math.max(r, 1e-4);
-      state.sunLightColour.setRGB(
-        0.94 * (r / m) + 0.06,
-        0.94 * (g / m) + 0.06,
-        0.94 * (b / m) + 0.06,
-      );
     }
+    // The DIRECTION switches hard, which is safe: both intensity ramps are zero
+    // at sy = -0.09, so nothing is lit at the instant it flips. The COLOUR must
+    // not, and this is the trap. hemi.groundColor below is derived from this
+    // colour, and hemi.intensity is still ~0.36 at the handover — so switching
+    // popped every vertical surface in the world from warm orange to cold blue
+    // in a single frame, at dusk and again at dawn. Cross-fading over the same
+    // window the moon ramp already uses costs nothing: the directional light is
+    // under 3% of its noon value anywhere inside it.
+    //
+    // pow(T, 0.3) rather than T itself: the raw transmittance at sunset is so
+    // close to monochrome red that every surface in the world turns tomato.
+    // The softened version is a warm orange, which is what low sun looks like.
+    const lr = Math.pow(Math.max(_trans.r, 1e-4), 0.3);
+    const lg = Math.pow(Math.max(_trans.g, 1e-4), 0.3);
+    const lb = Math.pow(Math.max(_trans.b, 1e-4), 0.3);
+    const peak = Math.max(lr, 1e-4);   // red is always the least extinguished
+    // Moonlight is physically slightly WARMER than sunlight — the moon is a
+    // grey-brown rock. Cool blue is a cinema convention, and it is the one the
+    // player expects, so this is a deliberate lie rather than an error.
+    state.sunLightColour.setRGB(
+      lerp(0.94 * (lr / peak) + 0.06, 0.55, lunarRamp),
+      lerp(0.94 * (lg / peak) + 0.06, 0.66, lunarRamp),
+      lerp(0.94 * (lb / peak) + 0.06, 0.95, lunarRamp),
+    );
     sun.color.copy(state.sunLightColour);
 
     if (cameraPos) {

@@ -478,9 +478,13 @@ export function createHUD(root, opts = {}) {
       g.fillText(INT_STR[v / 1000], cx + ca * rn, cy + sa * rn);
     }
 
+    // Below the readout, not above it. The digital speed, its unit and the gear
+    // are centred as one stack about 0.43 R tall, so anything above the middle
+    // ends up behind the numerals; underneath there is nothing until the pedal
+    // arcs at 0.795 R.
     g.font = fontFor(R * 0.098, 500);
     g.fillStyle = 'rgba(226,236,245,0.34)';
-    g.fillText(RPM_LABEL, cx, cy - R * 0.46);
+    g.fillText(RPM_LABEL, cx, cy + R * 0.60);
   }
 
   function drawDial(rpm, redline, kmh, throttle, brake, hot) {
@@ -730,7 +734,11 @@ export function createHUD(root, opts = {}) {
 
     const km = (s.odometer || 0) / 1000;
     const kmI = km < 0 ? 0 : km | 0;
-    const kmT = ((km - kmI) * 10) | 0;
+    // `| 0` truncates toward zero, so a negative odometer leaves a negative
+    // tenth and TENTH[-1] is undefined — which reaches the DOM as the literal
+    // string "undefined". A branch, not a clamp() call, to stay allocation-free.
+    let kmT = ((km - kmI) * 10) | 0;
+    if (kmT < 0) kmT = 0;
     if (kmI !== lastOdoK) {
       // The table runs out at a thousand kilometres, and past that this costs one
       // small string per kilometre driven. Still nothing per frame.
@@ -769,7 +777,11 @@ export function createHUD(root, opts = {}) {
     }
 
     const limF = (s.speedLimit || 0) * MS_TO_KMH;
-    const lim = limF > 1 ? Math.round(limF / 5) * 5 : 0;
+    // INT_STR stops at 999, and a limit past it would put "undefined" on the
+    // sign. No road in the world is anywhere near this, but the readout should
+    // degrade to a number rather than to a word.
+    let lim = limF > 1 ? Math.round(limF / 5) * 5 : 0;
+    if (lim > 995) lim = 995;
     if (lim !== lastLimit) {
       lastLimit = lim;
       if (lim > 0) limitNum.textContent = INT_STR[lim];

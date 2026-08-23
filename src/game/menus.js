@@ -173,8 +173,46 @@ function persist(settings) {
 
 const RHO = 1.225;          // kg/m^3
 const GRAV = 9.81;
-const DRIVELINE = 0.86;     // crank to contact patch
-const ROLL_C = 0.014;       // asphalt rolling resistance coefficient
+// Crank to contact patch. It is 1.0 because physics/vehicle.js has no driveline
+// loss at all — it does `driveForce = crankTorque * ratio / wheelRadius`. This
+// was 0.86, which is a realistic figure for a real gearbox and the wrong figure
+// for this simulation: it cost the quoted top speeds up to 23 km/h against what
+// tools/catalogcheck.mjs actually measures.
+const DRIVELINE = 1.0;
+const ROLL_C = 0.014;       // asphalt rolling resistance coefficient, per world/ground.js
+const SHIFT_AT = 0.93;      // fraction of the limiter vehicle.js upshifts at
+
+/**
+ * Tractive force at the contact patch at road speed `v`, mirroring the engine
+ * and gearbox in physics/vehicle.js rather than assuming rated power is on tap
+ * at every speed. It is not: the engine makes peak torque well below the power
+ * peak, first gear runs out long before 100 km/h, and a car pulling away sits
+ * at idle rpm making less than half of what the brochure claims.
+ *
+ * Modelling that is the difference between a garage that is right to a tenth
+ * and one that promised the 4x4 5.3 s when the simulation gives 6.7.
+ */
+function driveForce(spec, cylinders, v) {
+  const wheelOmega = v / spec.wheelRadius;
+  const peakTorque = spec.power / (spec.peakRpm * 2 * Math.PI / 60);
+  for (let g = 0; g < spec.gears.length; g++) {
+    const ratio = spec.gears[g] * spec.finalDrive;
+    const rpm = clamp(Math.abs(wheelOmega * ratio) * 60 / (2 * Math.PI), spec.idleRpm, spec.redline);
+    // vehicle.js upshifts at 0.93 of the limiter, so any lower gear than that
+    // is one the car would already have left.
+    if (g < spec.gears.length - 1 && rpm > spec.redline * SHIFT_AT) continue;
+    let torque;
+    if (cylinders === 0) {
+      // An electric motor holds peak torque to its base speed, then constant power.
+      torque = peakTorque * (rpm <= spec.peakRpm ? 1 : spec.peakRpm / rpm);
+    } else {
+      const n = rpm / spec.peakRpm;
+      torque = peakTorque * clamp(1.12 - 0.42 * (n - 0.85) * (n - 0.85) * 3.2, 0.25, 1.12);
+    }
+    return torque * ratio / spec.wheelRadius;
+  }
+  return 0;
+}
 
 /**
  * Top speed, in m/s. The car runs out of road speed at whichever comes first:
@@ -202,7 +240,7 @@ function topSpeed(spec) {
  * Load transfer is in because it is the whole reason the rear-drive cars launch
  * better than their static weight distribution suggests.
  */
-function accelTime(spec) {
+function accelTime(spec, cylinders) {
   const TARGET = 100 / 3.6;
   const mu = (spec.gripFront + spec.gripRear) * 0.5;
   const staticShare = spec.drive === 'fwd' ? spec.cgBias
@@ -215,11 +253,8 @@ function accelTime(spec) {
     const share = clamp(staticShare + transfer * (a * spec.cgHeight) / (spec.wheelbase * GRAV), 0.12, 1);
     const load = spec.mass * GRAV + spec.downforce * v * v;
     const traction = mu * share * load;
-    // Below a few m/s the clutch, not the engine, sets the torque; capping the
-    // divisor keeps the first tenth of a second finite instead of infinite.
-    const fromPower = (spec.power * DRIVELINE) / Math.max(v, 3.4);
     const drag = 0.5 * RHO * spec.dragArea * v * v + ROLL_C * load;
-    a = (Math.min(traction, fromPower) - drag) / spec.mass;
+    a = (Math.min(traction, driveForce(spec, cylinders, v)) - drag) / spec.mass;
     if (a <= 0) break;
     v += a * dt;
     t += dt;
@@ -228,7 +263,7 @@ function accelTime(spec) {
   // Every upshift on the way to 100 is a real gap in the drive.
   let shifts = 0;
   for (let g = 0; g < spec.gears.length - 1; g++) {
-    const vTop = (spec.redline / 60) * 2 * Math.PI * spec.wheelRadius / (spec.gears[g] * spec.finalDrive);
+    const vTop = (spec.redline * SHIFT_AT / 60) * 2 * Math.PI * spec.wheelRadius / (spec.gears[g] * spec.finalDrive);
     if (vTop < TARGET) shifts++;
   }
   return t + shifts * spec.shiftTime;
@@ -241,11 +276,16 @@ function accelTime(spec) {
  */
 export function carStats(car) {
   const spec = { ...DEFAULT_SPEC, ...car.spec };
+  // `cylinders` lives on the catalogue entry, not inside its `spec` — specFor()
+  // is what copies it across. The merge above therefore never sees it, so it is
+  // read from the car. Without this the electric car is run through the
+  // combustion torque curve and quoted a time it does not do.
+  const cylinders = car.cylinders != null ? car.cylinders : spec.cylinders;
   const top = topSpeed(spec);
   return {
     hp: Math.round((spec.power / 745.7) / 5) * 5,
     kw: Math.round(spec.power / 1000),
-    accel: accelTime(spec),
+    accel: accelTime(spec, cylinders),
     topKph: Math.round(top * 3.6),
     mass: spec.mass,
     drive: spec.drive,
@@ -1037,7 +1077,14 @@ export function createMenus(root, opts = {}) {
       // Opened straight from the road — main.js does this for the map key — so
       // backing out lands on the pause screen, which is the state the game is
       // actually in. Dropping the player on the title screen mid-drive is not.
-      backTo = current === 'title' ? 'title' : 'pause';
+      //
+      // Only a root screen re-answers the question. Arriving from another
+      // sub-screen means this is a step deeper into a journey that already has
+      // an answer, and overwriting it strands a player who came from the title
+      // on the pause screen — whose Resume button starts a drive they never
+      // asked for.
+      if (current === 'title') backTo = 'title';
+      else if (current === 'pause' || current === null) backTo = 'pause';
     } else {
       backTo = name === 'pause' ? 'pause' : 'title';
     }

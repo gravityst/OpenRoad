@@ -159,6 +159,23 @@ async function boot() {
     stub(['update', 'setQuality', 'dispose'], { group: new THREE.Group() });
   scene.add(terrain.group);
 
+  /**
+   * Fog has to end where the ground ends.
+   *
+   * The terrain streams a finite ring of chunks; beyond it there is nothing.
+   * Fog is what hides that boundary, so if the fog reaches further than the
+   * chunks do, the player watches the world stop dead in mid-air against the
+   * sky. Left to their defaults these two disagreed badly — fog out to 4960 m
+   * against terrain that stops at 1088 m, roughly 3% opacity where the ground
+   * ran out. They are tied together here and re-tied on every quality change,
+   * since changing quality changes the ring size.
+   */
+  function matchFogToTerrain() {
+    const d = terrain.stats && terrain.stats.viewDistance;
+    if (d && sky.setDrawDistance) sky.setDrawDistance(d);
+  }
+  matchFogToTerrain();
+
   const roads = await stage(0.72, 'surfacing the roads', () =>
     mRoads ? mRoads.createRoads(world, ground) : null) ||
     stub(['update', 'setQuality', 'dispose'], { group: new THREE.Group() });
@@ -273,6 +290,7 @@ async function boot() {
   terrain.setQuality(settings.quality || 'medium');
   city.setQuality(settings.quality || 'medium');
   props.setQuality(settings.quality || 'medium');
+  matchFogToTerrain();
   renderer.shadowMap.enabled = settings.shadows !== false;
 
   menus.setCars(CARS);
@@ -303,6 +321,7 @@ async function boot() {
     terrain.setQuality(settings.quality || 'medium');
     city.setQuality(settings.quality || 'medium');
     props.setQuality(settings.quality || 'medium');
+    matchFogToTerrain();                 // the ring size changes with quality
     renderer.shadowMap.enabled = settings.shadows !== false;
     if (settings.time != null) { clockHours = settings.time; sky.setTime(clockHours); }
     if (settings.weather) sky.setWeather(settings.weather, 1.5);
@@ -648,6 +667,18 @@ async function boot() {
     camera.fov += ((60 + speedT * 16) - camera.fov) * Math.min(1, dt * 3);
     camera.updateProjectionMatrix();
   }
+
+  // ---- prime the streaming layers -----------------------------------------
+  // The first update() builds the whole visible ring, which is ~170 ms of work.
+  // Called from inside the frame loop that lands as a visible stall on frame
+  // one; called here it lands on the loading bar, where the player expects it.
+  await stage(0.97, 'first look around', () => {
+    camera.position.set(car.x, car.y + 6, car.z + 12);
+    terrain.update(camera.position, 0);
+    roads.update(camera.position, 0);
+    city.update(camera.position, 0);
+    props.update(camera.position, 0);
+  });
 
   // ---- done ---------------------------------------------------------------
   progress(1, failures.length ? `ready — ${failures.length} module(s) unavailable` : 'ready');

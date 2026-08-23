@@ -71,6 +71,16 @@ const SLIDER_MIN = 78;     // px of travel for full lock, floor and ceiling
 const SLIDER_MAX = 210;
 const TILT_WAIT = 1500;    // ms to wait for a first sensor reading before giving up
 
+// Every string the overlay can ever be painted with, built once. setProperty
+// needs a string, and toFixed on the frame path would mint a fresh one every
+// time the wheel moved — a few hundred throwaway strings a second, for a value
+// that only has a couple of hundred distinct states. A table makes read()
+// genuinely allocation-free, which is what the frame budget was promised.
+const STEER_STR = new Array(201);
+for (let i = 0; i <= 200; i++) STEER_STR[i] = ((i - 100) / 100).toFixed(2);
+const PEDAL_STR = new Array(21);
+for (let i = 0; i <= 20; i++) PEDAL_STR[i] = (i / 20).toFixed(2);
+
 const MARKUP = `
 <div class="touch__steer" data-ctl="steer">
   <div class="touch__wheel">
@@ -151,6 +161,10 @@ export function createTouchControls(root, opts = {}) {
   el.dataset.layout = layout;
   el.setAttribute('aria-hidden', 'true');
   el.innerHTML = MARKUP;
+  // The stylesheet rotates the wheel by --lock, so the visual lock angle comes
+  // from the same setting the input maths uses rather than a second copy of 78
+  // that quietly drifts out of step.
+  el.style.setProperty('--lock', `${settings.wheelLock}deg`);
   host.appendChild(el);
 
   const noteEl = el.querySelector('[data-note]');
@@ -229,6 +243,10 @@ export function createTouchControls(root, opts = {}) {
   function steerMove(x, y) {
     const r = steer.rect;
     if (!r) return;
+    // Keep the live finger position, so a relayout can re-anchor the wheel's
+    // reference angle to the new centre instead of integrating the jump.
+    steer.px = x;
+    steer.py = y;
     if (layout === 'wheel') {
       const cx = r.left + r.width * 0.5;
       const cy = r.top + r.height * 0.5;
@@ -352,6 +370,16 @@ export function createTouchControls(root, opts = {}) {
       for (let i = 0; i < ALL.length; i++) {
         if (ALL[i].pointer >= 0) ALL[i].rect = ALL[i].el.getBoundingClientRect();
       }
+      // Moving the wheel out from under a stationary thumb changes the angle
+      // that thumb subtends, and the wheel integrates angle DELTAS — so
+      // without re-anchoring, a URL bar sliding away mid-corner is indis-
+      // tinguishable from the player spinning the wheel, and lands as a real
+      // steering input of tens of degrees. Re-anchoring makes the relayout
+      // contribute exactly nothing.
+      if (layout === 'wheel' && steer.pointer >= 0 && steer.rect) {
+        const r = steer.rect;
+        lastAng = Math.atan2(steer.px - (r.left + r.width * 0.5), -(steer.py - (r.top + r.height * 0.5)));
+      }
     });
     ro.observe(el);
   }
@@ -388,7 +416,13 @@ export function createTouchControls(root, opts = {}) {
   }
 
   function note(text) {
-    if (noteEl) noteEl.textContent = text;
+    if (!noteEl) return;
+    noteEl.textContent = text;
+    // The calibration block is tilt-only, so every message explaining why tilt
+    // did NOT happen was being written into a hidden element — the player just
+    // found the steering had quietly changed under them. The flag lets the
+    // stylesheet show the line on its own, wherever we ended up.
+    el.classList.toggle('has-note', !!text);
   }
 
   function calibrate(ms = 400) {
@@ -459,6 +493,12 @@ export function createTouchControls(root, opts = {}) {
     }
     tilt.denied = false;
     tilt.samples = 0;
+    // The permission prompt is modal and slow, and setLayout can be called
+    // again while it is open. Coming back to find we are no longer in tilt
+    // means the sensor is not wanted: attaching to it anyway leaves a
+    // deviceorientation listener running for a layout nobody is using, which
+    // on a phone is a battery cost for nothing.
+    if (layout !== 'tilt') return false;
     startListening();
     calibrate();
     return true;
@@ -525,13 +565,16 @@ export function createTouchControls(root, opts = {}) {
     return steerOut;
   }
 
+  // The clamps are not decoration: an out-of-range value would index past the
+  // table and hand the stylesheet the string "undefined", which kills every
+  // calc() that reads it and freezes the overlay at its last pose.
   function paint(s, t, b) {
-    const qs = Math.round(s * 100);
-    if (qs !== shownS) { shownS = qs; el.style.setProperty('--s', (qs / 100).toFixed(2)); }
-    const qt = Math.round(t * 20);
-    if (qt !== shownGas) { shownGas = qt; el.style.setProperty('--gas', (qt / 20).toFixed(2)); }
-    const qb = Math.round(b * 20);
-    if (qb !== shownBrake) { shownBrake = qb; el.style.setProperty('--brake', (qb / 20).toFixed(2)); }
+    const qs = Math.round(clamp(s, -1, 1) * 100);
+    if (qs !== shownS) { shownS = qs; el.style.setProperty('--s', STEER_STR[qs + 100]); }
+    const qt = Math.round(clamp(t, 0, 1) * 20);
+    if (qt !== shownGas) { shownGas = qt; el.style.setProperty('--gas', PEDAL_STR[qt]); }
+    const qb = Math.round(clamp(b, 0, 1) * 20);
+    if (qb !== shownBrake) { shownBrake = qb; el.style.setProperty('--brake', PEDAL_STR[qb]); }
   }
 
   /**

@@ -41,11 +41,18 @@ const GUARD = 8;
 const SLOT_MAX = 176;       // 160 px of content plus the two guard bands
 const ATLAS_MAX = 2048;     // the WebGL2 floor for MAX_TEXTURE_SIZE
 
+// Cull distances, NOT the engine's raw tier draw distances. Culling a region
+// the player can still see is worse than drawing it: sky.js does not close its
+// fog until drawDistance * 1.55 in clear weather, so a road dropped at the raw
+// tier figure vanishes over bare terrain while it is still well over half
+// visible. These are the four engine tiers carried out to where the fog
+// actually hides them. Costs nothing here — every region shares one material,
+// and the frustum still throws away everything behind the camera.
 const QUALITY = {
-  low:    { anisotropy: 1,  drawDistance: 1400 },
-  medium: { anisotropy: 4,  drawDistance: 2200 },
-  high:   { anisotropy: 8,  drawDistance: 3200 },
-  ultra:  { anisotropy: 16, drawDistance: 4500 },
+  low:    { anisotropy: 1,  drawDistance: 2170 },   // engine tier 1400
+  medium: { anisotropy: 4,  drawDistance: 3410 },   // engine tier 2200
+  high:   { anisotropy: 8,  drawDistance: 4960 },   // engine tier 3200
+  ultra:  { anisotropy: 16, drawDistance: 6980 },   // engine tier 4500
 };
 
 // ---------------------------------------------------------------------------
@@ -388,7 +395,7 @@ export function createRoads(world, ground, opts = {}) {
   for (const e of world.edges) {
     const key = `${e.markings}|${e.width}|${e.lanes}|${e.surface}`;
     edgeRow[e.i] = row(key, () => roadSpec(e.markings, e.width, e.lanes, e.surface, seed + e.width * 17));
-    if (CITY[e.kind]) anyCity = true;
+    if (CITY[e.kind] === 1) anyCity = true;
   }
   const walkRow = anyCity ? row('walk', () => walkSpec(seed + 311)) : -1;
   const kerbRow = anyCity ? row('kerb', () => kerbSpec(seed + 733)) : -1;
@@ -452,13 +459,24 @@ export function createRoads(world, ground, opts = {}) {
   }
 
   // ---- carriageway ribbons, kerbs and sidewalks --------------------------
+  // Strips are capped at 7 m across. The road profile the ground field is
+  // stamped from has no camber, so a carriageway IS flat across and two
+  // vertices would in principle be exact — but where two roads overlap the
+  // field is a weighted mean of both and stops being flat. Measured over the
+  // whole network, spanning the full width with one strip leaves 3% of the
+  // surface more than 6 cm off the physics height, which is more than the
+  // clearance it is drawn with; at 7 m strips that falls to 0.6%.
+  const MAX_STRIP = 7;
+  const MAX_CROSS = 12;
+
   const pool = [];
   function station(i) {
     let s = pool[i];
     if (!s) {
       pool[i] = s = {
         cx: 0, cy: 0, cz: 0, nx: 0, ny: 1, nz: 0, ax: 0, az: 0,
-        lx: 0, ly: 0, lz: 0, lt: 1, rx: 0, ry: 0, rz: 0, rt: 1,
+        X: new Float64Array(MAX_CROSS), Y: new Float64Array(MAX_CROSS),
+        Z: new Float64Array(MAX_CROSS), T: new Float64Array(MAX_CROSS),
         ox: 0, oy: 0, oz: 0, qx: 0, qy: 0, qz: 0,
       };
     }
@@ -486,18 +504,21 @@ export function createRoads(world, ground, opts = {}) {
 
     const h = e.width / 2;
     const rr = edgeRow[e.i];
+    const strips = Math.min(MAX_CROSS - 1, Math.max(1, Math.ceil(e.width / MAX_STRIP)));
     const walk = walkRow >= 0 && CITY[e.kind] === 1;
 
     for (let i = 0; i < arcs.length; i++) {
       const p = pointOnEdge(e, arcs[i]);
       const st = station(i);
       st.ax = p.nx; st.az = p.nz;                 // right-hand normal of the road
-      const lx = p.x - p.nx * h, lz = p.z - p.nz * h;
-      const rx = p.x + p.nx * h, rz = p.z + p.nz * h;
-      st.lx = lx; st.lz = lz; st.ly = ground.heightAt(lx, lz) + LIFT;
-      st.rx = rx; st.rz = rz; st.ry = ground.heightAt(rx, rz) + LIFT;
-      st.lt = tint(lx, lz); st.rt = tint(rx, rz);
-      st.cx = p.x; st.cz = p.z; st.cy = (st.ly + st.ry) * 0.5;
+      for (let k = 0; k <= strips; k++) {
+        const f = (2 * k / strips - 1) * h;
+        const x = p.x + p.nx * f, z = p.z + p.nz * f;
+        st.X[k] = x; st.Z[k] = z;
+        st.Y[k] = ground.heightAt(x, z) + LIFT;
+        st.T[k] = tint(x, z);
+      }
+      st.cx = p.x; st.cz = p.z; st.cy = (st.Y[0] + st.Y[strips]) * 0.5;
       if (walk) {
         const ox = p.x - p.nx * (h + WALK_W), oz = p.z - p.nz * (h + WALK_W);
         const qx = p.x + p.nx * (h + WALK_W), qz = p.z + p.nz * (h + WALK_W);
@@ -514,8 +535,8 @@ export function createRoads(world, ground, opts = {}) {
       const a = pool[i > 0 ? i - 1 : 0], b = pool[i < last ? i + 1 : last];
       const tx = b.cx - a.cx, ty = b.cy - a.cy, tz = b.cz - a.cz;
       const st = pool[i];
-      const dx = st.rx - st.lx, dy = st.ry - st.ly, dz = st.rz - st.lz;
-      let nx = dy * tz - dz * ty, ny = dz * tx - dx * tz, nz = dx * ty - dy * tx;
+      const dx = st.X[strips] - st.X[0], dy = st.Y[strips] - st.Y[0], dz = st.Z[strips] - st.Z[0];
+      const nx = dy * tz - dz * ty, ny = dz * tx - dx * tz, nz = dx * ty - dy * tx;
       const len = Math.hypot(nx, ny, nz) || 1;
       st.nx = nx / len; st.ny = ny / len; st.nz = nz / len;
     }
@@ -523,41 +544,52 @@ export function createRoads(world, ground, opts = {}) {
     for (let i = 0; i < last; i++) {
       const A = pool[i], B = pool[i + 1];
       const bk = bucket((A.cx + B.cx) * 0.5, (A.cz + B.cz) * 0.5);
-      const va = vOf(rr, (i % VSTEPS) / VSTEPS);
-      const vb = vOf(rr, (i % VSTEPS) / VSTEPS + (arcs[i + 1] - arcs[i]) / TILE);
+      const v0 = (i % VSTEPS) / VSTEPS;
+      const va = vOf(rr, v0);
+      const vb = vOf(rr, v0 + (arcs[i + 1] - arcs[i]) / TILE);
 
-      // Winding verified against forward = -Z, right = +X: the road's
-      // right-hand normal is p.nx/p.nz, and (left, right, right') faces up.
-      vert(bk, A.lx, A.ly, A.lz, A.nx, A.ny, A.nz, 0, va, A.lt);
-      vert(bk, A.rx, A.ry, A.rz, A.nx, A.ny, A.nz, 1, va, A.rt);
-      vert(bk, B.rx, B.ry, B.rz, B.nx, B.ny, B.nz, 1, vb, B.rt);
-      vert(bk, A.lx, A.ly, A.lz, A.nx, A.ny, A.nz, 0, va, A.lt);
-      vert(bk, B.rx, B.ry, B.rz, B.nx, B.ny, B.nz, 1, vb, B.rt);
-      vert(bk, B.lx, B.ly, B.lz, B.nx, B.ny, B.nz, 0, vb, B.lt);
-      quads++;
+      // Winding verified against forward = -Z, right = +X: index 0 is the left
+      // kerb, index `strips` the right, and (left, right, right') faces up.
+      for (let k = 0; k < strips; k++) {
+        const u0 = k / strips, u1 = (k + 1) / strips;
+        vert(bk, A.X[k], A.Y[k], A.Z[k], A.nx, A.ny, A.nz, u0, va, A.T[k]);
+        vert(bk, A.X[k + 1], A.Y[k + 1], A.Z[k + 1], A.nx, A.ny, A.nz, u1, va, A.T[k + 1]);
+        vert(bk, B.X[k + 1], B.Y[k + 1], B.Z[k + 1], B.nx, B.ny, B.nz, u1, vb, B.T[k + 1]);
+        vert(bk, A.X[k], A.Y[k], A.Z[k], A.nx, A.ny, A.nz, u0, va, A.T[k]);
+        vert(bk, B.X[k + 1], B.Y[k + 1], B.Z[k + 1], B.nx, B.ny, B.nz, u1, vb, B.T[k + 1]);
+        vert(bk, B.X[k], B.Y[k], B.Z[k], B.nx, B.ny, B.nz, u0, vb, B.T[k]);
+        quads++;
+      }
 
       if (!walk) continue;
-      const kva = vOf(kerbRow, (i % VSTEPS) / VSTEPS);
-      const kvb = vOf(kerbRow, (i % VSTEPS) / VSTEPS + (arcs[i + 1] - arcs[i]) / TILE);
-      const wva = vOf(walkRow, (i % VSTEPS) / VSTEPS);
-      const wvb = vOf(walkRow, (i % VSTEPS) / VSTEPS + (arcs[i + 1] - arcs[i]) / TILE);
+      const R = strips;
+      const kva = vOf(kerbRow, v0), kvb = vOf(kerbRow, v0 + (arcs[i + 1] - arcs[i]) / TILE);
+      const wva = vOf(walkRow, v0), wvb = vOf(walkRow, v0 + (arcs[i + 1] - arcs[i]) / TILE);
 
       // Left side, then right. The kerb face points away from the carriageway.
       quad(bk,
-        V(_a, A.lx, A.ly, A.lz, 0, kva, A.lt), V(_b, A.lx, A.ly + KERB, A.lz, 1, kva, A.lt),
-        V(_c, B.lx, B.ly + KERB, B.lz, 1, kvb, B.lt), V(_d, B.lx, B.ly, B.lz, 0, kvb, B.lt),
+        V(_a, A.X[0], A.Y[0], A.Z[0], 0, kva, A.T[0]),
+        V(_b, A.X[0], A.Y[0] + KERB, A.Z[0], 1, kva, A.T[0]),
+        V(_c, B.X[0], B.Y[0] + KERB, B.Z[0], 1, kvb, B.T[0]),
+        V(_d, B.X[0], B.Y[0], B.Z[0], 0, kvb, B.T[0]),
         -A.ax, 0, -A.az);
       quad(bk,
-        V(_a, A.lx, A.ly + KERB, A.lz, 0, wva, A.lt), V(_b, A.ox, A.oy, A.oz, 1, wva, A.lt),
-        V(_c, B.ox, B.oy, B.oz, 1, wvb, B.lt), V(_d, B.lx, B.ly + KERB, B.lz, 0, wvb, B.lt),
+        V(_a, A.X[0], A.Y[0] + KERB, A.Z[0], 0, wva, A.T[0]),
+        V(_b, A.ox, A.oy, A.oz, 1, wva, A.T[0]),
+        V(_c, B.ox, B.oy, B.oz, 1, wvb, B.T[0]),
+        V(_d, B.X[0], B.Y[0] + KERB, B.Z[0], 0, wvb, B.T[0]),
         0, 1, 0);
       quad(bk,
-        V(_a, A.rx, A.ry, A.rz, 0, kva, A.rt), V(_b, A.rx, A.ry + KERB, A.rz, 1, kva, A.rt),
-        V(_c, B.rx, B.ry + KERB, B.rz, 1, kvb, B.rt), V(_d, B.rx, B.ry, B.rz, 0, kvb, B.rt),
+        V(_a, A.X[R], A.Y[R], A.Z[R], 0, kva, A.T[R]),
+        V(_b, A.X[R], A.Y[R] + KERB, A.Z[R], 1, kva, A.T[R]),
+        V(_c, B.X[R], B.Y[R] + KERB, B.Z[R], 1, kvb, B.T[R]),
+        V(_d, B.X[R], B.Y[R], B.Z[R], 0, kvb, B.T[R]),
         A.ax, 0, A.az);
       quad(bk,
-        V(_a, A.rx, A.ry + KERB, A.rz, 0, wva, A.rt), V(_b, A.qx, A.qy, A.qz, 1, wva, A.rt),
-        V(_c, B.qx, B.qy, B.qz, 1, wvb, B.rt), V(_d, B.rx, B.ry + KERB, B.rz, 0, wvb, B.rt),
+        V(_a, A.X[R], A.Y[R] + KERB, A.Z[R], 0, wva, A.T[R]),
+        V(_b, A.qx, A.qy, A.qz, 1, wva, A.T[R]),
+        V(_c, B.qx, B.qy, B.qz, 1, wvb, B.T[R]),
+        V(_d, B.X[R], B.Y[R] + KERB, B.Z[R], 0, wvb, B.T[R]),
         0, 1, 0);
       quads += 4;
     }
@@ -708,7 +740,9 @@ export function createRoads(world, ground, opts = {}) {
   buckets.clear();
 
   // ---- runtime ------------------------------------------------------------
-  let cullDist = opts.drawDistance ?? 2600;
+  // Defaults to the 'high' row above. main.js never calls roads.setQuality(),
+  // so whatever is chosen here is what actually ships.
+  let cullDist = opts.drawDistance ?? QUALITY.high.drawDistance;
   const regionRadius = REGION * Math.SQRT1_2;
   let acc = 1;                               // forces a pass on the first frame
 
@@ -719,7 +753,11 @@ export function createRoads(world, ground, opts = {}) {
    * reach, and toggling on the frame boundary makes the horizon flicker.
    */
   function update(cameraPos, dt) {
-    acc += dt || 0;
+    // A caller that passes no dt (or a paused dt of 0) would otherwise never
+    // reach the threshold again after the first pass and freeze the culling
+    // wherever it happened to be. Re-evaluating every call instead is 55
+    // compares; the 20 Hz gate is an economy, not a correctness condition.
+    acc += dt > 0 ? dt : 0.05;
     if (acc < 0.05) return;
     acc = 0;
     const lim = cullDist + regionRadius;

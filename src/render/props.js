@@ -64,6 +64,11 @@ import { mulberry, clamp, lerp, smoothstep } from '../world/noise.js';
 // field builds with `radius + REBUILD_STEP`, which is what makes that safe.
 const REBUILD_STEP = 34;
 
+// How stale a field is allowed to get before it refreshes even on a frame that
+// has already overrun. Without this, a machine sitting below 20 fps skips every
+// rebuild forever and drives straight out of its own scenery.
+const STALE_LIMIT = REBUILD_STEP * 1.5;
+
 /**
  * Grid pitch for a field, from its cull radius.
  *
@@ -78,6 +83,12 @@ const REBUILD_STEP = 34;
 function cellFor(cull) {
   return clamp(Math.round(cull / 7), 24, 64);
 }
+
+// The rest of the renderer (terrain, roads, effects, city) takes a tier NAME,
+// and main.js passes settings.quality straight through to all of them, this one
+// included. Accepting only a 0..1 number here meant every tier fell through to
+// full quality and the graphics setting did nothing to the props.
+const QUALITY_TIERS = { off: 0, low: 0.25, medium: 0.6, high: 1, ultra: 1 };
 
 // Full-quality cull radii. setQuality() scales these down; the instance buffers
 // are sized for the full radius so quality can move freely without reallocating.
@@ -724,8 +735,13 @@ export function createProps(world, ground, opts = {}) {
 
     // A frame that has already overrun is the worst possible place to spend
     // another few tenths of a millisecond rebuilding instance buffers, and the
-    // rebuild margin gives us plenty of frames to catch up in.
-    let budget = primed ? (dt > 0.05 ? 0 : 1) : fields.length;
+    // rebuild margin gives us plenty of frames to catch up in. But the skip has
+    // to be a deferral, not a veto: a machine that stays under 20 fps would
+    // otherwise never rebuild at all, and the visible set would stay pinned
+    // where the camera was when the frame rate went. Past STALE_LIMIT the set
+    // is genuinely wrong, so it gets rebuilt whatever the frame cost.
+    const late = primed && dt > 0.05;
+    let budget = primed ? 1 : fields.length;
     primed = true;
 
     for (let n = 0; n < fields.length && budget > 0; n++) {
@@ -734,7 +750,9 @@ export function createProps(world, ground, opts = {}) {
       if (!f.mesh.visible) continue;
       if (!f.dirty) {
         const dx = cx - f.atX, dz = cz - f.atZ;
-        if (dx * dx + dz * dz < REBUILD_STEP * REBUILD_STEP) continue;
+        const d2 = dx * dx + dz * dz;
+        if (d2 < REBUILD_STEP * REBUILD_STEP) continue;
+        if (late && d2 < STALE_LIMIT * STALE_LIMIT) continue;
       }
       f.refresh(cx, cz);
       budget--;
@@ -764,9 +782,14 @@ export function createProps(world, ground, opts = {}) {
     }
   }
 
-  /** 0 = the cheapest thing that still reads as a world, 1 = everything. */
+  /**
+   * 0 = the cheapest thing that still reads as a world, 1 = everything.
+   * Also accepts the tier names the other render modules take ('low',
+   * 'medium', 'high', 'ultra'), because that is what main.js actually passes.
+   */
   function setQuality(q) {
-    quality = clamp(typeof q === 'number' ? q : 1, 0, 1);
+    const t = Number.isFinite(q) ? q : QUALITY_TIERS[q];
+    quality = clamp(Number.isFinite(t) ? t : 1, 0, 1);
     for (let i = 0; i < fields.length; i++) {
       const f = fields[i];
       f.radius = lerp(f.cull * 0.42, f.cull, quality) * range;

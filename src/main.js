@@ -417,12 +417,22 @@ async function boot() {
     requestAnimationFrame(frame);
     let dt = (now - last) / 1000;
     last = now;
-    // A tab that was in the background hands back a dt of several seconds.
-    // Stepping that would teleport the car through the city.
     if (!(dt > 0)) dt = 0.016;
     // A tab that was in the background hands back a dt of several seconds.
     // Clamping is what stops the car teleporting across the city on return.
     dt = Math.min(dt, 0.1);
+    stepFrame(dt);
+  }
+
+  /**
+   * One frame: input, physics, streaming, camera, render.
+   *
+   * Split out from the rAF callback so a harness can drive the game a frame at
+   * a time with a fixed dt. Rendering by calling renderer.render() directly
+   * instead shows a world where nothing has streamed and the sun has never been
+   * positioned — which looks exactly like a broken renderer, and is not.
+   */
+  function stepFrame(dt) {
     fpsSmooth += (1 / Math.max(1e-3, dt) - fpsSmooth) * 0.05;
 
     // ---- input ----
@@ -595,33 +605,6 @@ async function boot() {
     if (car.slipping > 0.3) audio.playSkid(car.slipping);
   }
 
-  function syncTrafficModels() {
-    const list = traffic.cars || [];
-    for (let i = 0; i < list.length; i++) {
-      const t = list[i];
-      const m = modelForTraffic(t);
-      if (!m) continue;
-      m.group.visible = t.active !== false;
-      if (!m.group.visible) continue;
-      m.group.position.set(t.x, t.y, t.z);
-      m.group.rotation.set(0, t.yaw, 0);
-      m.setWheelSpin(t.wheelSpin || 0);
-      m.setBrakeLights(t.braking ? 1 : 0);
-      m.setHeadlights((sky.state ? sky.state.nightFactor : 0) > 0.35);
-      m.setIndicator(t.indicator || 0);
-    }
-    // Retire models whose car has been recycled out of the world.
-    if (trafficModels.size > list.length + 8) {
-      for (const [t, m] of trafficModels) {
-        if (!list.includes(t)) {
-          scene.remove(m.group);
-          m.dispose && m.dispose();
-          trafficModels.delete(t);
-        }
-      }
-    }
-  }
-
   function districtAt(x, z) {
     let best = '', bd = Infinity;
     for (const d of world.districts) {
@@ -736,6 +719,14 @@ async function boot() {
   window.__OPENROAD = {
     build: BUILD, world, ground, car, controls, scene, renderer, camera,
     traffic, settings, failures,
+    layers: { terrain, roads, city, props, particles, effects, sky, traffic, hud, menus, audio, touch, collision },
+    /** Drive one real frame. Everything a rAF tick does, at a dt you choose. */
+    frame: (dt = 1 / 60) => stepFrame(dt),
+    setMode: (m) => { if (m === 'driving') startDriving(); else { mode = m; menus.show(m); } },
+    /** Set the clock. Goes through clockHours, which the frame loop owns —
+     *  calling sky.setTime() alone is overwritten on the very next frame. */
+    setTime: (h) => { clockHours = h % 24; settings.time = clockHours; sky.setTime(clockHours); },
+    setWeather: (w) => { settings.weather = w; sky.setWeather(w, 0); },
     fps: () => Math.round(fpsSmooth),
     teleport: (x, z) => spawnOnRoad(x, z),
     /** Deterministic tick, so a headless harness drives the same code the player does. */

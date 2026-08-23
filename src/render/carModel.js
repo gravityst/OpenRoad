@@ -926,7 +926,12 @@ export function createCarModel(spec = {}, opts = {}) {
   // Paint is per car because every car is a different colour.
   const paint = new THREE.MeshPhysicalMaterial({
     color: opts.colour ?? spec.colour ?? 0xb8bcc0,
-    metalness: 0.62, roughness: 0.34, clearcoat: 0.9, clearcoatRoughness: 0.06,
+    // The clearcoat lobe is deliberately softer than real paint. With no
+    // environment map the sun is the ONLY specular source, so a razor-sharp
+    // lobe (0.06) collapses into a single hotspot that blows through the bloom
+    // threshold and puts a white blob on the boot lid at midday. Spreading the
+    // lobe turns that back into a highlight.
+    metalness: 0.55, roughness: 0.38, clearcoat: 0.85, clearcoatRoughness: 0.20,
   });
   const lamp = {};
   for (const [name, [tint, glow, rough]] of Object.entries(LAMPS)) {

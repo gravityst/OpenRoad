@@ -72,6 +72,24 @@ const FALL_TAU = 0.16;   // s
 const TIERS = {
   __proto__: null,
   // dpr is a per-tier ceiling; the real ratio is min(devicePixelRatio, dpr, 2).
+  // Bloom is deliberately restrained, and STRENGTH is the lever that matters.
+  //
+  // Measured on midday tarmac (which should not bloom at all) against the same
+  // frame with the pass disabled: threshold 1.00 doubled it, 61 -> 123. Raising
+  // the threshold barely helps — the sun disc is orders of magnitude over any
+  // sane threshold, so it always clears — and radius does almost nothing either,
+  // because UnrealBloomPass sums five mips regardless. Strength is what bounds
+  // the haze: at 0.24 the road lifts about 15%, which reads as air rather than
+  // as fog. Anything above ~0.35 and the game looks like it is being rendered
+  // through a net curtain.
+  //
+  // The pass sees LINEAR values, and a midday sky sits far above 1.0 there, so a
+  // threshold near 1.0 does not select "the bright things" — it selects most of
+  // the frame and smears it over the rest. Measured: dry tarmac that reads 61
+  // with the composer on and bloom off read 123 with bloom at threshold 1.00,
+  // i.e. the road was twice as bright as the road. Only the sun, headlights and
+  // lit windows should clear these numbers.
+  //
   // bloomScale is a fraction of the framebuffer: UnrealBloomPass already halves
   // whatever it is given, so 1.0 means its first mip is quarter-area.
   off: {
@@ -83,11 +101,11 @@ const TIERS = {
     fxaa: false, taps: 4, chroma: 0, vignette: 0.85, shift: 0.100,
   },
   medium: {
-    composer: true, dpr: 1.5, bloom: { strength: 0.42, radius: 0.55, threshold: 1.00 },
+    composer: true, dpr: 1.5, bloom: { strength: 0.24, radius: 0.28, threshold: 2.40 },
     bloomScale: 0.5, fxaa: true, taps: 6, chroma: 0, vignette: 1.00, shift: 0.120,
   },
   high: {
-    composer: true, dpr: 2.0, bloom: { strength: 0.58, radius: 0.72, threshold: 0.90 },
+    composer: true, dpr: 2.0, bloom: { strength: 0.30, radius: 0.38, threshold: 2.10 },
     bloomScale: 1.0, fxaa: true, taps: 8, chroma: 1, vignette: 1.10, shift: 0.145,
   },
 };
@@ -360,6 +378,9 @@ export function createEffects(renderer, scene, camera, opts = {}) {
 
   return {
     render, setSize, setQuality, setSpeedBlur, dispose,
+    // Exposed so a harness can measure the effect rather than guess at it.
+    get bloom() { return bloomPass; },
+    get composer() { return composer; },
     get quality() { return quality; },
   };
 }

@@ -720,7 +720,7 @@ vec4 winTex = texture2D( emissiveMap, vEmissiveMapUv );
 // Dusk raises the threshold, so a building lights a few windows at a time and
 // in its own order rather than switching on all at once.
 float cityLit = winTex.r * step( winTex.g, vOccupancy * uNight );
-totalEmissiveRadiance = uGlow * cityLit *
+totalEmissiveRadiance = uGlow * uEmScale * cityLit *
   mix( vec3( 0.62, 0.72, 1.00 ), vec3( 1.00, 0.72, 0.40 ), winTex.b );
 `;
 
@@ -729,8 +729,10 @@ totalEmissiveRadiance = uGlow * cityLit *
  * the dusk threshold. `night` and `glow` are shared uniform objects, so the
  * whole city changes hour on two writes.
  */
-function patchCity(material, windows, night, glow) {
-  material.customProgramCacheKey = () => (windows ? 'city-win' : 'city');
+function patchCity(material, windows, night, glow, emScale = 1) {
+  // The cache key has to carry the scale, or three reuses one compiled program
+  // for every facade type and they all inherit whichever was compiled first.
+  material.customProgramCacheKey = () => (windows ? 'city-win-' + emScale : 'city');
   material.onBeforeCompile = (shader) => {
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', '#include <common>\n' + VERT_DECL +
@@ -741,9 +743,10 @@ function patchCity(material, windows, night, glow) {
     if (!windows) return;
     shader.uniforms.uNight = night;
     shader.uniforms.uGlow = glow;
+    shader.uniforms.uEmScale = { value: emScale };
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>',
-        '#include <common>\nvarying float vOccupancy;\nuniform float uNight;\nuniform float uGlow;\n')
+        '#include <common>\nvarying float vOccupancy;\nuniform float uNight;\nuniform float uGlow;\nuniform float uEmScale;\n')
       .replace('#include <emissivemap_fragment>', FRAG_WINDOWS);
   };
 }
@@ -843,7 +846,16 @@ export function createCity(world, ground, opts = {}) {
 
   // ---- materials ---------------------------------------------------------
   const materials = [];
-  function facade(map, win, shininess, specular) {
+  /**
+   * `emScale` dims one facade type's night glow without touching the others.
+   * Shopfronts need it: their emissive map is a near-continuous strip of
+   * glazing rather than a grid of separate windows, so at the same glow as a
+   * tower the whole ground floor of every mid-rise blows out into one solid
+   * band of light. The shared uGlow uniform cannot express that, and the
+   * material's own emissive colour is not read at all — the patched shader
+   * computes totalEmissiveRadiance from scratch.
+   */
+  function facade(map, win, shininess, specular, emScale = 1) {
     const m = new THREE.MeshPhongMaterial({
       map,
       emissiveMap: win || null,
@@ -852,7 +864,7 @@ export function createCity(world, ground, opts = {}) {
       shininess,
       fog: true,
     });
-    patchCity(m, !!win, nightU, glowU);
+    patchCity(m, !!win, nightU, glowU, emScale);
     materials.push(m);
     return m;
   }
@@ -862,7 +874,7 @@ export function createCity(world, ground, opts = {}) {
   // curtain wall in daylight. It is also markedly cheaper per pixel.
   const matTower = [0, 1, 2].map((v) => facade(towerMap[v], towerWin[v], 74, 0x525a63));
   const matBlock = [0, 1, 2].map((v) => facade(blockMap[v], blockWin[v], 9, 0x14140f));
-  const matShop = [0, 1].map((v) => facade(shopMap[v], shopWin[v], 46, 0x3a3f44));
+  const matShop = [0, 1].map((v) => facade(shopMap[v], shopWin[v], 46, 0x3a3f44, 0.30));
   const matHouse = [0, 1].map((v) => facade(houseMap[v], houseWin[v], 7, 0x121210));
   const matWare = [0, 1].map((v) => facade(wareMap[v], null, 26, 0x2b2e30));
   const matGable = facade(gableMap, null, 6, 0x101010);

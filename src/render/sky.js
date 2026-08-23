@@ -618,7 +618,14 @@ export function createSky(scene, renderer, opts = {}) {
 
   const skyBrightness = opts.skyBrightness ?? 2.0;
   const sunPeak = opts.sunIntensity ?? 3.2;
-  const moonPeak = opts.moonIntensity ?? 0.16;
+  // Night is lit well above what the physics of moonlight would give.
+  //
+  // A real moonlit road reflects almost nothing, and rendering that honestly
+  // gives a black screen with some lit windows floating in it — measured: the
+  // carriageway read 3/255 at midnight, which is not a dark road, it is no
+  // road. Every driving game lifts this. The target is a surface you can place
+  // the car on while the scene still reads unmistakably as night.
+  const moonPeak = opts.moonIntensity ?? 0.34;
   const hemiPeak = opts.ambientIntensity ?? 1.15;
   const shadowRadius = opts.shadowRadius ?? 110;
   const shadowSize = opts.shadowMapSize ?? 2048;
@@ -972,7 +979,7 @@ export function createSky(scene, renderer, opts = {}) {
       state.sunLightColour.g * 0.27 + 0.06,
       state.sunLightColour.b * 0.21 + 0.07,
     );
-    hemi.intensity = hemiPeak * (0.055 + 0.945 * smoothstep(-0.22, 0.16, sy)) * now.ambient;
+    hemi.intensity = hemiPeak * (0.185 + 0.815 * smoothstep(-0.22, 0.16, sy)) * now.ambient;
   }
 
   function dispose() {

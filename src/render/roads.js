@@ -685,6 +685,12 @@ export function createRoads(world, ground, opts = {}) {
   // ---- material and meshes -----------------------------------------------
   const texture = new THREE.CanvasTexture(atlas.canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
+  // buildAtlas() measures each row's v-range from the TOP of the canvas, which
+  // is the only sane way to stack rows you are drawing with a 2D context. A
+  // CanvasTexture flips Y by default, so without this every road samples the
+  // MIRROR of its own row — asphalt streets came out as the dirt patch tile and
+  // sidewalks appeared in the middle of the carriageway.
+  texture.flipY = false;
   // U spans the carriageway and V never leaves its row, so both axes clamp.
   // The tiling along the road is done in the UVs, not by the sampler.
   texture.wrapS = THREE.ClampToEdgeWrapping;

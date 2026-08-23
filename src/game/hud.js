@@ -694,7 +694,9 @@ export function createHUD(root, opts = {}) {
 
   let lastSpeed = -1, lastGear = -99, lastH = -1, lastM = -1;
   let lastOdoK = -1, lastOdoT = -1, lastBearing = -1;
-  let lastDistrict, lastSurface, lastLimit = -1;
+  // 0 rather than undefined: an absent district is a value update() has to be
+  // able to react to, and `undefined !== undefined` would never fire.
+  let lastDistrict = 0, lastSurface = 0, lastLimit = -1;
   let lastOver = false, lastHand = false, lastSlip = false, lastAir = false, lastShift = false;
 
   function update(s) {

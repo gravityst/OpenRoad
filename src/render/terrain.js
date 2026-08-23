@@ -412,6 +412,9 @@ export function createTerrain(world, ground, opts = {}) {
   }
 
   function drain(ms) {
+    // Most frames have nothing to build. Bailing before touching the clock keeps
+    // the steady-state cost of this module at literally nothing.
+    if (!job.active && qi >= queue.length) return;
     const deadline = clock.now() + ms;
     for (;;) {
       if (!job.active) {

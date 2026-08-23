@@ -116,7 +116,6 @@ const SETTINGS_SCHEMA = [
 const SCREENS = ['title', 'garage', 'settings', 'pause', 'map'];
 
 const DRIVE_LABEL = { fwd: 'Front-wheel drive', rwd: 'Rear-wheel drive', awd: 'All-wheel drive' };
-const DRIVE_SHORT = { fwd: 'FWD', rwd: 'RWD', awd: 'AWD' };
 
 // Map colours, by road kind. Deliberately close to what the roads look like
 // from the air: trunk roads warm and dominant, lanes cool and thin, dirt broken.
@@ -370,6 +369,10 @@ export function createMenus(root, opts = {}) {
             <span class="or-drive-label"></span>
             <span class="or-wheels" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
           </div>
+          <dl class="or-figures">
+            <div><dt>Weight</dt><dd class="or-fig-mass"></dd></div>
+            <div><dt>Gearbox</dt><dd class="or-fig-gears"></dd></div>
+          </dl>
           <div class="or-swatch-row">
             <span class="or-swatch-label">Paint</span>
             <div class="or-swatches" role="radiogroup" aria-label="Paint"></div>
@@ -444,6 +447,8 @@ export function createMenus(root, opts = {}) {
     stats: ui.querySelector('.or-stats'),
     driveLabel: ui.querySelector('.or-drive-label'),
     wheels: ui.querySelectorAll('.or-wheels i'),
+    mass: ui.querySelector('.or-fig-mass'),
+    gears: ui.querySelector('.or-fig-gears'),
     swatches: ui.querySelector('.or-swatches'),
   };
   const mapCanvas = ui.querySelector('.or-map-canvas');
@@ -583,10 +588,13 @@ export function createMenus(root, opts = {}) {
       fill.style.width = `${(row.bar(b) * 100).toFixed(1)}%`;
       val.textContent = row.value(s);
     }
-    specEls.driveLabel.textContent = `${DRIVE_LABEL[s.drive] || s.drive} · ${DRIVE_SHORT[s.drive] || ''}`;
+    specEls.driveLabel.textContent = DRIVE_LABEL[s.drive] || s.drive;
     // Wheel dots are FL, FR, RL, RR — the same order as car.wheels.
     const driven = [s.drive !== 'rwd', s.drive !== 'rwd', s.drive !== 'fwd', s.drive !== 'fwd'];
     specEls.wheels.forEach((dot, i) => dot.classList.toggle('is-driven', driven[i]));
+    specEls.mass.textContent = `${s.mass.toLocaleString('en')} kg`;
+    // The electric car has one reduction gear, which is not a "1-speed gearbox".
+    specEls.gears.textContent = s.gears > 1 ? `${s.gears}-speed` : 'Single speed';
     renderSwatches(car);
 
     for (const row of listEl.children) {

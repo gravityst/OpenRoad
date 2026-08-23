@@ -37,21 +37,20 @@
 
 .touch.is-hidden { display: none; }
 
-/* Every control is a button, and every button starts from nothing. */
-.touch button {
+/* Strip the UA button styling. :where() keeps this at zero specificity and it
+   deliberately does not touch border, background or colour: an element reset
+   that outranks the class styling below is how buttons end up as bare text. */
+.touch :where(button) {
   appearance: none;
   -webkit-appearance: none;
   margin: 0;
   padding: 0;
-  border: 0;
-  background: none;
-  color: inherit;
   font: inherit;
   touch-action: none;
   pointer-events: auto;
   cursor: default;
+  outline: none;
 }
-.touch button:focus { outline: none; }
 
 /* Anything a thumb has to hit clears 44 px in both directions. */
 .touch__btn,

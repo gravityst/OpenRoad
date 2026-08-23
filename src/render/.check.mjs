@@ -1,490 +1,764 @@
-// The ground mesh.
+// Road surfaces, kerbs and junctions.
 //
-// COORDINATES: X east, Z south, Y up — the physics frame, unchanged. A chunk's
-// vertices are (x, height, z) with x/z local to the chunk and y absolute, and
-// every quad is wound so its face normal is +Y. Nothing here mirrors or negates
-// an axis, so a car standing on a visible slope is standing on the slope it
-// looks like it is standing on.
+// Everything you drive on is one mesh per region and ONE material. Both halves
+// of that were forced by the problem rather than chosen for tidiness:
 //
-// WHY IT IS BUILT THIS WAY
+//   * Markings live in the texture, never in geometry. A painted line drawn as
+//     its own quad a centimetre above the tarmac z-fights at range no matter
+//     what polygon offset it is given, and the flicker is worst exactly where
+//     the player is looking — down the road ahead. Baking the lines into the
+//     surface and tiling by ARC LENGTH keeps a 3 m dash 3 m long whether the
+//     polyline segment under it is 8 m or 80, and leaves no second surface to
+//     fight with.
 //
-// This is the largest mesh in the game and therefore the one that decides the
-// frame rate, so both of its costs are capped by construction.
+//   * One texture for the whole network. Seven road styles, sidewalk, kerb and
+//     the two junction fills are stacked into a single atlas, so a region costs
+//     one draw call instead of eleven. The atlas is a vertical stack: U runs
+//     across the carriageway and uses the full texture width, so only V is
+//     sub-ranged. Each row carries an 8 px guard band top and bottom holding a
+//     copy of the opposite edge — without it the hand-rolled V wrap shows a
+//     hairline seam every tile, because bilinear filtering reads whatever row
+//     happens to be adjacent in the atlas.
 //
-//   TRIANGLES are capped by concentric LOD rings. Chunks are a fixed 128 m
-//   square at EVERY level — only the vertex spacing changes (2 / 4 / 8 / 16 m
-//   at 'high'). Uniform chunk size is the whole trick: chunks tile exactly, so
-//   two LOD levels can never overlap and z-fight, which is the failure mode of
-//   the more obvious scheme where distant chunks are made bigger to save draw
-//   calls. The price is a seam wherever two different LODs meet, and that is
-//   paid with skirts instead.
-//
-//   BUILD TIME is capped by a per-frame millisecond budget. A cold ring is
-//   ~155 000 terrain samples, so chunks are queued nearest-first and drained
-//   against a deadline. One 2 m chunk alone is ~5 ms, which is most of a frame,
-//   so a fill is resumable a row at a time rather than atomic — the budget is
-//   honoured at row granularity and a chunk crossing costs no visible hitch.
-//
-// Height comes from ground.sample(), not from world.terrain — roads are carved
-// into ground's height field, and a mesh built from bare terrain would show a
-// hillside where the car is driving through a cutting. Sampling the same
-// function the wheels sample makes that class of bug impossible rather than
-// unlikely; the harness measures the agreement at 6e-8 m.
-//
-// SKIRTS. Each chunk is a (G+3)^2 vertex grid whose outer ring is clamped back
-// onto the border and dropped a few metres, forming a vertical apron. It costs
-// one ring of vertices and hides LOD cracks completely, which matters because a
-// crack is not a subtle artefact — you see sky through the ground. The apron is
-// 1.25 x the vertex spacing deep, against a measured worst-case interpolation
-// error of 1.14 m at the coarsest level.
+// The ribbon sits 4 cm above ground.heightAt() with polygon offset as well.
+// 4 cm is well inside the suspension's own travel so nothing reads as floating,
+// and the height comes from the same field the physics stands on — what you see
+// and what you drive on cannot disagree.
 
 import * as THREE from '/Users/curtis/Developer/OpenRoad/vendor/three/build/three.module.js';
-import { fbm, valueNoise, clamp, lerp, smoothstep } from '../world/noise.js';
+import { pointOnEdge } from '../world/layout.js';
+import { fbm, mulberry, clamp, lerp, smoothstep } from '../world/noise.js';
 
-// rings[l] is the largest Chebyshev chunk distance still drawn at level l;
-// grids[l] is that level's quad count per chunk edge. 128 / grid = vertex spacing.
+const LIFT = 0.04;          // m of clearance over the physics surface
+const KERB = 0.085;         // m of kerb lip — the car has no kerb to stand on
+const WALK_W = 4.2;         // m of sidewalk, matching ground.js's SIDEWALK_W
+const TILE = 24;            // m of road per texture repeat
+const VSTEPS = 3;           // stations per tile, so V lands on exact thirds
+const STEP = TILE / VSTEPS; // 8 m, which is also layout.js's densify() spacing
+
+const ATLAS_W = 512;
+const GUARD = 8;
+const SLOT_MAX = 176;       // 160 px of content plus the two guard bands
+const ATLAS_MAX = 2048;     // the WebGL2 floor for MAX_TEXTURE_SIZE
+
 const QUALITY = {
-  low:    { rings: [0, 2, 4, 6], grids: [48, 24, 12,  6], budgetMs: 2.0 },
-  medium: { rings: [1, 2, 4, 7], grids: [64, 32, 16,  8], budgetMs: 2.5 },
-  high:   { rings: [1, 3, 5, 8], grids: [64, 32, 16,  8], budgetMs: 3.0 },
+  low:    { anisotropy: 1,  drawDistance: 1400 },
+  medium: { anisotropy: 4,  drawDistance: 2200 },
+  high:   { anisotropy: 8,  drawDistance: 3200 },
+  ultra:  { anisotropy: 16, drawDistance: 4500 },
 };
 
-// Materials whose colour is stamped on by a road rather than grown by the terrain.
-const PAVED = { asphalt: 1, concrete: 1, sidewalk: 1, gravel: 1 };
+// ---------------------------------------------------------------------------
+// Marking layouts
+// ---------------------------------------------------------------------------
 
-// Grass endpoints, hand-picked rather than taken from SURFACES.grass: one flat
-// green over four square kilometres reads as painted plastic at any speed.
-const LUSH = [0.19, 0.33, 0.12];
-const DRY  = [0.47, 0.44, 0.22];
-const SOIL = [0.34, 0.26, 0.16];
+/**
+ * Longitudinal stripes for one road style, in metres from the left edge.
+ * `dash`/`gap` cycles are chosen to divide TILE exactly (3+9 and 2+4 both do),
+ * otherwise the dash pattern would visibly stutter at every texture repeat.
+ */
+function markingPlan(markings, width, lanes) {
+  const out = [];
+  const c = width / 2;
+  const line = (m, w, dash, gap) => out.push({ m, w, dash: dash || 0, gap: gap || 0 });
 
-// three.js treats a colour attribute as already being in the working (linear)
-// space, but the palette above and SURFACES[..].colour are authored as sRGB.
-// A 257-entry LUT converts for the price of one lerp instead of a pow per channel.
-const S2L = new Float32Array(257);
-for (let i = 0; i <= 256; i++) {
-  const c = i / 256;
-  S2L[i] = c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  if (markings === 'highway') {
+    const sh = Math.min(3.0, width * 0.13), med = 0.55;
+    line(sh, 0.22); line(width - sh, 0.22);                    // hard shoulders
+    line(c - med, 0.22); line(c + med, 0.22);                  // painted median
+    const run = (c - med - sh) / lanes;
+    for (let k = 1; k < lanes; k++) {
+      line(sh + run * k, 0.16, 3, 9);
+      line(width - sh - run * k, 0.16, 3, 9);
+    }
+  } else if (markings === 'avenue') {
+    const med = 0.17;
+    line(c - med, 0.15); line(c + med, 0.15);
+    // A single-lane link gets the centre line and nothing else; drawing a lane
+    // divider down a one-lane carriageway would invent a lane that is not there.
+    const run = (c - med) / lanes;
+    for (let k = 1; k < lanes; k++) {
+      line(c - med - run * k, 0.14, 3, 9);
+      line(c + med + run * k, 0.14, 3, 9);
+    }
+  } else if (markings === 'street') {
+    line(c, 0.15, 2, 4);
+  } else if (markings === 'rural') {
+    line(c, 0.14, 3, 9);
+  }
+  return out;
 }
-function toLinear(c) {
-  if (c <= 0) return 0;
-  if (c >= 1) return 1;
-  const t = c * 256, i = t | 0;
-  return S2L[i] + (S2L[i + 1] - S2L[i]) * (t - i);
+
+/** Where the tyres actually run, so the surface can be polished there. */
+function wheelTracks(markings, width, lanes) {
+  const c = width / 2, out = [];
+  const sh = markings === 'highway' ? Math.min(3.0, width * 0.13) : 0;
+  const med = markings === 'highway' ? 0.55 : markings === 'avenue' ? 0.17 : 0;
+  const run = (c - med - sh) / lanes;
+  for (let k = 0; k < lanes; k++) {
+    const lc = sh + run * (k + 0.5);
+    out.push(lc - 0.78, lc + 0.78, width - lc - 0.78, width - lc + 0.78);
+  }
+  return out;
 }
 
-function preset(q, fallback) {
-  if (typeof q === 'number') return q < 0.34 ? 'low' : q < 0.75 ? 'medium' : 'high';
-  return QUALITY[q] ? q : fallback;
+// ---------------------------------------------------------------------------
+// Procedural surface textures
+// ---------------------------------------------------------------------------
+
+/**
+ * Noise in METRE space that repeats exactly every TILE metres along the road.
+ *
+ * Metre space matters because a row is 512 px across a 9.5 m lane but only
+ * 160 px along 24 m of it — sampling in pixel space would smear the aggregate
+ * into stripes at wildly different scales on every road kind. `sx` and `sz` are
+ * deliberately different: real tarmac grain IS streaked along the direction of
+ * travel by tyre polish and water runoff.
+ */
+function grain(mx, mz, sx, sz, seed, oct) {
+  const a = fbm(mx / sx, mz / sz, seed, oct);
+  const b = fbm(mx / sx, (mz - TILE) / sz, seed, oct);
+  return lerp(a, b, mz / TILE);
 }
 
-const clock = typeof performance !== 'undefined' && performance.now ? performance : Date;
+/** A carriageway row: base tone, wheel tracks, grime at the edge, markings. */
+function roadSpec(markings, width, lanes, surface, seed) {
+  const dirt = surface === 'dirt';
+  const c = width / 2;
+  const tracks = dirt ? [c - 0.78, c + 0.78] : wheelTracks(markings, width, lanes);
+  const trackDepth = dirt ? 0.18 : 0.075;
+  const trackWidth = dirt ? 0.50 : 0.62;
+  const edgeLight = dirt ? 0.13 : 0.10;
+  const crown = dirt ? 0.08 : 0;
 
-export function createTerrain(world, ground, opts = {}) {
-  const CHUNK = opts.chunk ?? 128;
-  const SURFACES = ground.SURFACES;
-  const terrain = world.terrain;
-  const tintSeed = ((terrain.seed ?? 0) | 0) + 5501;
-  const shadows = opts.shadows ?? false;
-  const managed = !!(THREE.ColorManagement && THREE.ColorManagement.enabled);
+  return {
+    kind: 'road', width, seed,
+    base: dirt ? [128, 106, 76] : [62, 65, 69],
+    stripes: dirt ? [] : markingPlan(markings, width, lanes),
+    gx: dirt ? 0.20 : 0.13, gz: dirt ? 0.62 : 0.42, grainAmt: dirt ? 0.17 : 0.10,
+    bx: dirt ? 2.0 : 2.6, bz: dirt ? 4.2 : 5.5, blotchAmt: dirt ? 0.11 : 0.05,
+    cross(m) {
+      let t = 1 + edgeLight * smoothstep(width * 0.34, width * 0.5, Math.abs(m - c));
+      for (let i = 0; i < tracks.length; i++) {
+        const q = (m - tracks[i]) / trackWidth;
+        t *= 1 - trackDepth * Math.exp(-q * q);
+      }
+      if (crown) { const q = (m - c) / 0.9; t *= 1 + crown * Math.exp(-q * q); }
+      // The last handspan of tarmac is always dirtier than the rest of it.
+      t *= 1 - 0.26 * (1 - smoothstep(0, 0.45, Math.min(m, width - m)));
+      return t;
+    },
+    // Weeds down the crown and along the verge, but only where nothing drives.
+    moss: dirt ? (m) => {
+      const q = (m - c) / 0.85;
+      return 0.34 * Math.exp(-q * q) + 0.26 * (1 - smoothstep(0, 1.0, Math.min(m, width - m)));
+    } : null,
+  };
+}
+
+/** Concrete paving, 4.2 m across, jointed every 1.2 m so it tiles into TILE. */
+function walkSpec(seed) {
+  return {
+    kind: 'walk', width: WALK_W, seed, base: [118, 120, 126], stripes: [],
+    gx: 0.16, gz: 0.24, grainAmt: 0.075, bx: 1.4, bz: 1.8, blotchAmt: 0.05,
+    // Grit and grime collect against the kerb, which is the road-side edge.
+    cross: (m) => 1 - 0.13 * (1 - smoothstep(0, 0.6, m)),
+    moss: null,
+  };
+}
+
+/** The 8.5 cm kerb face. U runs up the face, so `width` here is nominal. */
+function kerbSpec(seed) {
+  return {
+    kind: 'kerb', width: 1, seed, base: [132, 133, 137], stripes: [],
+    gx: 0.9, gz: 0.22, grainAmt: 0.09, bx: 3.0, bz: 1.9, blotchAmt: 0.05,
+    // Bright along the scuffed top arris, dark down in the gutter.
+    cross: (u) => 0.70 + 0.42 * smoothstep(0.05, 0.85, u),
+    moss: null,
+  };
+}
+
+/** Junction fill: no markings, worn smooth by everything that turns on it. */
+function patchSpec(surface, seed) {
+  const dirt = surface === 'dirt';
+  return {
+    kind: 'patch', width: 20, seed, base: dirt ? [122, 101, 73] : [59, 62, 66], stripes: [],
+    gx: dirt ? 0.26 : 0.17, gz: dirt ? 0.30 : 0.20, grainAmt: dirt ? 0.16 : 0.10,
+    bx: dirt ? 2.4 : 3.0, bz: dirt ? 2.6 : 3.2, blotchAmt: dirt ? 0.12 : 0.07,
+    cross: () => 1,
+    moss: null,
+  };
+}
+
+/** Paints one atlas row into `ctx`, which is `w` x `h` and owned by the caller. */
+function paintRow(ctx, w, h, spec, rnd) {
+  const img = ctx.createImageData(w, h);
+  const d = img.data;
+  const mPerX = spec.width / w;
+  const mPerY = TILE / h;
+  const base = spec.base;
+
+  for (let py = 0; py < h; py++) {
+    const mz = (py + 0.5) * mPerY;
+    for (let px = 0; px < w; px++) {
+      const m = (px + 0.5) * mPerX;
+      let t = spec.cross(spec.kind === 'kerb' ? (px + 0.5) / w : m);
+      t *= 1 + grain(m, mz, spec.gx, spec.gz, spec.seed, 3) * spec.grainAmt;
+      t *= 1 + grain(m, mz, spec.bx, spec.bz, spec.seed + 91, 2) * spec.blotchAmt;
+      let r = base[0] * t, g = base[1] * t, b = base[2] * t;
+      if (spec.moss) {
+        const k = clamp(spec.moss(m) * (0.55 + 0.45 * grain(m, mz, 1.1, 3.0, spec.seed + 7, 2)), 0, 1);
+        r = lerp(r, 74, k); g = lerp(g, 86, k); b = lerp(b, 50, k);
+      }
+      const o = (py * w + px) * 4;
+      d[o] = r; d[o + 1] = g; d[o + 2] = b; d[o + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+
+  if (spec.kind === 'road') paintStripes(ctx, w, h, spec, rnd);
+  else if (spec.kind === 'walk' || spec.kind === 'kerb') paintJoints(ctx, w, h, spec, rnd);
+  ctx.globalAlpha = 1;
+}
+
+/** Lane lines, then enough wear that they do not read as freshly applied. */
+function paintStripes(ctx, w, h, spec, rnd) {
+  if (!spec.stripes.length) return;
+  const pxm = w / spec.width, pym = h / TILE;
+
+  ctx.fillStyle = 'rgb(226,224,212)';
+  for (const st of spec.stripes) {
+    const x0 = (st.m - st.w / 2) * pxm;
+    const ww = Math.max(1.4, st.w * pxm);
+    ctx.globalAlpha = 0.86;
+    if (!st.dash) { ctx.fillRect(x0, 0, ww, h); continue; }
+    const cyc = st.dash + st.gap;
+    for (let s = 0; s < TILE - 1e-6; s += cyc) ctx.fillRect(x0, s * pym, ww, st.dash * pym);
+  }
+
+  const b = spec.base;
+  ctx.fillStyle = `rgb(${b[0]},${b[1]},${b[2]})`;
+  for (let i = 0; i < 110; i++) {
+    const st = spec.stripes[(rnd() * spec.stripes.length) | 0];
+    const y = rnd() * h;
+    const hgt = (0.15 + rnd() * 0.7) * pym;
+    ctx.globalAlpha = 0.10 + rnd() * 0.24;
+    ctx.fillRect((st.m - st.w) * pxm, y, st.w * 2 * pxm, hgt);
+    // A scuff clipped by the top of the row must reappear at the bottom, or
+    // the tile shows a half-scuff every 24 m all the way down the road.
+    if (y + hgt > h) ctx.fillRect((st.m - st.w) * pxm, y - h, st.w * 2 * pxm, hgt);
+  }
+}
+
+/** Slab joints, laid at the same arc lengths on the walk and on the kerb. */
+function paintJoints(ctx, w, h, spec, rnd) {
+  const pym = h / TILE;
+  const jw = Math.max(1, Math.round(0.05 * pym));
+  const slabs = TILE / 1.2;
+
+  for (let i = 0; i < slabs; i++) {
+    const y = i * 1.2 * pym;
+    // Each slab was poured on a different day.
+    const tone = rnd() < 0.5 ? 255 : 0;
+    ctx.fillStyle = `rgb(${tone},${tone},${tone})`;
+    ctx.globalAlpha = 0.015 + rnd() * 0.035;
+    ctx.fillRect(0, y, w, 1.2 * pym);
+    ctx.fillStyle = 'rgb(0,0,0)';
+    ctx.globalAlpha = 0.34;
+    ctx.fillRect(0, y, w, jw);
+  }
+  if (spec.kind === 'walk') {
+    ctx.globalAlpha = 0.26;
+    ctx.fillRect(w * 0.5 - jw * 0.5, 0, jw, h);
+  }
+}
+
+/**
+ * Stacks every row into one canvas and returns the V range of each.
+ *
+ * The slot height shrinks if a world ever needs more rows than fit, so the
+ * atlas can never exceed the 2048 px that WebGL2 guarantees.
+ */
+function buildAtlas(specs, seed) {
+  const rows = specs.length;
+  const slot = Math.max(48, Math.min(SLOT_MAX, Math.floor(ATLAS_MAX / rows)));
+  const contentH = slot - GUARD * 2;
+  const H = slot * rows;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = ATLAS_W; canvas.height = H;
+  const ctx = canvas.getContext('2d');
+
+  const scratch = document.createElement('canvas');
+  scratch.width = ATLAS_W; scratch.height = contentH;
+  const sctx = scratch.getContext('2d');
+
+  const rnd = mulberry((seed ^ 0x51ed2b) >>> 0);
+  const ranges = [];
+  for (let r = 0; r < rows; r++) {
+    paintRow(sctx, ATLAS_W, contentH, specs[r], rnd);
+    const top = r * slot;
+    ctx.drawImage(scratch, 0, 0, ATLAS_W, contentH, 0, top + GUARD, ATLAS_W, contentH);
+    // Guards carry the tile across the seam so bilinear filtering has the right
+    // neighbours at both ends of the row.
+    ctx.drawImage(scratch, 0, contentH - GUARD, ATLAS_W, GUARD, 0, top, ATLAS_W, GUARD);
+    ctx.drawImage(scratch, 0, 0, ATLAS_W, GUARD, 0, top + GUARD + contentH, ATLAS_W, GUARD);
+    ranges.push({ v0: (top + GUARD) / H, v1: (top + GUARD + contentH) / H });
+  }
+  return { canvas, ranges, width: ATLAS_W, height: H };
+}
+
+// ---------------------------------------------------------------------------
+// Geometry buffers
+// ---------------------------------------------------------------------------
+
+// Scratch vertex records. Filling four reused objects keeps the builder legible
+// without littering the heap with a million three-field literals at load.
+const _a = { x: 0, y: 0, z: 0, u: 0, v: 0, t: 1 };
+const _b = { x: 0, y: 0, z: 0, u: 0, v: 0, t: 1 };
+const _c = { x: 0, y: 0, z: 0, u: 0, v: 0, t: 1 };
+const _d = { x: 0, y: 0, z: 0, u: 0, v: 0, t: 1 };
+
+function V(o, x, y, z, u, v, t) {
+  o.x = x; o.y = y; o.z = z; o.u = u; o.v = v; o.t = t;
+  return o;
+}
+
+function vert(bk, x, y, z, nx, ny, nz, u, v, t) {
+  bk.pos.push(x, y, z);
+  bk.nor.push(nx, ny, nz);
+  bk.uv.push(u, v);
+  bk.col.push(t, t, t);
+}
+
+/**
+ * One flat triangle, wound so its normal faces `up`.
+ *
+ * Junction fans and kerb returns are assembled from polylines whose handedness
+ * depends on which end of an edge the node happens to be, and getting that
+ * wrong shows up as invisible tarmac. Deciding the winding from the geometry
+ * itself removes the whole class of mistake.
+ */
+function tri(bk, p, q, r, ux, uy, uz) {
+  const ax = q.x - p.x, ay = q.y - p.y, az = q.z - p.z;
+  const bx = r.x - p.x, by = r.y - p.y, bz = r.z - p.z;
+  let nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+  const len = Math.hypot(nx, ny, nz);
+  if (len < 1e-9) return;                       // collapsed; nothing to draw
+  nx /= len; ny /= len; nz /= len;
+  if (nx * ux + ny * uy + nz * uz < 0) {
+    nx = -nx; ny = -ny; nz = -nz;
+    const s = q; q = r; r = s;
+  }
+  vert(bk, p.x, p.y, p.z, nx, ny, nz, p.u, p.v, p.t);
+  vert(bk, q.x, q.y, q.z, nx, ny, nz, q.u, q.v, q.t);
+  vert(bk, r.x, r.y, r.z, nx, ny, nz, r.u, r.v, r.t);
+}
+
+function quad(bk, p, q, r, s, ux, uy, uz) {
+  tri(bk, p, q, r, ux, uy, uz);
+  tri(bk, p, r, s, ux, uy, uz);
+}
+
+// ---------------------------------------------------------------------------
+// The module
+// ---------------------------------------------------------------------------
+
+export function createRoads(world, ground, opts = {}) {
+  const t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+  const REGION = opts.region ?? 512;
+  const seed = opts.seed ?? world.seed ?? 0;
+  const half = world.half;
+  const GRID = Math.ceil((half * 2) / REGION);
+  const CITY = { street: 1, avenue: 1, link: 1 };   // kinds that get sidewalks
+
+  // ---- atlas rows -------------------------------------------------------
+  // Registered in a fixed pass over the world so the layout is deterministic
+  // and the atlas holds nothing the map does not actually use.
+  const specs = [];
+  const rowOf = new Map();
+  function row(key, make) {
+    let r = rowOf.get(key);
+    if (r === undefined) { r = specs.length; specs.push(make()); rowOf.set(key, r); }
+    return r;
+  }
+
+  const edgeRow = new Int16Array(world.edges.length);
+  let anyCity = false;
+  for (const e of world.edges) {
+    const key = `${e.markings}|${e.width}|${e.lanes}|${e.surface}`;
+    edgeRow[e.i] = row(key, () => roadSpec(e.markings, e.width, e.lanes, e.surface, seed + e.width * 17));
+    if (CITY[e.kind]) anyCity = true;
+  }
+  const walkRow = anyCity ? row('walk', () => walkSpec(seed + 311)) : -1;
+  const kerbRow = anyCity ? row('kerb', () => kerbSpec(seed + 733)) : -1;
+
+  const junctions = world.nodes.filter((n) => n.edges.length >= 3);
+  const patchRow = { asphalt: -1, dirt: -1 };
+  const patchKind = new Map();
+  for (const n of junctions) {
+    let dirt = 0;
+    for (const ei of n.edges) if (world.edges[ei].surface === 'dirt') dirt++;
+    const s = dirt * 2 > n.edges.length ? 'dirt' : 'asphalt';
+    patchKind.set(n.i, s);
+    if (patchRow[s] < 0) patchRow[s] = row('patch:' + s, () => patchSpec(s, seed + 977));
+  }
+
+  const atlas = buildAtlas(specs, seed);
+  const ranges = atlas.ranges;
+
+  // ---- buckets ----------------------------------------------------------
+  const buckets = new Map();
+  function bucket(x, z) {
+    const i = clamp(Math.floor((x + half) / REGION), 0, GRID - 1);
+    const j = clamp(Math.floor((z + half) / REGION), 0, GRID - 1);
+    const k = j * GRID + i;
+    let bk = buckets.get(k);
+    if (!bk) {
+      bk = { cx: (i + 0.5) * REGION - half, cz: (j + 0.5) * REGION - half, pos: [], nor: [], uv: [], col: [] };
+      buckets.set(k, bk);
+    }
+    return bk;
+  }
+
+  // Low-frequency patchiness in world space. The texture repeats every 24 m;
+  // this does not, which is what stops the eye locking onto the tile.
+  const tseed = (seed + 4021) | 0;
+  const tint = (x, z) => 1 + fbm(x * 0.0143, z * 0.0143, tseed, 2) * 0.055;
+
+  const vOf = (r, v) => ranges[r].v0 + v * (ranges[r].v1 - ranges[r].v0);
+
+  // ---- junction setbacks ------------------------------------------------
+  // Ribbons are pulled back from every junction and the gap is filled with a
+  // patch. Running them all the way in instead leaves wedges of bare terrain
+  // between the mouths, which is the single most obvious tell that a road
+  // network was generated rather than built.
+  const setback = new Float64Array(world.nodes.length);
+  for (const n of junctions) {
+    let maxHalf = 0, minLen = Infinity;
+    for (const ei of n.edges) {
+      const e = world.edges[ei];
+      if (e.width / 2 > maxHalf) maxHalf = e.width / 2;
+      if (e.length < minLen) minLen = e.length;
+    }
+    setback[n.i] = Math.min(maxHalf * 1.25, minLen * 0.34, 26);
+  }
+  const trim = new Float64Array(world.edges.length * 2);
+  for (const e of world.edges) {
+    let s0 = setback[e.a], s1 = setback[e.b];
+    const cap = e.length * 0.86;
+    if (s0 + s1 > cap && s0 + s1 > 0) { const k = cap / (s0 + s1); s0 *= k; s1 *= k; }
+    trim[e.i * 2] = s0; trim[e.i * 2 + 1] = s1;
+  }
+
+  // ---- carriageway ribbons, kerbs and sidewalks --------------------------
+  const pool = [];
+  function station(i) {
+    let s = pool[i];
+    if (!s) {
+      pool[i] = s = {
+        cx: 0, cy: 0, cz: 0, nx: 0, ny: 1, nz: 0, ax: 0, az: 0,
+        lx: 0, ly: 0, lz: 0, lt: 1, rx: 0, ry: 0, rz: 0, rt: 1,
+        ox: 0, oy: 0, oz: 0, qx: 0, qy: 0, qz: 0,
+      };
+    }
+    return s;
+  }
+
+  const arcs = [];
+  let quads = 0;
+
+  for (const e of world.edges) {
+    if (!e.pts || e.pts.length < 2 || e.length < 0.5) continue;
+    const s0 = trim[e.i * 2], s1 = e.length - trim[e.i * 2 + 1];
+    const usable = s1 - s0;
+    if (usable < 0.6) continue;
+
+    arcs.length = 0;
+    const nFull = Math.floor(usable / STEP);
+    const rem = usable - nFull * STEP;
+    for (let i = 0; i <= nFull; i++) arcs.push(s0 + i * STEP);
+    // The ribbon has to end EXACTLY where the junction patch starts, so a short
+    // remainder is absorbed into the last quad rather than dropped. V then runs
+    // a little past 1, which is precisely what the guard band is there for.
+    if (rem > 0.4) arcs.push(s1); else arcs[arcs.length - 1] = s1;
+    if (arcs.length < 2) continue;
+
+    const h = e.width / 2;
+    const rr = edgeRow[e.i];
+    const walk = walkRow >= 0 && CITY[e.kind] === 1;
+
+    for (let i = 0; i < arcs.length; i++) {
+      const p = pointOnEdge(e, arcs[i]);
+      const st = station(i);
+      st.ax = p.nx; st.az = p.nz;                 // right-hand normal of the road
+      const lx = p.x - p.nx * h, lz = p.z - p.nz * h;
+      const rx = p.x + p.nx * h, rz = p.z + p.nz * h;
+      st.lx = lx; st.lz = lz; st.ly = ground.heightAt(lx, lz) + LIFT;
+      st.rx = rx; st.rz = rz; st.ry = ground.heightAt(rx, rz) + LIFT;
+      st.lt = tint(lx, lz); st.rt = tint(rx, rz);
+      st.cx = p.x; st.cz = p.z; st.cy = (st.ly + st.ry) * 0.5;
+      if (walk) {
+        const ox = p.x - p.nx * (h + WALK_W), oz = p.z - p.nz * (h + WALK_W);
+        const qx = p.x + p.nx * (h + WALK_W), qz = p.z + p.nz * (h + WALK_W);
+        st.ox = ox; st.oz = oz; st.oy = ground.heightAt(ox, oz) + LIFT + KERB;
+        st.qx = qx; st.qz = qz; st.qy = ground.heightAt(qx, qz) + LIFT + KERB;
+      }
+    }
+
+    // Per-station normals rather than per-face ones. Roads are the surface the
+    // player stares at for the whole game; flat shading bands every 8 m quad
+    // across a crest and reads as faceting on an otherwise smooth grade.
+    const last = arcs.length - 1;
+    for (let i = 0; i <= last; i++) {
+      const a = pool[i > 0 ? i - 1 : 0], b = pool[i < last ? i + 1 : last];
+      const tx = b.cx - a.cx, ty = b.cy - a.cy, tz = b.cz - a.cz;
+      const st = pool[i];
+      const dx = st.rx - st.lx, dy = st.ry - st.ly, dz = st.rz - st.lz;
+      let nx = dy * tz - dz * ty, ny = dz * tx - dx * tz, nz = dx * ty - dy * tx;
+      const len = Math.hypot(nx, ny, nz) || 1;
+      st.nx = nx / len; st.ny = ny / len; st.nz = nz / len;
+    }
+
+    for (let i = 0; i < last; i++) {
+      const A = pool[i], B = pool[i + 1];
+      const bk = bucket((A.cx + B.cx) * 0.5, (A.cz + B.cz) * 0.5);
+      const va = vOf(rr, (i % VSTEPS) / VSTEPS);
+      const vb = vOf(rr, (i % VSTEPS) / VSTEPS + (arcs[i + 1] - arcs[i]) / TILE);
+
+      // Winding verified against forward = -Z, right = +X: the road's
+      // right-hand normal is p.nx/p.nz, and (left, right, right') faces up.
+      vert(bk, A.lx, A.ly, A.lz, A.nx, A.ny, A.nz, 0, va, A.lt);
+      vert(bk, A.rx, A.ry, A.rz, A.nx, A.ny, A.nz, 1, va, A.rt);
+      vert(bk, B.rx, B.ry, B.rz, B.nx, B.ny, B.nz, 1, vb, B.rt);
+      vert(bk, A.lx, A.ly, A.lz, A.nx, A.ny, A.nz, 0, va, A.lt);
+      vert(bk, B.rx, B.ry, B.rz, B.nx, B.ny, B.nz, 1, vb, B.rt);
+      vert(bk, B.lx, B.ly, B.lz, B.nx, B.ny, B.nz, 0, vb, B.lt);
+      quads++;
+
+      if (!walk) continue;
+      const kva = vOf(kerbRow, (i % VSTEPS) / VSTEPS);
+      const kvb = vOf(kerbRow, (i % VSTEPS) / VSTEPS + (arcs[i + 1] - arcs[i]) / TILE);
+      const wva = vOf(walkRow, (i % VSTEPS) / VSTEPS);
+      const wvb = vOf(walkRow, (i % VSTEPS) / VSTEPS + (arcs[i + 1] - arcs[i]) / TILE);
+
+      // Left side, then right. The kerb face points away from the carriageway.
+      quad(bk,
+        V(_a, A.lx, A.ly, A.lz, 0, kva, A.lt), V(_b, A.lx, A.ly + KERB, A.lz, 1, kva, A.lt),
+        V(_c, B.lx, B.ly + KERB, B.lz, 1, kvb, B.lt), V(_d, B.lx, B.ly, B.lz, 0, kvb, B.lt),
+        -A.ax, 0, -A.az);
+      quad(bk,
+        V(_a, A.lx, A.ly + KERB, A.lz, 0, wva, A.lt), V(_b, A.ox, A.oy, A.oz, 1, wva, A.lt),
+        V(_c, B.ox, B.oy, B.oz, 1, wvb, B.lt), V(_d, B.lx, B.ly + KERB, B.lz, 0, wvb, B.lt),
+        0, 1, 0);
+      quad(bk,
+        V(_a, A.rx, A.ry, A.rz, 0, kva, A.rt), V(_b, A.rx, A.ry + KERB, A.rz, 1, kva, A.rt),
+        V(_c, B.rx, B.ry + KERB, B.rz, 1, kvb, B.rt), V(_d, B.rx, B.ry, B.rz, 0, kvb, B.rt),
+        A.ax, 0, A.az);
+      quad(bk,
+        V(_a, A.rx, A.ry + KERB, A.rz, 0, wva, A.rt), V(_b, A.qx, A.qy, A.qz, 1, wva, A.rt),
+        V(_c, B.qx, B.qy, B.qz, 1, wvb, B.rt), V(_d, B.rx, B.ry + KERB, B.rz, 0, wvb, B.rt),
+        0, 1, 0);
+      quads += 4;
+    }
+  }
+
+  // ---- junction patches and kerb returns ---------------------------------
+  const arms = [];
+  let patches = 0;
+
+  for (const n of junctions) {
+    arms.length = 0;
+    for (const ei of n.edges) {
+      const e = world.edges[ei];
+      if (!e.pts || e.length < 0.5) continue;
+      const atA = e.a === n.i;
+      const p = pointOnEdge(e, atA ? trim[ei * 2] : e.length - trim[ei * 2 + 1]);
+      if (!p) continue;
+      // Leaving the node runs against increasing arc length whenever the node
+      // is the far end of the edge, and the road's normal has to turn with it.
+      const sg = atA ? 1 : -1;
+      const nx = p.nx * sg, nz = p.nz * sg, h = e.width / 2;
+      arms.push({
+        city: CITY[e.kind] === 1,
+        ang: Math.atan2(p.tz * sg, p.tx * sg),
+        ax: p.x - nx * h, az: p.z - nz * h,                     // clockwise-most
+        bx: p.x + nx * h, bz: p.z + nz * h,                     // anticlockwise-most
+        ox: p.x - nx * (h + WALK_W), oz: p.z - nz * (h + WALK_W),
+        qx: p.x + nx * (h + WALK_W), qz: p.z + nz * (h + WALK_W),
+      });
+    }
+    if (arms.length < 3) continue;
+    arms.sort((u, v) => u.ang - v.ang);
+
+    const bk = bucket(n.x, n.z);
+    const cy = ground.heightAt(n.x, n.z) + LIFT;
+    const ct = tint(n.x, n.z);
+    const pr = patchRow[patchKind.get(n.i)];
+
+    // Fan from the node out to every mouth corner in turn. Sorted by the angle
+    // the road leaves at, the corners form a star-shaped ring around the node,
+    // so a fan covers both the mouths and the wedges between them.
+    let R = 3;
+    for (const m of arms) {
+      R = Math.max(R, Math.hypot(m.ax - n.x, m.az - n.z), Math.hypot(m.bx - n.x, m.bz - n.z));
+    }
+    const inv = 0.5 / R;
+    const uvP = (o, x, y, z) => V(o, x, y, z,
+      clamp(0.5 + (x - n.x) * inv, 0, 1),
+      vOf(pr, clamp(0.5 + (z - n.z) * inv, 0, 1)), tint(x, z));
+
+    for (let k = 0; k < arms.length * 2; k++) {
+      const m0 = arms[(k >> 1) % arms.length], m1 = arms[((k + 1) >> 1) % arms.length];
+      const x0 = (k & 1) ? m0.bx : m0.ax, z0 = (k & 1) ? m0.bz : m0.az;
+      const x1 = (k & 1) ? m1.ax : m1.bx, z1 = (k & 1) ? m1.az : m1.bz;
+      tri(bk,
+        V(_a, n.x, cy, n.z, 0.5, vOf(pr, 0.5), ct),
+        uvP(_b, x0, ground.heightAt(x0, z0) + LIFT, z0),
+        uvP(_c, x1, ground.heightAt(x1, z1) + LIFT, z1),
+        0, 1, 0);
+    }
+    patches++;
+
+    if (walkRow < 0) continue;
+    // Kerb returns. Without them every city intersection has a four-way gap in
+    // the pavement, which is far more noticeable than the corners themselves.
+    for (let k = 0; k < arms.length; k++) {
+      const m0 = arms[k], m1 = arms[(k + 1) % arms.length];
+      if (!m0.city || !m1.city) continue;
+      const chord = Math.hypot(m1.ax - m0.bx, m1.az - m0.bz);
+      if (chord < 0.4) continue;
+      const wv = vOf(walkRow, Math.min(1, chord / TILE)), wv0 = vOf(walkRow, 0);
+      const kv = vOf(kerbRow, Math.min(1, chord / TILE)), kv0 = vOf(kerbRow, 0);
+      const y0 = ground.heightAt(m0.bx, m0.bz) + LIFT;
+      const y1 = ground.heightAt(m1.ax, m1.az) + LIFT;
+      // The face has to look away from the junction, whichever way round the
+      // wedge happens to be wound.
+      const mx = (m0.bx + m1.ax) * 0.5 - n.x, mz = (m0.bz + m1.az) * 0.5 - n.z;
+
+      const t0 = tint(m0.bx, m0.bz), t1 = tint(m1.ax, m1.az);
+      quad(bk,
+        V(_a, m0.bx, y0, m0.bz, 0, kv0, t0), V(_b, m0.bx, y0 + KERB, m0.bz, 1, kv0, t0),
+        V(_c, m1.ax, y1 + KERB, m1.az, 1, kv, t1), V(_d, m1.ax, y1, m1.az, 0, kv, t1),
+        mx, 0, mz);
+      quad(bk,
+        V(_a, m0.bx, y0 + KERB, m0.bz, 0, wv0, t0),
+        V(_b, m0.qx, ground.heightAt(m0.qx, m0.qz) + LIFT + KERB, m0.qz, 1, wv0, tint(m0.qx, m0.qz)),
+        V(_c, m1.ox, ground.heightAt(m1.ox, m1.oz) + LIFT + KERB, m1.oz, 1, wv, tint(m1.ox, m1.oz)),
+        V(_d, m1.ax, y1 + KERB, m1.az, 0, wv, t1),
+        0, 1, 0);
+    }
+  }
+
+  // ---- material and meshes -----------------------------------------------
+  const texture = new THREE.CanvasTexture(atlas.canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  // U spans the carriageway and V never leaves its row, so both axes clamp.
+  // The tiling along the road is done in the UVs, not by the sampler.
+  texture.wrapS = THREE.ClampToEdgeWrapping;
+  texture.wrapT = THREE.ClampToEdgeWrapping;
+  texture.magFilter = THREE.LinearFilter;
+  texture.minFilter = THREE.LinearMipmapLinearFilter;
+  texture.generateMipmaps = true;
+  texture.anisotropy = opts.anisotropy ?? 8;
+
+  const material = new THREE.MeshLambertMaterial({
+    map: texture,
+    vertexColors: true,
+    // Belt and braces with the 4 cm lift: the terrain mesh is built from the
+    // same height field, so at grazing angles a metre away the two surfaces are
+    // within a depth-buffer step of each other.
+    polygonOffset: true,
+    polygonOffsetFactor: -2,
+    polygonOffsetUnits: -4,
+  });
 
   const group = new THREE.Group();
-  group.name = 'terrain';
+  group.name = 'roads';
   group.matrixAutoUpdate = false;
 
-  // Lambert, not Standard: this mesh covers most of the screen, and a per-vertex
-  // diffuse term over a quarter-million triangles is a great deal cheaper than a
-  // per-pixel BRDF for ground with no specular character. Pass opts.material to
-  // match the rest of the scene if that trade ever stops being worth it.
-  const material = opts.material ?? new THREE.MeshLambertMaterial({ vertexColors: true });
-  const ownsMaterial = !opts.material;
+  const meshes = [];
+  const centreX = new Float32Array(buckets.size);
+  const centreZ = new Float32Array(buckets.size);
+  let triangles = 0, vertices = 0;
 
-  let quality = preset(opts.quality, 'high');
-  let rings = QUALITY[quality].rings;
-  let grids = QUALITY[quality].grids;
-  let budgetMs = opts.budgetMs ?? QUALITY[quality].budgetMs;
+  for (const bk of buckets.values()) {
+    if (bk.pos.length < 9) continue;
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(bk.pos, 3));
+    g.setAttribute('normal', new THREE.Float32BufferAttribute(bk.nor, 3));
+    g.setAttribute('uv', new THREE.Float32BufferAttribute(bk.uv, 2));
+    g.setAttribute('color', new THREE.Float32BufferAttribute(bk.col, 3));
+    g.computeBoundingSphere();
 
-  const stats = {
-    quality, chunks: 0, triangles: 0, pending: 0,
-    viewDistance: (rings[rings.length - 1] + 0.5) * CHUNK,
-  };
-
-  // Scratch, reused for every vertex of every chunk, forever.
-  const gs = { y: 0, nx: 0, ny: 1, nz: 0, surface: 'grass', grip: 0, roughness: 0, rolling: 0, dust: 0 };
-  const rgb = [0, 0, 0], rgb2 = [0, 0, 0];
-  let hgrid = new Float32Array(0);   // heights, including the ring outside the chunk
-
-  const trisFor = (G) => (G + 2) * (G + 2) * 2;
-
-  // =========================================================================
-  // Colour
-  // =========================================================================
-
-  /** Base colour of a surface at a point, before mottle and occlusion. */
-  function palette(surface, x, z, ny, out) {
-    if (surface === 'grass') {
-      // A slow wet/dry sweep at field scale, then bare soil wherever the ground
-      // is too steep to hold turf.
-      const dry = clamp(fbm(x * 0.0042, z * 0.0042, tintSeed, 3) * 0.62 + 0.5, 0, 1);
-      const bare = smoothstep(0.14, 0.55, 1 - ny) * 0.7;
-      out[0] = lerp(lerp(LUSH[0], DRY[0], dry), SOIL[0], bare);
-      out[1] = lerp(lerp(LUSH[1], DRY[1], dry), SOIL[1], bare);
-      out[2] = lerp(lerp(LUSH[2], DRY[2], dry), SOIL[2], bare);
-      return;
-    }
-    const hex = (SURFACES[surface] || SURFACES.grass).colour;
-    out[0] = ((hex >> 16) & 255) / 255;
-    out[1] = ((hex >> 8) & 255) / 255;
-    out[2] = (hex & 255) / 255;
+    const mesh = new THREE.Mesh(g, material);
+    mesh.name = 'roads.region';
+    mesh.receiveShadow = true;
+    mesh.castShadow = false;                 // a flat sheet casts nothing useful
+    mesh.matrixAutoUpdate = false;
+    mesh.updateMatrix();
+    centreX[meshes.length] = bk.cx;
+    centreZ[meshes.length] = bk.cz;
+    meshes.push(mesh);
+    group.add(mesh);
+    vertices += bk.pos.length / 3;
+    triangles += bk.pos.length / 9;
   }
+  group.updateMatrix();
+  buckets.clear();
+
+  // ---- runtime ------------------------------------------------------------
+  let cullDist = opts.drawDistance ?? 2600;
+  const regionRadius = REGION * Math.SQRT1_2;
+  let acc = 1;                               // forces a pass on the first frame
 
   /**
-   * `fine` fades the short-wavelength mottle out on coarse chunks, where a 34 m
-   * pattern sampled every 16 m aliases into blotches rather than reading as
-   * texture. `roadMix` does the same job for road materials: a street is
-   * narrower than a far chunk's vertex spacing, so the stamped asphalt lands on
-   * scattered vertices and scatters grey measles over the countryside. Pulling
-   * it back toward the ground it sits on costs nothing that matters — the road
-   * renderer draws the real carriageway, and at that range there is fog.
+   * Distance culling only — the roads never move, so there is nothing else to
+   * do here. Re-evaluated at 20 Hz rather than every frame: a region's
+   * visibility cannot change meaningfully in 50 ms at any speed the car can
+   * reach, and toggling on the frame boundary makes the horizon flicker.
    */
-  function tint(surface, x, z, ny, fine, roadMix, out) {
-    palette(surface, x, z, ny, out);
-    if (roadMix > 0 && PAVED[surface] === 1) {
-      palette(terrain.cover(x, z, ny), x, z, ny, rgb2);
-      out[0] = lerp(out[0], rgb2[0], roadMix);
-      out[1] = lerp(out[1], rgb2[1], roadMix);
-      out[2] = lerp(out[2], rgb2[2], roadMix);
-    }
-    const amp = PAVED[surface] === 1 ? 0.06 : 0.17;
-    const lum = valueNoise(x * 0.0091, z * 0.0091, tintSeed + 7);
-    const mot = fine > 0 ? valueNoise(x * 0.029, z * 0.029, tintSeed + 31) : 0;
-    const k = 1 + lum * amp * 0.62 + mot * amp * 0.45 * fine;
-    out[0] *= k; out[1] *= k; out[2] *= k;
-  }
-
-  // =========================================================================
-  // Geometry pool
-  // =========================================================================
-  // Keyed by grid resolution rather than LOD index, because setQuality() changes
-  // which resolution a level uses. Every chunk of a given resolution has an
-  // identical index buffer, so one is built and shared by all of them.
-
-  const pools = new Map();
-  const indices = new Map();
-
-  function indexFor(G) {
-    let attr = indices.get(G);
-    if (attr) return attr;
-    const D = G + 3, n = G + 2;
-    const arr = new Uint16Array(n * n * 6);   // (67^2 - 1) verts still fits Uint16
-    let w = 0;
-    for (let a = 0; a < n; a++) {
-      for (let b = 0; b < n; b++) {
-        // (a,b) -> (a,b+1) -> (a+1,b+1) crosses to +Y. Check it by hand before
-        // changing it; a flipped ground plane is invisible until it is backfacing.
-        const A = a * D + b, B = A + 1, C = A + D + 1, E = A + D;
-        arr[w++] = A; arr[w++] = B; arr[w++] = C;
-        arr[w++] = A; arr[w++] = C; arr[w++] = E;
-      }
-    }
-    attr = new THREE.BufferAttribute(arr, 1);
-    indices.set(G, attr);
-    return attr;
-  }
-
-  function acquire(G) {
-    const pool = pools.get(G);
-    if (pool && pool.length) return pool.pop();
-    const V = (G + 3) * (G + 3);
-    const geom = new THREE.BufferGeometry();
-    geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(V * 3), 3));
-    geom.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(V * 3), 3));
-    geom.setAttribute('color', new THREE.BufferAttribute(new Float32Array(V * 3), 3));
-    geom.setIndex(indexFor(G));
-    geom.boundingSphere = new THREE.Sphere();
-    return geom;
-  }
-
-  function release(G, geom) {
-    // A resolution the current preset no longer asks for would never be popped
-    // again, so it goes back to the driver rather than sitting in a pool.
-    if (grids.indexOf(G) < 0) { geom.dispose(); return; }
-    let pool = pools.get(G);
-    if (!pool) pools.set(G, (pool = []));
-    pool.push(geom);
-  }
-
-  // =========================================================================
-  // Chunk fill, resumable
-  // =========================================================================
-  // Exactly one fill is ever in flight, which is what lets them all share the
-  // one scratch height grid. Nothing is shown until the fill completes: a new
-  // chunk has no mesh yet, and a chunk changing LOD keeps its old one, so the
-  // player never sees a hole where the ground is being rebuilt.
-
-  const job = {
-    active: false, rec: null, geom: null,
-    G: 0, D: 0, last: 0, step: 0, ox: 0, oz: 0,
-    fine: 0, roadMix: 0, aoW: 0, skirt: 0, row: 0, minY: 0, maxY: 0,
-  };
-
-  function beginFill(rec) {
-    const G = grids[rec.want], step = CHUNK / G, D = G + 3;
-    if (hgrid.length < D * D) hgrid = new Float32Array(D * D);
-    job.active = true; job.rec = rec; job.geom = acquire(G);
-    job.G = G; job.D = D; job.last = G + 2; job.step = step;
-    job.ox = rec.cx * CHUNK; job.oz = rec.cz * CHUNK;
-    job.fine = smoothstep(12, 4, step);
-    job.roadMix = smoothstep(4, 13, step) * 0.75;
-    job.aoW = smoothstep(11, 3, step) * 0.18;
-    job.skirt = Math.max(3, step * 1.25);
-    job.row = 0; job.minY = Infinity; job.maxY = -Infinity;
-  }
-
-  function cancelFill() {
-    if (!job.active) return;
-    release(job.G, job.geom);
-    job.active = false; job.rec = null; job.geom = null;
-  }
-
-  /**
-   * Sample rows until the deadline; true when the last row is done. The ring one
-   * cell OUTSIDE the chunk is sampled too — those heights are what let the
-   * border vertices get the same occlusion treatment as interior ones, so chunk
-   * seams do not show up as a faint lattice of unshaded ground.
-   */
-  function fillRows(deadline) {
-    const D = job.D, last = job.last, step = job.step;
-    const ox = job.ox, oz = job.oz, fine = job.fine, roadMix = job.roadMix;
-    const pos = job.geom.attributes.position.array;
-    const nrm = job.geom.attributes.normal.array;
-    const col = job.geom.attributes.color.array;
-    let minY = job.minY, maxY = job.maxY;
-    do {
-      const a = job.row;
-      const lx = (a - 1) * step, x = ox + lx;
-      const rim = a === 0 || a === last;
-      for (let b = 0; b <= last; b++) {
-        const lz = (b - 1) * step, z = oz + lz;
-        const s = ground.sample(x, z, gs);
-        const v = a * D + b;
-        hgrid[v] = s.y;
-        if (rim || b === 0 || b === last) continue;   // skirt vertex, written in endFill
-        const o = v * 3;
-        pos[o] = lx; pos[o + 1] = s.y; pos[o + 2] = lz;
-        // Normals straight from the height field's own gradient. Averaging face
-        // normals on a 16 m grid would facet every hill in the countryside.
-        nrm[o] = s.nx; nrm[o + 1] = s.ny; nrm[o + 2] = s.nz;
-        tint(s.surface, x, z, s.ny, fine, roadMix, rgb);
-        col[o] = rgb[0]; col[o + 1] = rgb[1]; col[o + 2] = rgb[2];
-        if (s.y < minY) minY = s.y;
-        if (s.y > maxY) maxY = s.y;
-      }
-      job.row++;
-    } while (job.row <= last && clock.now() < deadline);
-    job.minY = minY; job.maxY = maxY;
-    return job.row > last;
-  }
-
-  function endFill() {
-    const rec = job.rec, geom = job.geom;
-    const D = job.D, last = job.last, step = job.step, skirt = job.skirt, aoW = job.aoW;
-    const pos = geom.attributes.position.array;
-    const nrm = geom.attributes.normal.array;
-    const col = geom.attributes.color.array;
-
-    // Cheap ambient occlusion from the grid Laplacian: a point sitting below its
-    // neighbours is in a hollow and sees less sky. Faded out on coarse chunks,
-    // where the measurement radius is too wide for the answer to mean anything.
-    for (let a = 1; a < last; a++) {
-      for (let b = 1; b < last; b++) {
-        const v = a * D + b, o = v * 3;
-        const lap = hgrid[v] * 4 - hgrid[v - D] - hgrid[v + D] - hgrid[v - 1] - hgrid[v + 1];
-        const k = 1 + clamp(lap / (step * 1.6), -1, 1) * aoW;
-        let r = col[o] * k, g = col[o + 1] * k, b2 = col[o + 2] * k;
-        if (managed) { r = toLinear(r); g = toLinear(g); b2 = toLinear(b2); }
-        col[o] = r; col[o + 1] = g; col[o + 2] = b2;
-      }
-    }
-
-    // The skirt: outer ring clamped back onto the border and dropped, so a
-    // neighbour at a coarser LOD has something to hide its crack behind.
-    for (let a = 0; a <= last; a++) {
-      const rim = a === 0 || a === last;
-      const ca = a === 0 ? 1 : a === last ? last - 1 : a;
-      for (let b = 0; b <= last; b++) {
-        if (!rim && b !== 0 && b !== last) continue;
-        const cb = b === 0 ? 1 : b === last ? last - 1 : b;
-        const src = (ca * D + cb) * 3, dst = (a * D + b) * 3;
-        pos[dst] = pos[src]; pos[dst + 1] = pos[src + 1] - skirt; pos[dst + 2] = pos[src + 2];
-        nrm[dst] = nrm[src]; nrm[dst + 1] = nrm[src + 1]; nrm[dst + 2] = nrm[src + 2];
-        col[dst] = col[src]; col[dst + 1] = col[src + 1]; col[dst + 2] = col[src + 2];
-      }
-    }
-
-    geom.attributes.position.needsUpdate = true;
-    geom.attributes.normal.needsUpdate = true;
-    geom.attributes.color.needsUpdate = true;
-
-    // Set by hand rather than computeBoundingSphere(): the extents are already
-    // known from the sampling pass, and this runs for every chunk built.
-    geom.boundingSphere.center.set(CHUNK * 0.5, (job.minY + job.maxY) * 0.5, CHUNK * 0.5);
-    geom.boundingSphere.radius = Math.hypot(CHUNK * 0.7072, (job.maxY - job.minY) * 0.5 + skirt);
-
-    if (rec.mesh) {
-      release(rec.grid, rec.mesh.geometry);
-      stats.triangles -= trisFor(rec.grid);
-      rec.mesh.geometry = geom;
-    } else {
-      const mesh = new THREE.Mesh(geom, material);
-      mesh.position.set(rec.cx * CHUNK, 0, rec.cz * CHUNK);
-      mesh.matrixAutoUpdate = false;   // a chunk never moves once placed
-      mesh.updateMatrix();
-      mesh.castShadow = false;
-      rec.mesh = mesh;
-      group.add(mesh);
-      stats.chunks++;
-    }
-    // Only the two near rings bother receiving shadows; past ~400 m a cascade
-    // has nothing to say and the extra depth pass is pure cost.
-    rec.mesh.receiveShadow = shadows && rec.want <= 1;
-    rec.grid = job.G;
-    stats.triangles += trisFor(job.G);
-
-    job.active = false; job.rec = null; job.geom = null;
-  }
-
-  // =========================================================================
-  // Streaming
-  // =========================================================================
-
-  const chunks = new Map();
-  const queue = [];
-  let qi = 0;
-  let stamp = 0;
-  let lastCx = NaN, lastCz = NaN;
-  let primed = false;
-
-  const byNear = (a, b) => a.d - b.d;
-  const keyOf = (cx, cz) => (cx + 1024) * 4096 + (cz + 1024);
-
-  function levelFor(d) {
-    for (let l = 0; l < rings.length; l++) if (d <= rings[l]) return l;
-    return -1;
-  }
-
-  function drop(rec) {
-    if (!rec.mesh) return;
-    group.remove(rec.mesh);
-    release(rec.grid, rec.mesh.geometry);
-    stats.chunks--;
-    stats.triangles -= trisFor(rec.grid);
-    rec.mesh = null;
-  }
-
-  /** Re-plan the whole ring. Runs when the camera changes chunk, not per frame. */
-  function replan(ccx, ccz) {
-    stamp++;
-    queue.length = 0;
-    qi = 0;
-    const R = rings[rings.length - 1];
-    for (let dx = -R; dx <= R; dx++) {
-      const ax = dx < 0 ? -dx : dx;
-      for (let dz = -R; dz <= R; dz++) {
-        const az = dz < 0 ? -dz : dz;
-        const d = ax > az ? ax : az;
-        const lod = levelFor(d);
-        if (lod < 0) continue;
-        const cx = ccx + dx, cz = ccz + dz, key = keyOf(cx, cz);
-        let rec = chunks.get(key);
-        if (rec) { rec.d = d; rec.want = lod; rec.seen = stamp; }
-        else chunks.set(key, (rec = { key, cx, cz, d, want: lod, grid: 0, mesh: null, seen: stamp }));
-        if (rec.grid !== grids[lod]) queue.push(rec);
-      }
-    }
-    for (const rec of chunks.values()) {
-      if (rec.seen !== stamp) { drop(rec); chunks.delete(rec.key); }
-    }
-    // Nearest first: the ground the player is about to drive onto is worth more
-    // than the ground on the horizon, and the horizon is in fog anyway.
-    queue.sort(byNear);
-    if (job.active && (!chunks.has(job.rec.key) || grids[job.rec.want] !== job.G)) cancelFill();
-  }
-
-  function drain(ms) {
-    const deadline = clock.now() + ms;
-    for (;;) {
-      if (!job.active) {
-        let next = null;
-        while (qi < queue.length) {
-          const rec = queue[qi++];
-          if (rec.mesh === null && !chunks.has(rec.key)) continue;   // dropped since queued
-          if (rec.grid !== grids[rec.want]) { next = rec; break; }
-        }
-        if (!next) break;
-        beginFill(next);
-      }
-      if (fillRows(deadline)) endFill();
-      if (clock.now() >= deadline) break;
-    }
-    stats.pending = queue.length - qi + (job.active ? 1 : 0);
-  }
-
   function update(cameraPos, dt) {
-    const ccx = Math.floor(cameraPos.x / CHUNK);
-    const ccz = Math.floor(cameraPos.z / CHUNK);
-    if (ccx !== lastCx || ccz !== lastCz) {
-      lastCx = ccx; lastCz = ccz;
-      replan(ccx, ccz);
+    acc += dt || 0;
+    if (acc < 0.05) return;
+    acc = 0;
+    const lim = cullDist + regionRadius;
+    const limSq = lim * lim;
+    for (let i = 0; i < meshes.length; i++) {
+      const dx = cameraPos.x - centreX[i];
+      const dz = cameraPos.z - centreZ[i];
+      meshes[i].visible = dx * dx + dz * dz < limSq;
     }
-    if (!primed) {
-      // The ring has to exist before the first frame is worth showing, so the
-      // opening drain gets a much larger budget. Call update() once from the
-      // loading screen and the player never watches the world assemble itself.
-      primed = true;
-      drain(opts.primeMs ?? 400);
-      return;
-    }
-    // Streaming stutter is exactly what you notice from a moving car, so frames
-    // that are already late get less of the budget, not the same amount.
-    const step = dt === undefined ? 1 / 60 : dt;
-    drain(budgetMs * (step > 0.026 ? 0.4 : step < 0.015 ? 1.5 : 1));
   }
 
-  /** 'low' | 'medium' | 'high', or a 0..1 number so one knob can drive them all. */
+  /** Accepts an engine tier name or any object carrying the two fields. */
   function setQuality(q) {
-    const name = preset(q, quality);
-    if (name === quality) return;
-    quality = name;
-    rings = QUALITY[name].rings;
-    grids = QUALITY[name].grids;
-    budgetMs = opts.budgetMs ?? QUALITY[name].budgetMs;
-    stats.quality = name;
-    stats.viewDistance = (rings[rings.length - 1] + 0.5) * CHUNK;
-    // Pooled geometries at a resolution the new preset never asks for would sit
-    // in memory unreachable, so they go back to the driver now.
-    for (const [G, pool] of pools) {
-      if (grids.indexOf(G) >= 0) continue;
-      for (const geom of pool) geom.dispose();
-      pools.delete(G);
+    const t = typeof q === 'string' ? QUALITY[q] : q;
+    if (!t) return;
+    if (t.drawDistance !== undefined) cullDist = t.drawDistance;
+    if (t.anisotropy !== undefined && t.anisotropy !== texture.anisotropy) {
+      texture.anisotropy = t.anisotropy;
+      texture.needsUpdate = true;            // sampler state is set on upload
     }
-    lastCx = NaN;   // force a full re-plan on the next update
+    acc = 1;
   }
 
   function dispose() {
-    cancelFill();
-    for (const rec of chunks.values()) {
-      if (rec.mesh) { group.remove(rec.mesh); rec.mesh.geometry.dispose(); rec.mesh = null; }
-    }
-    chunks.clear();
-    for (const pool of pools.values()) for (const geom of pool) geom.dispose();
-    pools.clear();
-    indices.clear();
-    queue.length = 0;
-    qi = 0;
-    if (ownsMaterial) material.dispose();
-    stats.chunks = 0; stats.triangles = 0; stats.pending = 0;
+    for (const m of meshes) m.geometry.dispose();
+    group.clear();
+    meshes.length = 0;
+    material.dispose();
+    texture.dispose();
   }
 
-  return { group, update, setQuality, dispose, stats, material };
+  return {
+    group, update, setQuality, dispose,
+    stats: {
+      drawCalls: meshes.length,
+      triangles, vertices, quads, patches,
+      atlasRows: specs.length,
+      atlas: `${atlas.width}x${atlas.height}`,
+      buildMs: Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0),
+    },
+  };
 }

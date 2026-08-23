@@ -395,11 +395,12 @@ export function createRoads(world, ground, opts = {}) {
 
   const junctions = world.nodes.filter((n) => n.edges.length >= 3);
   const patchRow = { asphalt: -1, dirt: -1 };
+  const patchKind = new Map();
   for (const n of junctions) {
     let dirt = 0;
     for (const ei of n.edges) if (world.edges[ei].surface === 'dirt') dirt++;
     const s = dirt * 2 > n.edges.length ? 'dirt' : 'asphalt';
-    n.__patch = s;
+    patchKind.set(n.i, s);
     if (patchRow[s] < 0) patchRow[s] = row('patch:' + s, () => patchSpec(s, seed + 977));
   }
 
@@ -449,3 +450,315 @@ export function createRoads(world, ground, opts = {}) {
     if (s0 + s1 > cap && s0 + s1 > 0) { const k = cap / (s0 + s1); s0 *= k; s1 *= k; }
     trim[e.i * 2] = s0; trim[e.i * 2 + 1] = s1;
   }
+
+  // ---- carriageway ribbons, kerbs and sidewalks --------------------------
+  const pool = [];
+  function station(i) {
+    let s = pool[i];
+    if (!s) {
+      pool[i] = s = {
+        cx: 0, cy: 0, cz: 0, nx: 0, ny: 1, nz: 0, ax: 0, az: 0,
+        lx: 0, ly: 0, lz: 0, lt: 1, rx: 0, ry: 0, rz: 0, rt: 1,
+        ox: 0, oy: 0, oz: 0, qx: 0, qy: 0, qz: 0,
+      };
+    }
+    return s;
+  }
+
+  const arcs = [];
+  let quads = 0;
+
+  for (const e of world.edges) {
+    if (!e.pts || e.pts.length < 2 || e.length < 0.5) continue;
+    const s0 = trim[e.i * 2], s1 = e.length - trim[e.i * 2 + 1];
+    const usable = s1 - s0;
+    if (usable < 0.6) continue;
+
+    arcs.length = 0;
+    const nFull = Math.floor(usable / STEP);
+    const rem = usable - nFull * STEP;
+    for (let i = 0; i <= nFull; i++) arcs.push(s0 + i * STEP);
+    // The ribbon has to end EXACTLY where the junction patch starts, so a short
+    // remainder is absorbed into the last quad rather than dropped. V then runs
+    // a little past 1, which is precisely what the guard band is there for.
+    if (rem > 0.4) arcs.push(s1); else arcs[arcs.length - 1] = s1;
+    if (arcs.length < 2) continue;
+
+    const h = e.width / 2;
+    const rr = edgeRow[e.i];
+    const walk = walkRow >= 0 && CITY[e.kind] === 1;
+
+    for (let i = 0; i < arcs.length; i++) {
+      const p = pointOnEdge(e, arcs[i]);
+      const st = station(i);
+      st.ax = p.nx; st.az = p.nz;                 // right-hand normal of the road
+      const lx = p.x - p.nx * h, lz = p.z - p.nz * h;
+      const rx = p.x + p.nx * h, rz = p.z + p.nz * h;
+      st.lx = lx; st.lz = lz; st.ly = ground.heightAt(lx, lz) + LIFT;
+      st.rx = rx; st.rz = rz; st.ry = ground.heightAt(rx, rz) + LIFT;
+      st.lt = tint(lx, lz); st.rt = tint(rx, rz);
+      st.cx = p.x; st.cz = p.z; st.cy = (st.ly + st.ry) * 0.5;
+      if (walk) {
+        const ox = p.x - p.nx * (h + WALK_W), oz = p.z - p.nz * (h + WALK_W);
+        const qx = p.x + p.nx * (h + WALK_W), qz = p.z + p.nz * (h + WALK_W);
+        st.ox = ox; st.oz = oz; st.oy = ground.heightAt(ox, oz) + LIFT + KERB;
+        st.qx = qx; st.qz = qz; st.qy = ground.heightAt(qx, qz) + LIFT + KERB;
+      }
+    }
+
+    // Per-station normals rather than per-face ones. Roads are the surface the
+    // player stares at for the whole game; flat shading bands every 8 m quad
+    // across a crest and reads as faceting on an otherwise smooth grade.
+    const last = arcs.length - 1;
+    for (let i = 0; i <= last; i++) {
+      const a = pool[i > 0 ? i - 1 : 0], b = pool[i < last ? i + 1 : last];
+      const tx = b.cx - a.cx, ty = b.cy - a.cy, tz = b.cz - a.cz;
+      const st = pool[i];
+      const dx = st.rx - st.lx, dy = st.ry - st.ly, dz = st.rz - st.lz;
+      let nx = dy * tz - dz * ty, ny = dz * tx - dx * tz, nz = dx * ty - dy * tx;
+      const len = Math.hypot(nx, ny, nz) || 1;
+      st.nx = nx / len; st.ny = ny / len; st.nz = nz / len;
+    }
+
+    for (let i = 0; i < last; i++) {
+      const A = pool[i], B = pool[i + 1];
+      const bk = bucket((A.cx + B.cx) * 0.5, (A.cz + B.cz) * 0.5);
+      const va = vOf(rr, (i % VSTEPS) / VSTEPS);
+      const vb = vOf(rr, (i % VSTEPS) / VSTEPS + (arcs[i + 1] - arcs[i]) / TILE);
+
+      // Winding verified against forward = -Z, right = +X: the road's
+      // right-hand normal is p.nx/p.nz, and (left, right, right') faces up.
+      vert(bk, A.lx, A.ly, A.lz, A.nx, A.ny, A.nz, 0, va, A.lt);
+      vert(bk, A.rx, A.ry, A.rz, A.nx, A.ny, A.nz, 1, va, A.rt);
+      vert(bk, B.rx, B.ry, B.rz, B.nx, B.ny, B.nz, 1, vb, B.rt);
+      vert(bk, A.lx, A.ly, A.lz, A.nx, A.ny, A.nz, 0, va, A.lt);
+      vert(bk, B.rx, B.ry, B.rz, B.nx, B.ny, B.nz, 1, vb, B.rt);
+      vert(bk, B.lx, B.ly, B.lz, B.nx, B.ny, B.nz, 0, vb, B.lt);
+      quads++;
+
+      if (!walk) continue;
+      const kva = vOf(kerbRow, (i % VSTEPS) / VSTEPS);
+      const kvb = vOf(kerbRow, (i % VSTEPS) / VSTEPS + (arcs[i + 1] - arcs[i]) / TILE);
+      const wva = vOf(walkRow, (i % VSTEPS) / VSTEPS);
+      const wvb = vOf(walkRow, (i % VSTEPS) / VSTEPS + (arcs[i + 1] - arcs[i]) / TILE);
+
+      // Left side, then right. The kerb face points away from the carriageway.
+      quad(bk,
+        V(_a, A.lx, A.ly, A.lz, 0, kva, A.lt), V(_b, A.lx, A.ly + KERB, A.lz, 1, kva, A.lt),
+        V(_c, B.lx, B.ly + KERB, B.lz, 1, kvb, B.lt), V(_d, B.lx, B.ly, B.lz, 0, kvb, B.lt),
+        -A.ax, 0, -A.az);
+      quad(bk,
+        V(_a, A.lx, A.ly + KERB, A.lz, 0, wva, A.lt), V(_b, A.ox, A.oy, A.oz, 1, wva, A.lt),
+        V(_c, B.ox, B.oy, B.oz, 1, wvb, B.lt), V(_d, B.lx, B.ly + KERB, B.lz, 0, wvb, B.lt),
+        0, 1, 0);
+      quad(bk,
+        V(_a, A.rx, A.ry, A.rz, 0, kva, A.rt), V(_b, A.rx, A.ry + KERB, A.rz, 1, kva, A.rt),
+        V(_c, B.rx, B.ry + KERB, B.rz, 1, kvb, B.rt), V(_d, B.rx, B.ry, B.rz, 0, kvb, B.rt),
+        A.ax, 0, A.az);
+      quad(bk,
+        V(_a, A.rx, A.ry + KERB, A.rz, 0, wva, A.rt), V(_b, A.qx, A.qy, A.qz, 1, wva, A.rt),
+        V(_c, B.qx, B.qy, B.qz, 1, wvb, B.rt), V(_d, B.rx, B.ry + KERB, B.rz, 0, wvb, B.rt),
+        0, 1, 0);
+      quads += 4;
+    }
+  }
+
+  // ---- junction patches and kerb returns ---------------------------------
+  const arms = [];
+  let patches = 0;
+
+  for (const n of junctions) {
+    arms.length = 0;
+    for (const ei of n.edges) {
+      const e = world.edges[ei];
+      if (!e.pts || e.length < 0.5) continue;
+      const atA = e.a === n.i;
+      const p = pointOnEdge(e, atA ? trim[ei * 2] : e.length - trim[ei * 2 + 1]);
+      if (!p) continue;
+      // Leaving the node runs against increasing arc length whenever the node
+      // is the far end of the edge, and the road's normal has to turn with it.
+      const sg = atA ? 1 : -1;
+      const nx = p.nx * sg, nz = p.nz * sg, h = e.width / 2;
+      arms.push({
+        city: CITY[e.kind] === 1,
+        ang: Math.atan2(p.tz * sg, p.tx * sg),
+        ax: p.x - nx * h, az: p.z - nz * h,                     // clockwise-most
+        bx: p.x + nx * h, bz: p.z + nz * h,                     // anticlockwise-most
+        ox: p.x - nx * (h + WALK_W), oz: p.z - nz * (h + WALK_W),
+        qx: p.x + nx * (h + WALK_W), qz: p.z + nz * (h + WALK_W),
+      });
+    }
+    if (arms.length < 3) continue;
+    arms.sort((u, v) => u.ang - v.ang);
+
+    const bk = bucket(n.x, n.z);
+    const cy = ground.heightAt(n.x, n.z) + LIFT;
+    const ct = tint(n.x, n.z);
+    const pr = patchRow[patchKind.get(n.i)];
+
+    // Fan from the node out to every mouth corner in turn. Sorted by the angle
+    // the road leaves at, the corners form a star-shaped ring around the node,
+    // so a fan covers both the mouths and the wedges between them.
+    let R = 3;
+    for (const m of arms) {
+      R = Math.max(R, Math.hypot(m.ax - n.x, m.az - n.z), Math.hypot(m.bx - n.x, m.bz - n.z));
+    }
+    const inv = 0.5 / R;
+    const uvP = (o, x, y, z) => V(o, x, y, z,
+      clamp(0.5 + (x - n.x) * inv, 0, 1),
+      vOf(pr, clamp(0.5 + (z - n.z) * inv, 0, 1)), tint(x, z));
+
+    for (let k = 0; k < arms.length * 2; k++) {
+      const m0 = arms[(k >> 1) % arms.length], m1 = arms[((k + 1) >> 1) % arms.length];
+      const x0 = (k & 1) ? m0.bx : m0.ax, z0 = (k & 1) ? m0.bz : m0.az;
+      const x1 = (k & 1) ? m1.ax : m1.bx, z1 = (k & 1) ? m1.az : m1.bz;
+      tri(bk,
+        V(_a, n.x, cy, n.z, 0.5, vOf(pr, 0.5), ct),
+        uvP(_b, x0, ground.heightAt(x0, z0) + LIFT, z0),
+        uvP(_c, x1, ground.heightAt(x1, z1) + LIFT, z1),
+        0, 1, 0);
+    }
+    patches++;
+
+    if (walkRow < 0) continue;
+    // Kerb returns. Without them every city intersection has a four-way gap in
+    // the pavement, which is far more noticeable than the corners themselves.
+    for (let k = 0; k < arms.length; k++) {
+      const m0 = arms[k], m1 = arms[(k + 1) % arms.length];
+      if (!m0.city || !m1.city) continue;
+      const chord = Math.hypot(m1.ax - m0.bx, m1.az - m0.bz);
+      if (chord < 0.4) continue;
+      const wv = vOf(walkRow, Math.min(1, chord / TILE)), wv0 = vOf(walkRow, 0);
+      const kv = vOf(kerbRow, Math.min(1, chord / TILE)), kv0 = vOf(kerbRow, 0);
+      const y0 = ground.heightAt(m0.bx, m0.bz) + LIFT;
+      const y1 = ground.heightAt(m1.ax, m1.az) + LIFT;
+      // The face has to look away from the junction, whichever way round the
+      // wedge happens to be wound.
+      const mx = (m0.bx + m1.ax) * 0.5 - n.x, mz = (m0.bz + m1.az) * 0.5 - n.z;
+
+      const t0 = tint(m0.bx, m0.bz), t1 = tint(m1.ax, m1.az);
+      quad(bk,
+        V(_a, m0.bx, y0, m0.bz, 0, kv0, t0), V(_b, m0.bx, y0 + KERB, m0.bz, 1, kv0, t0),
+        V(_c, m1.ax, y1 + KERB, m1.az, 1, kv, t1), V(_d, m1.ax, y1, m1.az, 0, kv, t1),
+        mx, 0, mz);
+      quad(bk,
+        V(_a, m0.bx, y0 + KERB, m0.bz, 0, wv0, t0),
+        V(_b, m0.qx, ground.heightAt(m0.qx, m0.qz) + LIFT + KERB, m0.qz, 1, wv0, tint(m0.qx, m0.qz)),
+        V(_c, m1.ox, ground.heightAt(m1.ox, m1.oz) + LIFT + KERB, m1.oz, 1, wv, tint(m1.ox, m1.oz)),
+        V(_d, m1.ax, y1 + KERB, m1.az, 0, wv, t1),
+        0, 1, 0);
+    }
+  }
+
+  // ---- material and meshes -----------------------------------------------
+  const texture = new THREE.CanvasTexture(atlas.canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  // U spans the carriageway and V never leaves its row, so both axes clamp.
+  // The tiling along the road is done in the UVs, not by the sampler.
+  texture.wrapS = THREE.ClampToEdgeWrapping;
+  texture.wrapT = THREE.ClampToEdgeWrapping;
+  texture.magFilter = THREE.LinearFilter;
+  texture.minFilter = THREE.LinearMipmapLinearFilter;
+  texture.generateMipmaps = true;
+  texture.anisotropy = opts.anisotropy ?? 8;
+
+  const material = new THREE.MeshLambertMaterial({
+    map: texture,
+    vertexColors: true,
+    // Belt and braces with the 4 cm lift: the terrain mesh is built from the
+    // same height field, so at grazing angles a metre away the two surfaces are
+    // within a depth-buffer step of each other.
+    polygonOffset: true,
+    polygonOffsetFactor: -2,
+    polygonOffsetUnits: -4,
+  });
+
+  const group = new THREE.Group();
+  group.name = 'roads';
+  group.matrixAutoUpdate = false;
+
+  const meshes = [];
+  const centreX = new Float32Array(buckets.size);
+  const centreZ = new Float32Array(buckets.size);
+  let triangles = 0, vertices = 0;
+
+  for (const bk of buckets.values()) {
+    if (bk.pos.length < 9) continue;
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(bk.pos, 3));
+    g.setAttribute('normal', new THREE.Float32BufferAttribute(bk.nor, 3));
+    g.setAttribute('uv', new THREE.Float32BufferAttribute(bk.uv, 2));
+    g.setAttribute('color', new THREE.Float32BufferAttribute(bk.col, 3));
+    g.computeBoundingSphere();
+
+    const mesh = new THREE.Mesh(g, material);
+    mesh.name = 'roads.region';
+    mesh.receiveShadow = true;
+    mesh.castShadow = false;                 // a flat sheet casts nothing useful
+    mesh.matrixAutoUpdate = false;
+    mesh.updateMatrix();
+    centreX[meshes.length] = bk.cx;
+    centreZ[meshes.length] = bk.cz;
+    meshes.push(mesh);
+    group.add(mesh);
+    vertices += bk.pos.length / 3;
+    triangles += bk.pos.length / 9;
+  }
+  group.updateMatrix();
+  buckets.clear();
+
+  // ---- runtime ------------------------------------------------------------
+  let cullDist = opts.drawDistance ?? 2600;
+  const regionRadius = REGION * Math.SQRT1_2;
+  let acc = 1;                               // forces a pass on the first frame
+
+  /**
+   * Distance culling only — the roads never move, so there is nothing else to
+   * do here. Re-evaluated at 20 Hz rather than every frame: a region's
+   * visibility cannot change meaningfully in 50 ms at any speed the car can
+   * reach, and toggling on the frame boundary makes the horizon flicker.
+   */
+  function update(cameraPos, dt) {
+    acc += dt || 0;
+    if (acc < 0.05) return;
+    acc = 0;
+    const lim = cullDist + regionRadius;
+    const limSq = lim * lim;
+    for (let i = 0; i < meshes.length; i++) {
+      const dx = cameraPos.x - centreX[i];
+      const dz = cameraPos.z - centreZ[i];
+      meshes[i].visible = dx * dx + dz * dz < limSq;
+    }
+  }
+
+  /** Accepts an engine tier name or any object carrying the two fields. */
+  function setQuality(q) {
+    const t = typeof q === 'string' ? QUALITY[q] : q;
+    if (!t) return;
+    if (t.drawDistance !== undefined) cullDist = t.drawDistance;
+    if (t.anisotropy !== undefined && t.anisotropy !== texture.anisotropy) {
+      texture.anisotropy = t.anisotropy;
+      texture.needsUpdate = true;            // sampler state is set on upload
+    }
+    acc = 1;
+  }
+
+  function dispose() {
+    for (const m of meshes) m.geometry.dispose();
+    group.clear();
+    meshes.length = 0;
+    material.dispose();
+    texture.dispose();
+  }
+
+  return {
+    group, update, setQuality, dispose,
+    stats: {
+      drawCalls: meshes.length,
+      triangles, vertices, quads, patches,
+      atlasRows: specs.length,
+      atlas: `${atlas.width}x${atlas.height}`,
+      buildMs: Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0),
+    },
+  };
+}

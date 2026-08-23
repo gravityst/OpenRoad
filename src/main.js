@@ -129,6 +129,10 @@ async function boot() {
 
   const collision = await stage(0.44, 'making the city solid', () => createCollision(world, { ground }));
 
+  // Settings are needed before the layers, because traffic density and draw
+  // distance are constructor arguments, not things you can set afterwards.
+  const settingsEarly = loadSettings();
+
   // ---- layers -------------------------------------------------------------
   const [mTerrain, mRoads, mCity, mProps, mCar, mSky, mFx, mParticles, mTraffic, mHud, mMenus, mAudio, mTouch] =
     await stage(0.50, 'loading modules', () => Promise.all([
@@ -202,11 +206,12 @@ async function boot() {
     });
 
   const traffic = await stage(0.95, 'putting traffic on the road', () =>
-    mTraffic ? mTraffic.createTraffic(world, ground, { density: 42 }) : null) ||
+    mTraffic ? mTraffic.createTraffic(world, ground,
+      { density: Math.round((settingsEarly.traffic != null ? settingsEarly.traffic : 0.55) * 80) }) : null) ||
     stub(['update', 'dispose'], { cars: [], count: 0 });
 
   // ---- player -------------------------------------------------------------
-  const settings = loadSettings();
+  const settings = settingsEarly;
   let chosenCar = settings.car && CAR_BY_ID[settings.car] ? settings.car : STARTER;
   let chosenColour = settings.colour | 0;
 
@@ -229,25 +234,55 @@ async function boot() {
   }
   fitCarModel(chosenCar, chosenColour);
 
-  // Traffic gets its own pool of models, attached lazily as cars spawn.
-  const trafficModels = new Map();
-  function modelForTraffic(t) {
-    let m = trafficModels.get(t);
-    if (!m && mCar) {
-      try {
-        m = mCar.createCarModel({ ...specFor(t.specId || 'lark', 0), body: t.body, colour: t.colour });
-        scene.add(m.group);
-        trafficModels.set(t, m);
-      } catch { m = null; }
+  // Traffic models: one per POOL SLOT.
+  //
+  // traffic.cars is a fixed-length pool, not a live list — a slot keeps the same
+  // spec, body and colour for the whole session and is recycled by flipping
+  // `active`. So the mesh is built once per slot and only its visibility is
+  // toggled. Keying models by car object instead (and pruning with `includes`)
+  // never prunes anything, because the objects are never replaced.
+  const trafficModels = [];
+  function syncTrafficModels(night, dt) {
+    const list = traffic.cars || [];
+    if (!mCar) return;
+    for (let i = 0; i < list.length; i++) {
+      const t = list[i];
+      let m = trafficModels[i];
+      if (m === undefined) {
+        try {
+          m = mCar.createCarModel({ ...t.spec, body: t.body, colour: t.colour });
+          scene.add(m.group);
+        } catch (err) {
+          console.error('[open road] traffic model failed:', err);
+          m = null;
+        }
+        trafficModels[i] = m;
+      }
+      if (!m) continue;
+      if (!t.active) { m.group.visible = false; continue; }
+      m.group.visible = true;
+      m.group.position.set(t.x, t.y, t.z);
+      m.group.rotation.set(0, t.yaw, 0);
+      if (t.pitch) m.group.rotateX(t.pitch);
+      if (t.roll) m.group.rotateZ(-t.roll);
+      m.setSteer(t.steerAngle || 0);
+      m.setWheelSpin(t.wheelSpin || 0);
+      m.setBrakeLights(t.braking ? 1 : 0);
+      m.setHeadlights(night > 0.35);
+      m.setIndicator(t.indicator ? (indicatorPhase % 0.9 < 0.45 ? t.indicator : 0) : 0);
     }
-    return m;
   }
 
   // ---- UI -----------------------------------------------------------------
   const hud = (mHud && safe(() => mHud.createHUD(document.getElementById('hud'), { world }))) ||
     stub(['update', 'setVisible', 'toast', 'setMinimapZoom', 'dispose']);
 
-  const menus = (mMenus && safe(() => mMenus.createMenus(document.getElementById('menus'), { world, settings }))) ||
+  const menus = (mMenus && safe(() => mMenus.createMenus(document.getElementById('menus'),
+    // handleEscape, because while a screen is open the menu consumes keys at
+    // capture phase — controls.js is a bubble-phase window listener and never
+    // sees them, so without this Escape opens the pause screen and nothing
+    // closes it. The menu emits 'resume' instead.
+    { world, settings, handleEscape: true }))) ||
     stub(['show', 'hide', 'on', 'setCars', 'dispose'], { current: null });
 
   const audio = (mAudio && safe(() => mAudio.createAudio())) ||
@@ -466,8 +501,8 @@ async function boot() {
     if (driving) emitTyreEffects(dt);
 
     // ---- traffic ----
-    traffic.update(dt, car.x, car.z, car.speed);
-    syncTrafficModels();
+    traffic.update(dt, car.x, car.z, car.speed, car.yaw);
+    syncTrafficModels(night, dt);
 
     // ---- camera ----
     updateCamera(dt, driving);
@@ -503,6 +538,9 @@ async function boot() {
       hud.update(hudState);
     }
 
+    // The map screen draws a 'you are here' arrow; it no-ops when closed.
+    if (menus.setPlayer) menus.setPlayer(car.x, car.z, car.yaw);
+
     // ---- audio ----
     audioState.rpm = car.rpm;
     audioState.redline = car.spec.redline;
@@ -518,7 +556,10 @@ async function boot() {
     audio.update(audioState, dt);
 
     // ---- render ----
-    effects.setSpeedBlur(Math.min(1, Math.max(0, (car.speed - 22) / 55)));
+    // A fraction of what this car can actually do, so the van feels fast at
+    // its own limit rather than never triggering the effect at all.
+    const vMax = Math.max(30, (car.spec.power / 700) ** 0.5 * 9);
+    effects.setSpeedBlur(Math.min(1, Math.max(0, (car.speed / vMax - 0.35) / 0.65)));
     effects.render(dt);
   }
 

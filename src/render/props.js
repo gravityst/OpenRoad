@@ -26,10 +26,10 @@
 //     hue comes from instanceColor, which the shader multiplies into the same
 //     vColor, so scale and colour variation cost nothing extra.
 //
-//   * Culling. Instances are counting-sorted into a 64 m grid at load, so every
-//     cell owns a CONTIGUOUS run of the source matrix array. Showing the world
-//     around the camera is then a handful of run copies into the live instance
-//     buffer, not a per-instance distance test over thirty thousand props.
+//   * Culling. Instances are counting-sorted into a grid at load, so every cell
+//     owns a CONTIGUOUS run of the source matrix array. Showing the world
+//     around the camera is then a couple of hundred run copies into the live
+//     instance buffer, not a per-instance distance test over every prop.
 //
 //   * Rebuild rate. The copy runs with a radius of cull + REBUILD_STEP, so the
 //     set stays correct until the camera has moved REBUILD_STEP metres. At
@@ -63,7 +63,21 @@ import { mulberry, clamp, lerp, smoothstep } from '../world/noise.js';
 // How far the camera may travel before a field's visible set is stale. Every
 // field builds with `radius + REBUILD_STEP`, which is what makes that safe.
 const REBUILD_STEP = 34;
-const CELL = 64;
+
+/**
+ * Grid pitch for a field, from its cull radius.
+ *
+ * Culling is per cell, so an instance can survive up to a cell diagonal past
+ * the radius. That slop is a fixed number of metres, which means a coarse grid
+ * that is nearly free for a 450 m tree cull nearly doubles the reach of a
+ * 130 m decal cull — measured at 229 m before this was tied to the radius.
+ * A seventh of the radius keeps the overshoot around 20% for every field while
+ * leaving cells big enough that a refresh copies a few hundred long runs
+ * rather than a few thousand short ones.
+ */
+function cellFor(cull) {
+  return clamp(Math.round(cull / 7), 24, 64);
+}
 
 // Full-quality cull radii. setQuality() scales these down; the instance buffers
 // are sized for the full radius so quality can move freely without reallocating.
@@ -315,7 +329,7 @@ export function createProps(world, ground, opts = {}) {
     const n = indices.length;
     if (n === 0) return null;
 
-    const cell = spec.cell || CELL;
+    const cell = spec.cell || cellFor(cull * range);
     const G = Math.ceil((half * 2) / cell) + 1;
     const cellOf = (x, z) => {
       const i = clamp(Math.floor((x + half) / cell), 0, G - 1);
@@ -460,7 +474,11 @@ export function createProps(world, ground, opts = {}) {
       for (let k = 0; k < field.extras.length; k++) field.extras[k].count = w;
       if (w > 0) {
         // Upload only the slice in use; capacity is sized for the worst clump
-        // in the world and is usually several times what is on screen.
+        // in the world and is usually several times what is on screen. The
+        // renderer clears the ranges once it has uploaded them, so the clear
+        // here is for the case where it never did — a hidden mesh, or a
+        // refresh that found nothing — whose stale range would otherwise merge
+        // with this one and widen the upload.
         mesh.instanceMatrix.clearUpdateRanges();
         mesh.instanceMatrix.addUpdateRange(0, w * 16);
         mesh.instanceMatrix.needsUpdate = true;

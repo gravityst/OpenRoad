@@ -394,18 +394,21 @@
   color: var(--or-text-2);
 }
 
-.or-stats { display: flex; flex-direction: column; gap: 9px; }
-.or-stat {
+/* One grid for all three rows rather than a grid per row, so the labels and
+   values line up with each other however long "Top speed" turns out to be. */
+.or-stats {
   display: grid;
-  grid-template-columns: 5.2em 1fr 4.6em;
+  grid-template-columns: auto 1fr auto;
   align-items: center;
-  gap: 10px;
+  gap: 9px 10px;
 }
+.or-stat { display: contents; }
 .or-stat-label {
   font-size: 0.68rem;
   font-weight: 600;
   letter-spacing: 0.1em;
   text-transform: uppercase;
+  white-space: nowrap;
   color: var(--or-text-3);
 }
 .or-stat-track {

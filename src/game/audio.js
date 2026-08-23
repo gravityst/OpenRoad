@@ -169,12 +169,19 @@ function approach(cur, target, dt, tc) {
   return cur + (target - cur) * (1 - Math.exp(-dt / tc));
 }
 
+/** A finite number or the fallback. `clamp` compares, so NaN survives it
+ *  untouched — and one NaN written to an AudioParam is a thrown TypeError in
+ *  Chrome, which would take the whole frame loop down with it. Worse, the
+ *  smoothed state here is recursive: a single NaN in poisons every later frame.
+ *  Every value that comes from outside this module is filtered through here. */
+function num(v, d) { return typeof v === 'number' && Number.isFinite(v) ? v : d; }
+
 export function createAudio(opts = {}) {
   let ctx = null;
   let ok = false;               // false => permanently silent, never throws
   let running = false;
   let muted = !!opts.muted;
-  let volume = clamp(opts.volume ?? 0.8, 0, 1);
+  let volume = clamp(num(opts.volume, 0.8), 0, 1);
   let prof = resolveProfile(opts.profile ?? 'i4');
 
   // --- nodes (all null until start) ---
@@ -456,7 +463,7 @@ export function createAudio(opts = {}) {
     const redline = Math.max(1000, state.redline || 7000);
     const rpmN = clamp((state.rpm || 0) / redline, 0, 1.08);
     const throttle = clamp(state.throttle || 0, 0, 1);
-    const load = clamp(state.load ?? throttle, 0, 1);
+    const load = clamp(num(state.load, throttle), 0, 1);
     const speed = Math.max(0, state.speed || 0);
     const airborne = !!state.airborne;
 
@@ -476,7 +483,7 @@ export function createAudio(opts = {}) {
     // Ducking the tone (and only the tone — the exhaust keeps flowing) for the
     // length of the shift is what a real interruption sounds like. A separate
     // click event on top of it just sounds like a fault in the sample player.
-    const gear = state.gear ?? lastGear;
+    const gear = num(state.gear, lastGear);
     const shifting = !!state.shifting || gear !== lastGear;
     if (gear !== lastGear) { shiftDuck = Math.min(shiftDuck, 0.18); lastGear = gear; }
     shiftDuck = approach(shiftDuck, shifting ? 0.14 : 1, dt, shifting ? 0.020 : 0.075);
@@ -567,6 +574,7 @@ export function createAudio(opts = {}) {
       for (let i = 0; i < n; i++) {
         if (i === slotPick[0] || i === slotPick[1] || i === slotPick[2]) continue;
         const c = cars[i];
+        if (!c) continue;              // sparse or pooled lists have holes
         const dx = (c.x || 0) - lx, dz = (c.z || 0) - lz;
         const d = Math.sqrt(dx * dx + dz * dz);
         if (d < bestD) { bestD = d; best = i; }
@@ -609,7 +617,7 @@ export function createAudio(opts = {}) {
    *  ratios that do not divide sound like metal. */
   function playCollision(severity = 0.5) {
     if (!ok || !running) return;
-    const s = clamp(severity, 0, 1);
+    const s = clamp(num(severity, 0.5), 0, 1);
     const t = ctx.currentTime;
 
     const burstDur = 0.10 + 0.35 * s;
@@ -657,7 +665,7 @@ export function createAudio(opts = {}) {
   /** An explicit scrub, on top of whatever `slipping` is already asking for. */
   function playSkid(v = 1) {
     if (!ok || !running) return;
-    skidImpulse = Math.max(skidImpulse, clamp(v, 0, 1));
+    skidImpulse = Math.max(skidImpulse, clamp(num(v, 1), 0, 1));
   }
 
   function playHorn() {
@@ -695,7 +703,7 @@ export function createAudio(opts = {}) {
     master.gain.setTargetAtTime(muted ? 0 : volume, ctx.currentTime, 0.02);
   }
   function setMuted(b) { muted = !!b; applyMaster(); }
-  function setVolume(v) { volume = clamp(v, 0, 1); applyMaster(); }
+  function setVolume(v) { volume = clamp(num(v, volume), 0, 1); applyMaster(); }
   function setEngineProfile(p) { prof = resolveProfile(p); applyProfile(); }
 
   function dispose() {

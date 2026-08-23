@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "openroad",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "8145", "--directory", "/Users/curtis/Developer/OpenRoad"],
+      "port": 8145
+    }
+  ]
+}

@@ -38,7 +38,7 @@
 // 1.25 x the vertex spacing deep, against a measured worst-case interpolation
 // error of 1.14 m at the coarsest level.
 
-import * as THREE from 'three';
+import * as THREE from '/Users/curtis/Developer/OpenRoad/vendor/three/build/three.module.js';
 import { fbm, valueNoise, clamp, lerp, smoothstep } from '../world/noise.js';
 
 // rings[l] is the largest Chebyshev chunk distance still drawn at level l;

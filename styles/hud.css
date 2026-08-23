@@ -1,0 +1,421 @@
+/* The driving HUD. Paired with src/game/hud.js — the class names are created
+ * there and nowhere else.
+ *
+ * SCALING
+ *
+ * Everything is a multiple of one custom property, --hud-u, so the whole HUD
+ * grows and shrinks as a unit. It is a clamp() of a rem against a vmin: the rem
+ * respects a reader who has turned their browser font up, the vmin keeps the
+ * cluster from swallowing a phone in landscape or floating as a postage stamp on
+ * a 4K panel, and the clamp bounds both ends. Nothing below uses a raw pixel
+ * except hairlines.
+ *
+ * Panels are flat translucent fills, not backdrop-filter. A backdrop blur has to
+ * re-blur the frame behind it every frame, and behind this HUD is a 4 km world
+ * being redrawn at 60 fps — it is the single most expensive thing that could be
+ * asked of the compositor here, for an effect nobody looks at while driving.
+ *
+ * The layer is pointer-events: none in its entirety. Nothing in the HUD is
+ * interactive, so a click always reaches the game underneath, and any control
+ * added later must opt back in explicitly.
+ */
+
+.hud {
+  --hud-u: clamp(0.56rem, 1.25vmin, 1.25rem);
+  --hud-gap: calc(var(--hud-u) * 1.15);
+  --hud-map: calc(var(--hud-u) * 13.5);
+  --hud-dial: calc(var(--hud-u) * 14.5);
+  --hud-radius: calc(var(--hud-u) * 0.85);
+
+  --hud-ink: #eef4fa;
+  --hud-dim: #96a5b5;
+  --hud-accent: #ffb648;
+  --hud-warn: #ff5a48;
+  --hud-cool: #5fd0e6;
+  --hud-panel: rgba(10, 13, 18, 0.55);
+  --hud-edge: rgba(255, 255, 255, 0.12);
+  --hud-shadow: 0 calc(var(--hud-u) * 0.2) calc(var(--hud-u) * 1.2) rgba(0, 0, 0, 0.45);
+  --hud-mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  overflow: hidden;
+  pointer-events: none;
+  contain: layout style;
+  color: var(--hud-ink);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  -webkit-user-select: none;
+  transition: opacity 220ms ease;
+}
+
+.hud.is-hidden { opacity: 0; }
+
+.hud canvas { display: block; }
+
+.hud__grid {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  grid-template-rows: auto 1fr auto;
+  gap: var(--hud-gap);
+  padding:
+    calc(var(--hud-gap) + env(safe-area-inset-top, 0px))
+    calc(var(--hud-gap) + env(safe-area-inset-right, 0px))
+    calc(var(--hud-gap) + env(safe-area-inset-bottom, 0px))
+    calc(var(--hud-gap) + env(safe-area-inset-left, 0px));
+}
+
+/* ---- compass strip and place line, top centre --------------------------- */
+
+.hud__nav {
+  grid-area: 1 / 2 / 2 / 3;
+  justify-self: center;
+  align-self: start;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: calc(var(--hud-u) * 0.4);
+  width: min(46vw, calc(var(--hud-u) * 34));
+  min-width: 0;
+}
+
+.hud__compass {
+  width: 100%;
+  height: calc(var(--hud-u) * 2.2);
+  /* Fade the ends so headings slide out of view instead of being chopped off. */
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 16%, #000 84%, transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 16%, #000 84%, transparent);
+}
+
+/* The index mark. A CSS triangle, so the compass canvas only ever gets a blit. */
+.hud__nav::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  border-left: calc(var(--hud-u) * 0.42) solid transparent;
+  border-right: calc(var(--hud-u) * 0.42) solid transparent;
+  border-top: calc(var(--hud-u) * 0.55) solid var(--hud-accent);
+}
+
+.hud__place {
+  display: flex;
+  align-items: baseline;
+  gap: calc(var(--hud-u) * 0.7);
+  max-width: 100%;
+  padding: calc(var(--hud-u) * 0.28) calc(var(--hud-u) * 0.95);
+  border: 1px solid var(--hud-edge);
+  border-radius: 999px;
+  background: var(--hud-panel);
+  box-shadow: var(--hud-shadow);
+}
+
+.hud__district {
+  min-width: 0;
+  overflow: hidden;
+  font-size: calc(var(--hud-u) * 1.05);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.hud__bearing {
+  flex: none;
+  color: var(--hud-dim);
+  font-family: var(--hud-mono);
+  font-size: calc(var(--hud-u) * 0.85);
+}
+
+/* ---- clock and odometer, top right -------------------------------------- */
+
+.hud__status {
+  grid-area: 1 / 3 / 2 / 4;
+  justify-self: end;
+  align-self: start;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: calc(var(--hud-u) * 0.15);
+  padding: calc(var(--hud-u) * 0.45) calc(var(--hud-u) * 0.85);
+  border: 1px solid var(--hud-edge);
+  border-radius: var(--hud-radius);
+  background: var(--hud-panel);
+  box-shadow: var(--hud-shadow);
+}
+
+.hud__clock {
+  font-family: var(--hud-mono);
+  font-size: calc(var(--hud-u) * 1.5);
+  font-weight: 600;
+  line-height: 1;
+}
+
+.hud__colon {
+  opacity: 0.55;
+  animation: hud-blink 2s steps(1, end) infinite;
+}
+
+@keyframes hud-blink { 50% { opacity: 0.15; } }
+
+.hud__odo {
+  color: var(--hud-dim);
+  font-family: var(--hud-mono);
+  font-size: calc(var(--hud-u) * 0.82);
+  line-height: 1.2;
+}
+
+.hud__odoU {
+  margin-left: 0.35em;
+  opacity: 0.7;
+}
+
+/* ---- minimap, bottom left ----------------------------------------------- */
+
+.hud__map {
+  grid-area: 3 / 1 / 4 / 2;
+  justify-self: start;
+  align-self: end;
+  position: relative;
+  width: var(--hud-map);
+  height: var(--hud-map);
+}
+
+.hud__mapCanvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: calc(var(--hud-u) * 0.14) solid rgba(255, 255, 255, 0.16);
+  border-radius: 50%;
+  background: rgba(8, 11, 15, 0.6);
+  box-shadow: var(--hud-shadow), inset 0 0 calc(var(--hud-u) * 1.4) rgba(0, 0, 0, 0.55);
+}
+
+.hud__surface {
+  position: absolute;
+  left: 50%;
+  bottom: calc(var(--hud-u) * 0.5);
+  transform: translateX(-50%);
+  padding: calc(var(--hud-u) * 0.12) calc(var(--hud-u) * 0.55);
+  border: 1px solid var(--hud-edge);
+  border-radius: 999px;
+  background: rgba(6, 9, 13, 0.72);
+  color: var(--hud-dim);
+  font-size: calc(var(--hud-u) * 0.68);
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  white-space: nowrap;
+}
+
+.hud__surface.is-loose {
+  border-color: rgba(255, 182, 72, 0.45);
+  color: var(--hud-accent);
+}
+
+/* ---- toast, bottom centre ----------------------------------------------- */
+
+.hud__toast {
+  grid-area: 3 / 2 / 4 / 3;
+  justify-self: center;
+  align-self: end;
+  min-width: 0;
+  max-width: min(70vw, 44ch);
+  margin-bottom: calc(var(--hud-u) * 1.4);
+  padding: calc(var(--hud-u) * 0.5) calc(var(--hud-u) * 1.2);
+  border: 1px solid var(--hud-edge);
+  border-radius: var(--hud-radius);
+  background: var(--hud-panel);
+  box-shadow: var(--hud-shadow);
+  font-size: calc(var(--hud-u) * 1.05);
+  font-weight: 600;
+  text-align: center;
+  opacity: 0;
+  transform: translateY(calc(var(--hud-u) * 0.6));
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+
+.hud__toast.is-on {
+  opacity: 1;
+  transform: none;
+}
+
+/* ---- cluster, bottom right ---------------------------------------------- */
+
+.hud__cluster {
+  grid-area: 3 / 3 / 4 / 4;
+  justify-self: end;
+  align-self: end;
+  display: flex;
+  align-items: flex-end;
+  gap: calc(var(--hud-u) * 0.7);
+}
+
+.hud__tells {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: calc(var(--hud-u) * 0.35);
+  margin-bottom: calc(var(--hud-u) * 1.2);
+}
+
+.hud__limit {
+  display: grid;
+  place-items: center;
+  width: calc(var(--hud-u) * 3.4);
+  height: calc(var(--hud-u) * 3.4);
+  margin-bottom: calc(var(--hud-u) * 0.25);
+  border: calc(var(--hud-u) * 0.34) solid #d8322c;
+  border-radius: 50%;
+  background: #f2f4f6;
+  box-shadow: var(--hud-shadow);
+  color: #14171c;
+  font-family: var(--hud-mono);
+  font-size: calc(var(--hud-u) * 1.2);
+  font-weight: 800;
+}
+
+.hud__limit.is-off { display: none; }
+
+.hud__limit.is-over { animation: hud-pulse 0.7s ease-in-out infinite; }
+
+@keyframes hud-pulse {
+  50% { box-shadow: 0 0 0 calc(var(--hud-u) * 0.5) rgba(216, 50, 44, 0.5); }
+}
+
+/* Telltales keep their space when off, the way a real cluster does, so nothing
+ * reflows when one lights up. */
+.hud__tell {
+  padding: calc(var(--hud-u) * 0.16) calc(var(--hud-u) * 0.5);
+  border: 1px solid transparent;
+  border-radius: calc(var(--hud-u) * 0.35);
+  background: rgba(10, 13, 18, 0.35);
+  color: rgba(160, 172, 186, 0.24);
+  font-size: calc(var(--hud-u) * 0.7);
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  transition: color 90ms linear, background-color 90ms linear, border-color 90ms linear;
+}
+
+.hud__tell--hand.is-on {
+  border-color: #ff7a6a;
+  background: rgba(216, 50, 44, 0.9);
+  color: #fff;
+}
+
+.hud__tell--slip.is-on {
+  border-color: var(--hud-accent);
+  background: var(--hud-accent);
+  color: #12161b;
+}
+
+.hud__tell--air.is-on {
+  border-color: var(--hud-cool);
+  background: var(--hud-cool);
+  color: #12161b;
+}
+
+.hud__dial {
+  position: relative;
+  width: var(--hud-dial);
+  height: var(--hud-dial);
+}
+
+/* The drop shadow lives on a static disc behind the canvas. A filter on the
+ * canvas itself would be re-evaluated on every repaint, which is every frame. */
+.hud__dial::before {
+  content: "";
+  position: absolute;
+  inset: calc(var(--hud-u) * 0.12);
+  border-radius: 50%;
+  box-shadow: var(--hud-shadow);
+}
+
+.hud__dialCanvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.hud__face {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.hud__speed {
+  font-family: var(--hud-mono);
+  font-size: calc(var(--hud-dial) * 0.235);
+  font-weight: 700;
+  line-height: 0.92;
+  letter-spacing: -0.02em;
+}
+
+.hud__speedU {
+  margin-top: calc(var(--hud-dial) * 0.015);
+  color: var(--hud-dim);
+  font-size: calc(var(--hud-dial) * 0.062);
+  letter-spacing: 0.26em;
+  text-indent: 0.26em;
+}
+
+.hud__gear {
+  min-width: calc(var(--hud-dial) * 0.16);
+  margin-top: calc(var(--hud-dial) * 0.05);
+  padding: calc(var(--hud-dial) * 0.012) calc(var(--hud-dial) * 0.045);
+  border: 1px solid var(--hud-edge);
+  border-radius: calc(var(--hud-dial) * 0.03);
+  background: rgba(255, 255, 255, 0.06);
+  font-family: var(--hud-mono);
+  font-size: calc(var(--hud-dial) * 0.1);
+  font-weight: 800;
+  text-align: center;
+}
+
+.hud__cluster.is-shift .hud__gear {
+  border-color: var(--hud-warn);
+  background: var(--hud-warn);
+  color: #14171c;
+}
+
+.hud__cluster.is-shift .hud__speed { color: #fff; }
+
+/* ---- small screens ------------------------------------------------------ */
+
+/* Landscape on a phone is the real driving posture and the tightest case: the
+ * unit shrinks against vmin so the cluster and map still clear each other. */
+@media (max-width: 760px), (max-height: 480px) {
+  .hud {
+    --hud-u: clamp(0.5rem, 2.1vmin, 0.9rem);
+    --hud-map: calc(var(--hud-u) * 12);
+    --hud-dial: calc(var(--hud-u) * 13);
+  }
+
+  .hud__nav { width: min(54vw, calc(var(--hud-u) * 28)); }
+}
+
+/* Portrait leaves no width for a heading tape; the place line carries on alone. */
+@media (orientation: portrait) and (max-width: 600px) {
+  .hud__compass { display: none; }
+  .hud__nav::after { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hud,
+  .hud__toast,
+  .hud__tell { transition: none; }
+
+  .hud__colon,
+  .hud__limit.is-over { animation: none; }
+}

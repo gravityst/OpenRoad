@@ -275,7 +275,8 @@ const FOCUSABLE = 'button:not([disabled]), input:not([disabled]), select:not([di
  * opts.world        world from buildWorld(); needed by the map screen. Can also
  *                   arrive later via setWorld().
  * opts.settings     overrides applied on top of whatever was stored.
- * opts.handleEscape set false if main.js would rather own the pause key.
+ * opts.handleEscape set true to let the menu open the pause screen itself.
+ *                   Off by default: main.js owns that key. See onKeyDown.
  * opts.stylesheet   set false to skip auto-linking styles/ui.css.
  */
 export function createMenus(root, opts = {}) {
@@ -614,13 +615,18 @@ export function createMenus(root, opts = {}) {
   }
 
   function setCars(list) {
+    // main.js calls this after the menu has already been built, so hold on to
+    // whatever was highlighted rather than snapping back to the top of a list
+    // that mostly did not change.
+    const wasId = cars[index] ? cars[index].id : null;
     const resolved = (list && list.length ? list : CARS).map(resolveCar).filter(Boolean);
     cars = resolved.length ? resolved : CARS.slice();
     stats = cars.map(carStats);
     normalise();
     rebuildList();
-    const starter = cars.findIndex((c) => c.id === STARTER);
-    select(index < cars.length ? index : Math.max(0, starter), true);
+    let want = wasId ? cars.findIndex((c) => c.id === wasId) : -1;
+    if (want < 0) want = cars.findIndex((c) => c.id === STARTER);
+    select(want < 0 ? 0 : want, true);
   }
 
   // =========================================================================
@@ -901,8 +907,12 @@ export function createMenus(root, opts = {}) {
 
   function layoutMap() {
     if (!world) return;
-    const rect = mapFrame.getBoundingClientRect();
-    const css = Math.max(1, Math.min(rect.width, rect.height));
+    // The frame is padded, so its border box is the wrong measurement: sizing
+    // the canvas from it overflows by exactly the padding and clips the map.
+    const cs = getComputedStyle(mapFrame);
+    const padX = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
+    const padY = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
+    const css = Math.max(1, Math.min(mapFrame.clientWidth - padX, mapFrame.clientHeight - padY));
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const size = Math.round(css * dpr);
     if (size === mapSize) { drawMap(); return; }
@@ -945,17 +955,30 @@ export function createMenus(root, opts = {}) {
     emit('teleport', { x: snap.x, z: snap.z, y: snap.y, edge: snap.edge });
   }
 
+  // Travel on release, and only if the finger stayed put: a drag across the map
+  // to read it should not fling the car to wherever the finger came to rest.
+  let downAt = null;
   mapCanvas.addEventListener('pointerdown', (e) => {
     if (!world) return;
     mapCanvas.focus();
+    downAt = { x: e.clientX, y: e.clientY };
+    const p = pointToWorld(e.clientX, e.clientY);
+    showCursorAt(p.x, p.z);
+  });
+  mapCanvas.addEventListener('pointermove', (e) => {
+    if (!world || !downAt) return;
     const p = pointToWorld(e.clientX, e.clientY);
     showCursorAt(p.x, p.z);
   });
   mapCanvas.addEventListener('pointerup', (e) => {
-    if (!world) return;
+    if (!world || !downAt) return;
+    const slipped = Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y) > 12;
+    downAt = null;
+    if (slipped) return;
     const p = pointToWorld(e.clientX, e.clientY);
     travelTo(p.x, p.z);
   });
+  mapCanvas.addEventListener('pointercancel', () => { downAt = null; });
   mapCanvas.addEventListener('keydown', (e) => {
     if (!world) return;
     const step = e.shiftKey ? 300 : 70;

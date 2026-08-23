@@ -133,7 +133,7 @@ export function createParticles(scene, opts = {}) {
 
   const CULL = opts.cullDistance ?? 320;
   const CULL_SQ = CULL * CULL;
-  const SIZE_CAP = 7.0;
+  const SIZE_CAP = 5.0;
   const WIND_X = opts.windX ?? 0.5;
   const WIND_Z = opts.windZ ?? 0.3;
   const ground = opts.ground || null;
@@ -164,6 +164,7 @@ export function createParticles(scene, opts = {}) {
   const bRise = new Float32Array(MAX_BILLOW);
   const bSpin = new Float32Array(MAX_BILLOW);
   const bFade = new Float32Array(MAX_BILLOW);
+  const bFloor = new Float32Array(MAX_BILLOW);
   let bAlive = 0;
 
   const billowGeo = quadBase();
@@ -229,6 +230,7 @@ export function createParticles(scene, opts = {}) {
   });
 
   const billowMesh = new THREE.Mesh(billowGeo, billowMat);
+  billowMesh.name = 'billows';
   billowMesh.frustumCulled = false;   // instance offsets live in the shader
   billowMesh.renderOrder = (opts.renderOrder ?? 10) + 1;
   group.add(billowMesh);
@@ -327,6 +329,7 @@ export function createParticles(scene, opts = {}) {
   });
 
   const sparkMesh = new THREE.Mesh(sparkGeo, sparkMat);
+  sparkMesh.name = 'sparks';
   sparkMesh.frustumCulled = false;
   sparkMesh.renderOrder = (opts.renderOrder ?? 10) + 2;
   group.add(sparkMesh);
@@ -342,13 +345,15 @@ export function createParticles(scene, opts = {}) {
   const kAtt = new Float32Array(MAX_SKID * 18);          // 6 verts x (alpha, birth, across)
   for (let i = 1; i < kAtt.length; i += 3) kAtt[i] = -1e6;   // born long ago = invisible
   let kCursor = 0;
-  let kLo = -1, kHi = -1;                                // dirty span, in quads
+  let kLo = -1, kHi = -1;
+  let laid = 0;                                          // quads written this frame                                // dirty span, in quads
 
   const skidGeo = new THREE.BufferGeometry();
   const attrKPos = new THREE.BufferAttribute(kPos, 3).setUsage(THREE.DynamicDrawUsage);
   const attrKAtt = new THREE.BufferAttribute(kAtt, 3).setUsage(THREE.DynamicDrawUsage);
   skidGeo.setAttribute('position', attrKPos);
   skidGeo.setAttribute('aSkid', attrKAtt);
+  skidGeo.setDrawRange(0, MAX_SKID * 6);   // every slot is drawn; dead ones self-cull
 
   const skidMat = new THREE.ShaderMaterial({
     uniforms: fogUniforms({
@@ -406,6 +411,7 @@ export function createParticles(scene, opts = {}) {
   });
 
   const skidMesh = new THREE.Mesh(skidGeo, skidMat);
+  skidMesh.name = 'skidMarks';
   skidMesh.frustumCulled = false;   // the ring buffer spans the whole map
   skidMesh.renderOrder = opts.renderOrder ?? 10;
   group.add(skidMesh);
@@ -512,6 +518,7 @@ export function createParticles(scene, opts = {}) {
   });
 
   const rainMesh = new THREE.LineSegments(rainGeo, rainMat);
+  rainMesh.name = 'rain';
   rainMesh.frustumCulled = false;   // placement happens in the vertex shader
   rainMesh.renderOrder = (opts.renderOrder ?? 10) + 3;
   rainMesh.visible = false;
@@ -539,9 +546,14 @@ export function createParticles(scene, opts = {}) {
     aRot[i] = rnd() * 6.2832;
     bAge[i] = 0;
 
+    // A puff is a camera-facing disc with no thickness, so a big one whose
+    // centre sits at road level is half underground and shows a hard line where
+    // it intersects. Spawning a little high, drifting up rather than down, and
+    // never letting the centre fall below the road keeps the disc where it can
+    // be seen. bFloor is also what stops splash droplets falling through tarmac.
     if (kind === BILLOW_DUST) {
       aPos[i3] = x + (rnd() - 0.5) * 0.36;
-      aPos[i3 + 1] = y + rnd() * 0.22;
+      aPos[i3 + 1] = y + 0.10 + rnd() * 0.24;
       aPos[i3 + 2] = z + (rnd() - 0.5) * 0.36;
       bVel[i3] = (rnd() - 0.5) * 3.1;
       bVel[i3 + 1] = 0.8 + rnd() * 1.7;
@@ -551,12 +563,13 @@ export function createParticles(scene, opts = {}) {
       bGrow[i] = 1.4 + rnd() * 0.8;
       bAlpha0[i] = 0.28 + rnd() * 0.22;
       bDrag[i] = 1.7;
-      bRise[i] = -0.45;                 // grit is heavy; it hangs, then settles
+      bRise[i] = 0.30;                  // heavy grit, but a plume still lifts
       bSpin[i] = (rnd() - 0.5) * 2.2;
       bFade[i] = 0.07;
+      bFloor[i] = y;
     } else if (kind === BILLOW_SMOKE) {
       aPos[i3] = x + (rnd() - 0.5) * 0.22;
-      aPos[i3 + 1] = y + rnd() * 0.18;
+      aPos[i3 + 1] = y + 0.16 + rnd() * 0.26;
       aPos[i3 + 2] = z + (rnd() - 0.5) * 0.22;
       bVel[i3] = (rnd() - 0.5) * 2.4;
       bVel[i3 + 1] = 1.1 + rnd() * 1.5;
@@ -571,6 +584,7 @@ export function createParticles(scene, opts = {}) {
       bRise[i] = 1.0;
       bSpin[i] = (rnd() - 0.5) * 1.1;
       bFade[i] = 0.12;
+      bFloor[i] = y + 0.05;
     } else {
       aPos[i3] = x + (rnd() - 0.5) * 0.14;
       aPos[i3 + 1] = y + 0.02 + rnd() * 0.06;
@@ -586,6 +600,7 @@ export function createParticles(scene, opts = {}) {
       bRise[i] = -9.5;                  // water falls back, it does not hang
       bSpin[i] = (rnd() - 0.5) * 3.0;
       bFade[i] = 0.02;
+      bFloor[i] = y;
     }
 
     aSize[i] = bSize0[i];
@@ -603,7 +618,7 @@ export function createParticles(scene, opts = {}) {
     bAge[i] = bAge[last]; bLife[i] = bLife[last];
     bSize0[i] = bSize0[last]; bGrow[i] = bGrow[last]; bAlpha0[i] = bAlpha0[last];
     bDrag[i] = bDrag[last]; bRise[i] = bRise[last];
-    bSpin[i] = bSpin[last]; bFade[i] = bFade[last];
+    bSpin[i] = bSpin[last]; bFade[i] = bFade[last]; bFloor[i] = bFloor[last];
   }
 
   function emitDust(x, y, z, amount, colourHex) {
@@ -709,6 +724,7 @@ export function createParticles(scene, opts = {}) {
 
     if (kLo < 0 || q < kLo) kLo = q;
     if (q > kHi) kHi = q;
+    laid++;
   }
 
   /**
@@ -787,7 +803,7 @@ export function createParticles(scene, opts = {}) {
   // =========================================================================
   // Update
   // =========================================================================
-  const stats = { billows: 0, sparks: 0, skidQuads: 0, rainDrops: 0 };
+  const stats = { billows: 0, sparks: 0, skidsLaid: 0, rainDrops: 0 };
 
   function update(dt, cameraPos) {
     if (!(dt > 0)) dt = 0;
@@ -824,8 +840,9 @@ export function createParticles(scene, opts = {}) {
       bVel[i3 + 2] = (bVel[i3 + 2] + WIND_Z * d * dt) * f;
 
       const px = aPos[i3] + bVel[i3] * dt;
-      const py = aPos[i3 + 1] + bVel[i3 + 1] * dt;
+      let py = aPos[i3 + 1] + bVel[i3 + 1] * dt;
       const pz = aPos[i3 + 2] + bVel[i3 + 2] * dt;
+      if (py < bFloor[i]) { py = bFloor[i]; bVel[i3 + 1] = 0; }
       aPos[i3] = px; aPos[i3 + 1] = py; aPos[i3 + 2] = pz;
 
       const ddx = px - cx, ddy = py - cy, ddz = pz - cz;
@@ -835,9 +852,11 @@ export function createParticles(scene, opts = {}) {
       if (s > SIZE_CAP) s = SIZE_CAP;
       aSize[i] = s;
 
+      // Fade in over bFade seconds so a puff does not pop into existence at
+      // full strength, then fall away quadratically for the rest of its life.
       const tail = 1 - age / life;
-      const rise = bFade[i] > 0 ? Math.min(1, age / bFade[i]) : 1;
-      aAlpha[i] = bAlpha0[i] * rise * tail * tail;
+      const fadeIn = bFade[i] > 0 ? Math.min(1, age / bFade[i]) : 1;
+      aAlpha[i] = bAlpha0[i] * fadeIn * tail * tail;
       aRot[i] += bSpin[i] * dt;
       i++;
     }
@@ -950,12 +969,12 @@ export function createParticles(scene, opts = {}) {
       attrKAtt.needsUpdate = true;
       kLo = -1; kHi = -1;
     }
-    skidGeo.setDrawRange(0, MAX_SKID * 6);
 
     stats.billows = bAlive;
     stats.sparks = sAlive;
-    stats.skidQuads = MAX_SKID;
+    stats.skidsLaid = laid;
     stats.rainDrops = Math.round(MAX_RAIN * rain);
+    laid = 0;
   }
 
   function dispose() {

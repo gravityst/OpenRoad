@@ -311,6 +311,7 @@ export function createTraffic(world, ground, opts = {}) {
       indicator: 0,                        // -1 left, 0 off, +1 right
       wheelSpin: 0,
       steerAngle: 0,
+      edge: null,                          // the road it is currently on
 
       // --- geometry used by the following law ---
       wheelbase,
@@ -356,6 +357,7 @@ export function createTraffic(world, ground, opts = {}) {
     setSlot(car.route[0], e, dir);
     for (let i = 1; i < 4; i++) fillSlot(car.route[i], car.route[i - 1]);
     car.s = clamp(s, 0, car.route[0].len);
+    car.edge = e;
     laneAt(car.route[0], car.s, _pt);
     car.x = _pt.x; car.z = _pt.z;
     // A car model is built facing -Z, and forward = (-sin yaw, -cos yaw), so
@@ -698,6 +700,7 @@ export function createTraffic(world, ground, opts = {}) {
         car.holdDist -= travelled;
         if (car.holdDist <= 0) releaseClaim(car);
       }
+      car.edge = car.route[0].e;
 
       // Attitude. Grade comes from the lane polyline's own dy/ds, which is the
       // road's designed gradient — free, and exactly what a car on the road

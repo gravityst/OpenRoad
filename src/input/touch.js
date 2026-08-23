@@ -515,6 +515,10 @@ export function createTouchControls(root, opts = {}) {
       steerOut += clamp(-steerOut, -span, span);
     } else if (settings.smoothing > 0) {
       steerOut += (target - steerOut) * Math.min(1, dt / settings.smoothing);
+      // An exponential approach never arrives. Tilt steering counts as held on
+      // every frame, so without this a level phone keeps a sliver of lock in
+      // forever and the car quietly wanders off line.
+      if (target === 0 && steerOut < 1e-4 && steerOut > -1e-4) steerOut = 0;
     } else {
       steerOut = target;
     }

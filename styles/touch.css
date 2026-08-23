@@ -334,7 +334,15 @@
 /* ---- shape for small and portrait screens ------------------------------- */
 
 /* Portrait puts the road up top and the controls in the bottom third, so the
-   rig can afford to be bigger and sit further from the home indicator. */
+   rig can afford to be bigger and sit further from the home indicator.
+
+   400-odd px of width will not take a wheel, three aux keys, a handbrake and
+   two pedals in one row — measured at 390 px, the aux keys and the handbrake
+   both landed on top of the steer zone. They fold into a 2x2 block above the
+   pedals instead, which keeps the wheel full size and every target clear of
+   it. The handbrake fills the block's fourth cell: .touch__pads is its
+   containing block, and both are anchored to the same right edge, so aligning
+   it to the pedals' top-right corner drops it exactly into the gap. */
 @media (orientation: portrait) {
   .touch {
     --wheel: clamp(7.5rem, 34vw, 11rem);
@@ -345,10 +353,17 @@
     inline-size: clamp(9rem, 44vw, 14rem);
   }
   .touch__aux {
-    right: auto;
-    left: 50%;
-    transform: translateX(-50%);
-    bottom: calc(var(--safe-b) + var(--edge) + var(--pad) * 1.16 + 0.55rem);
+    display: grid;
+    grid-template-columns: repeat(2, var(--btn));
+    gap: 0.5rem;
+  }
+  .touch__hand {
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + 0.55rem);
+    inline-size: var(--btn);
+    block-size: var(--btn);
+    font-size: 0.56rem;
   }
 }
 

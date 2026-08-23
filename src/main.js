@@ -37,8 +37,20 @@ function progress(pct, label) {
   if (bootStatus && label) bootStatus.textContent = label;
 }
 
-/** Yield to the browser so the boot bar actually paints between stages. */
-const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()));
+/**
+ * Yield to the browser so the boot bar actually paints between stages.
+ *
+ * Falls back to a timer, because a background tab does not fire
+ * requestAnimationFrame at all — and a boot sequence that awaits one would sit
+ * on the loading screen forever until the tab is looked at. Opening the game in
+ * a new tab and switching away while it loads is entirely normal behaviour.
+ */
+const nextFrame = () => new Promise((resolve) => {
+  let done = false;
+  const finish = () => { if (!done) { done = true; resolve(); } };
+  requestAnimationFrame(finish);
+  setTimeout(finish, 60);
+});
 
 async function stage(pct, label, fn) {
   progress(pct, label);
@@ -354,6 +366,8 @@ async function boot() {
     // A tab that was in the background hands back a dt of several seconds.
     // Stepping that would teleport the car through the city.
     if (!(dt > 0)) dt = 0.016;
+    // A tab that was in the background hands back a dt of several seconds.
+    // Clamping is what stops the car teleporting across the city on return.
     dt = Math.min(dt, 0.1);
     fpsSmooth += (1 / Math.max(1e-3, dt) - fpsSmooth) * 0.05;
 

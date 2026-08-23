@@ -1,0 +1,40 @@
+<!doctype html><html><head><meta charset="utf-8"><title>bloomcheck</title>
+<script type="importmap">
+{ "imports": { "three": "./vendor/three/build/three.module.js", "three/addons/": "./vendor/three/addons/" } }
+</script></head><body><canvas id="c" width="640" height="360"></canvas><pre id="out"></pre>
+<script type="module">
+import * as THREE from 'three';
+import { createEffects } from './src/render/effects.js';
+const out=[]; const say=s=>{out.push(s);document.getElementById('out').textContent=out.join('\n')};
+const canvas=document.getElementById('c');
+const renderer=new THREE.WebGLRenderer({canvas,antialias:false,preserveDrawingBuffer:true});
+const scene=new THREE.Scene(); scene.background=new THREE.Color(0x000000);
+const camera=new THREE.PerspectiveCamera(60,640/360,0.1,2000);
+camera.position.set(0,0,5); camera.lookAt(0,0,0);
+// ONE small bright emitter dead centre, nothing else at all.
+const dot=new THREE.Mesh(new THREE.SphereGeometry(0.12,16,12),
+  new THREE.MeshBasicMaterial({color:0xffffff}));
+dot.material.color.setScalar(4.0);       // linear 4.0, comfortably over threshold
+scene.add(dot);
+const fx=createEffects(renderer,scene,camera,{width:640,height:360,maxPixelRatio:1});
+fx.setSpeedBlur(0);
+function profile(){
+  const gl=renderer.getContext(); const w=gl.drawingBufferWidth,h=gl.drawingBufferHeight;
+  const px=new Uint8Array(w*h*4); gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+  gl.readPixels(0,0,w,h,gl.RGBA,gl.UNSIGNED_BYTE,px);
+  const cx=w/2, cy=h/2, maxR=Math.min(cx,cy);
+  const bins=new Float64Array(10), cnt=new Float64Array(10);
+  for(let y=0;y<h;y++)for(let x=0;x<w;x++){
+    const r=Math.hypot(x-cx,y-cy)/maxR; if(r>1)continue;
+    const b=Math.min(9,Math.floor(r*10)); const i=(y*w+x)*4;
+    bins[b]+=(px[i]+px[i+1]+px[i+2])/3; cnt[b]++;
+  }
+  return Array.from(bins,(v,i)=>v/cnt[i]);
+}
+for(const q of ['off','low','medium','high']){
+  fx.setQuality(q); for(let i=0;i<60;i++) fx.render(1/60);
+  const p=profile();
+  say(`${q.padEnd(6)} mean luma by radius (0=centre .. 9=edge): ${p.map(v=>v.toFixed(1).padStart(6)).join(' ')}`);
+}
+window.__done=true;
+</script></body></html>

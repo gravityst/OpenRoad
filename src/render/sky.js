@@ -884,8 +884,10 @@ export function createSky(scene, renderer, opts = {}) {
     // Hemisphere sky is the zenith colour, pulled a third of the way to white:
     // fully saturated ambient makes white cars look painted. Ground is that
     // light bounced off earth, so it tracks the sun's colour, not a fixed brown.
+    // HemisphereLight.color IS the sky half; there is no `skyColor` on the
+    // light, only in the shader's uniform.
     const zMax = Math.max(_zenith.r, _zenith.g, _zenith.b, 1e-4);
-    hemi.skyColor.setRGB(
+    hemi.color.setRGB(
       lerp(_zenith.r / zMax, 1, 0.34),
       lerp(_zenith.g / zMax, 1, 0.34),
       lerp(_zenith.b / zMax, 1, 0.34),

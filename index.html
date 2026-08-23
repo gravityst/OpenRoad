@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#0b0d10">
+<meta name="description" content="Open Road — drive anywhere in a procedurally generated city and countryside.">
+<title>Open Road</title>
+
+<link rel="stylesheet" href="styles/base.css">
+<link rel="stylesheet" href="styles/ui.css">
+<link rel="stylesheet" href="styles/hud.css">
+<link rel="stylesheet" href="styles/touch.css">
+
+<!--
+  three.js is vendored, not fetched. The game has to run from a file:// URL or an
+  offline machine with no build step, so every dependency is on disk and the
+  import map is the only indirection.
+-->
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three/build/three.module.js",
+    "three/addons/": "./vendor/three/addons/"
+  }
+}
+</script>
+</head>
+<body>
+
+<canvas id="view"></canvas>
+
+<!-- Layer order matters: HUD sits above the canvas, menus above the HUD, touch
+     controls above both so a thumb never lands on a menu behind them. -->
+<div id="hud" class="layer"></div>
+<div id="touch" class="layer"></div>
+<div id="menus" class="layer"></div>
+
+<div id="boot" class="boot">
+  <div class="boot__inner">
+    <h1 class="boot__title">OPEN&nbsp;ROAD</h1>
+    <div class="boot__bar"><i id="boot-fill"></i></div>
+    <p id="boot-status" class="boot__status">starting up</p>
+  </div>
+</div>
+
+<noscript>
+  <div class="boot"><div class="boot__inner">
+    <h1 class="boot__title">OPEN&nbsp;ROAD</h1>
+    <p class="boot__status">This game needs JavaScript.</p>
+  </div></div>
+</noscript>
+
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>

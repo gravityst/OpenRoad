@@ -717,7 +717,25 @@ export function pointOnEdge(e, s) {
 
 const SIDEWALK = 4.2;
 
-function buildLots(world, rnd) {
+/** Do two oriented rectangles overlap? Separating-axis test, four axes. */
+function lotsOverlap(a, b, shrink) {
+  const ac = Math.cos(a.rot), as = Math.sin(a.rot);
+  const bc = Math.cos(b.rot), bs = Math.sin(b.rot);
+  const ahw = a.w * 0.5 * shrink, ahd = a.d * 0.5 * shrink;
+  const bhw = b.w * 0.5 * shrink, bhd = b.d * 0.5 * shrink;
+  const dx = b.x - a.x, dz = b.z - a.z;
+  const axes = [ac, as, -as, ac, bc, bs, -bs, bc];
+  for (let i = 0; i < 8; i += 2) {
+    const nx = axes[i], nz = axes[i + 1];
+    const dist = Math.abs(dx * nx + dz * nz);
+    const ra = ahw * Math.abs(ac * nx + as * nz) + ahd * Math.abs(-as * nx + ac * nz);
+    const rb = bhw * Math.abs(bc * nx + bs * nz) + bhd * Math.abs(-bs * nx + bc * nz);
+    if (dist > ra + rb) return false;
+  }
+  return true;
+}
+
+function buildLots(world, rnd, ground) {
   for (const block of world.blocks) {
     const fromCore = Math.hypot(block.cx, block.cz);
     const cos = Math.cos(block.rot), sin = Math.sin(block.rot);
@@ -736,8 +754,14 @@ function buildLots(world, rnd) {
       continue;
     }
 
-    const iw = block.hx - ROAD.street.width / 2 - SIDEWALK;
-    const id = block.hz - ROAD.street.width / 2 - SIDEWALK;
+    // Reserve for the WIDEST road that could bound this block, plus the node
+    // jitter that moves it. Sizing off ROAD.street means every block bounded by
+    // an avenue (21 m against a street's 13.5 m) puts its buildings 3.75 m into
+    // the carriageway before the lattice has even been jittered — which is how
+    // half the city ended up standing in the road.
+    const reserve = ROAD.avenue.width / 2 + SIDEWALK + 8;
+    const iw = block.hx - reserve;
+    const id = block.hz - reserve;
     if (iw < 8 || id < 8) continue;
 
     const coreT = 1 - smoothstep(120, 900, fromCore);
@@ -769,9 +793,14 @@ function buildLots(world, rnd) {
         const along = row.ax === 1 ? iw : id;
         const depth = 11 + rnd() * 7;
         const off = (row.ax === 1 ? id : iw) - depth / 2;
-        let cursor = -along;
-        while (cursor < along - 8) {
-          const useW = Math.min(9 + rnd() * 16, along - cursor);
+        // The rows running along Z stop short of the corners, because the rows
+        // running along X already occupy them. Without this every block corner
+        // has two buildings inside each other, and an intersecting pair makes a
+        // wedge the collision solver cannot push a car out of.
+        const inset = row.ax === 1 ? 0 : 19;
+        let cursor = -along + inset;
+        while (cursor < along - inset - 8) {
+          const useW = Math.min(9 + rnd() * 16, along - inset - cursor);
           if (useW < 7) break;
           const mid = cursor + useW / 2;
           const h = block.kind === 'midtown' ? 12 + rnd() * (18 + coreT * 34) : 6 + rnd() * 5.5;
@@ -790,6 +819,80 @@ function buildLots(world, rnd) {
       }
     }
   }
+  // Cull anything standing in the road.
+  //
+  // Blocks are sized from the district lattice, but the nodes are jittered and
+  // the roads that actually run past them are not always the width assumed when
+  // the block was laid out — an avenue is 21 m where a street is 13.5 m, and the
+  // ring highway and country lanes cut across districts entirely. The result is
+  // buildings in the middle of the carriageway, which is both absurd to look at
+  // and the reason cars end up wedged inside walls. Cheaper to check afterwards
+  // than to make the lattice clairvoyant.
+  if (ground) {
+    const clear = [];
+    for (const lot of world.lots) {
+      const cos = Math.cos(lot.rot), sin = Math.sin(lot.rot);
+      const hw = lot.w / 2, hd = lot.d / 2;
+      // Sample a grid across the whole footprint, not just the corners: a lane
+      // can cut clean through the middle of a long terrace while every corner
+      // sits happily on grass.
+      let blocked = false;
+      const N = 5;
+      for (let a = 0; a < N && !blocked; a++) {
+        for (let b = 0; b < N && !blocked; b++) {
+          const lx = (a / (N - 1) * 2 - 1) * hw;
+          const lz = (b / (N - 1) * 2 - 1) * hd;
+          const x = lot.x + lx * cos - lz * sin;
+          const z = lot.z + lx * sin + lz * cos;
+          const road = ground.roadAt(x, z);
+          if (road.edge && road.dist < road.width * 0.5 + 1.4) blocked = true;
+        }
+      }
+      if (!blocked) clear.push(lot);
+    }
+    world.lotsCulled = world.lots.length - clear.length;
+    world.lots = clear;
+  }
+
+  // Buildings must not intersect each other.
+  //
+  // Perimeter rows on adjacent block edges overlap at the corners, and two
+  // overlapping boxes make a wedge with no way out: the collision solver pushes
+  // the car clear of one wall directly into the other, forever. Cheaper to
+  // guarantee the invariant here than to make the solver cope with geometry
+  // that should not exist.
+  {
+    const CELLSZ = 40;
+    const hash = new Map();
+    const hkey = (cx, cz) => cx * 100003 + cz;
+    const kept = [];
+    for (const lot of world.lots) {
+      const r = Math.hypot(lot.w, lot.d) * 0.5;
+      const cx0 = Math.floor((lot.x - r) / CELLSZ), cx1 = Math.floor((lot.x + r) / CELLSZ);
+      const cz0 = Math.floor((lot.z - r) / CELLSZ), cz1 = Math.floor((lot.z + r) / CELLSZ);
+      let clash = false;
+      for (let cx = cx0; cx <= cx1 && !clash; cx++) {
+        for (let cz = cz0; cz <= cz1 && !clash; cz++) {
+          const L = hash.get(hkey(cx, cz));
+          if (!L) continue;
+          for (const other of L) if (lotsOverlap(lot, other, 0.97)) { clash = true; break; }
+        }
+      }
+      if (clash) continue;
+      kept.push(lot);
+      for (let cx = cx0; cx <= cx1; cx++) {
+        for (let cz = cz0; cz <= cz1; cz++) {
+          const k = hkey(cx, cz);
+          let L = hash.get(k);
+          if (!L) hash.set(k, (L = []));
+          L.push(lot);
+        }
+      }
+    }
+    world.lotsOverlapping = world.lots.length - kept.length;
+    world.lots = kept;
+  }
+
   for (const lot of world.lots) lot.y = world.terrain.height(lot.x, lot.z);
 }
 
@@ -989,7 +1092,7 @@ export function buildWorld(seed = 20260820) {
     });
   }
 
-  world.buildLots = () => buildLots(world, rnd);
+  world.buildLots = (ground) => buildLots(world, rnd, ground);
   world.buildProps = (ground) => buildProps(world, rnd, ground);
   return world;
 }

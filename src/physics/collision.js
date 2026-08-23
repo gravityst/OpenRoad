@@ -17,6 +17,7 @@
 const CELL = 32;
 
 export function createCollision(world, opts = {}) {
+  const ground = opts.ground || null;
   const boxes = [];
   const grid = new Map();
   const key = (cx, cz) => cx * 100003 + cz;
@@ -152,6 +153,31 @@ export function createCollision(world, opts = {}) {
     return result;
   }
 
+  const deepestOut = { depth: 0, nx: 0, nz: 0 };
+  /** Deepest building overlap at a single point, with the way out. */
+  function deepest(x, z) {
+    deepestOut.depth = 0; deepestOut.nx = 0; deepestOut.nz = 0;
+    const list = cells.get(key(Math.floor(x / CELL), Math.floor(z / CELL))) || EMPTY;
+    for (let n = 0; n < list.length; n++) {
+      const b = boxes[list[n]];
+      const dx = x - b.x, dz = z - b.z;
+      const lx = dx * b.cos + dz * b.sin;
+      const lz = -dx * b.sin + dz * b.cos;
+      const ox = b.hw - Math.abs(lx);
+      if (ox <= 0) continue;
+      const oz = b.hd - Math.abs(lz);
+      if (oz <= 0) continue;
+      let depth, nlx, nlz;
+      if (ox < oz) { depth = ox; nlx = Math.sign(lx) || 1; nlz = 0; }
+      else { depth = oz; nlx = 0; nlz = Math.sign(lz) || 1; }
+      if (depth <= deepestOut.depth) continue;
+      deepestOut.depth = depth;
+      deepestOut.nx = nlx * b.cos - nlz * b.sin;
+      deepestOut.nz = nlx * b.sin + nlz * b.cos;
+    }
+    return deepestOut;
+  }
+
   /** True if (x, z) is inside a building — used to keep spawns out of walls. */
   function insideBuilding(x, z, margin = 0) {
     const list = cells.get(key(Math.floor(x / CELL), Math.floor(z / CELL))) || EMPTY;
@@ -165,5 +191,66 @@ export function createCollision(world, opts = {}) {
     return false;
   }
 
-  return { resolve, insideBuilding, count: boxes.length };
+  /**
+   * Resolve repeatedly within one step.
+   *
+   * A single pass corrects the deepest corner and nothing else, so a car wedged
+   * into an inside corner gets pushed out of one wall and straight into the
+   * other, forever. Three passes settle every case the harness could find, and
+   * it costs nothing when the car is not touching anything.
+   */
+  /**
+   * Resolve, and if the car is genuinely wedged, put it back on the road.
+   *
+   * Buildings no longer intersect and no longer stand in the road, which
+   * removes the wedges that used to trap a car — but a gap between two
+   * buildings can still be narrower than the car that drove into it, and no
+   * amount of push-out solves a space the car does not fit in. Rather than
+   * pretend that case away, recover from it: after `stuckLimit` seconds still
+   * buried, the car is placed on the nearest road. Every open-world game has
+   * this, and a player who has wedged themselves wants exactly this.
+   */
+  function resolveAll(car, dt = 0, passes = 6) {
+    let worst = null;
+    for (let i = 0; i < passes; i++) {
+      // Buried: the car's own CENTRE is inside a wall, which means every corner
+      // is too and the shallowest-corner rule has nothing useful to say. Check
+      // this every pass, not once — pushing clear of one building can put the
+      // car inside the next one along.
+      const buried = deepest(car.x, car.z);
+      if (buried.depth > 0) {
+        car.x += buried.nx * (buried.depth + 0.05);
+        car.z += buried.nz * (buried.depth + 0.05);
+        const vn = car.vx * buried.nx + car.vz * buried.nz;
+        if (vn < 0) { car.vx -= buried.nx * vn; car.vz -= buried.nz * vn; }
+      }
+      const r = resolve(car);
+      if (!r.hit && buried.depth <= 0) break;
+      if (!r.hit) continue;
+      if (!worst || r.severity > worst.severity) {
+        worst = { hit: true, severity: r.severity, nx: r.nx, nz: r.nz, x: r.x, z: r.z };
+      }
+    }
+    // Wedged: still inside after every pass. Give it a moment in case the
+    // solver is mid-recovery, then put the car back on the road.
+    if (deepest(car.x, car.z).depth > 0) {
+      car.stuckTime = (car.stuckTime || 0) + dt;
+      if (ground && car.stuckTime > 1.0) {
+        const road = ground.nearestRoad(car.x, car.z, 400);
+        if (road) {
+          const yaw = Math.atan2(-road.tx, -road.tz);
+          car.reset(road.x, road.z, yaw);
+          car.stuckTime = 0;
+          if (worst) worst.recovered = true;
+          else { result.hit = true; result.recovered = true; }
+        }
+      }
+    } else {
+      car.stuckTime = 0;
+    }
+
+    return worst || result;
+  }
+
+  return { resolve: resolveAll, resolveOnce: resolve, insideBuilding, count: boxes.length };
 }

@@ -1,0 +1,373 @@
+/* Touch controls — the on-screen rig built by src/input/touch.js.
+
+   Three numbers come in from JS as custom properties on .touch and drive every
+   moving part: --s (steering, -1..1), --gas and --brake (0..1). Nothing else is
+   animated from script, so the whole overlay stays on the compositor and a
+   frame costs at most three property writes.
+
+   Sizes are in rem so the 44 px minimum touch target survives a user's larger
+   default font, and clamped against vmin so a small phone in landscape does not
+   end up with a wheel taller than the screen. */
+
+.touch {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  font-family: var(--ui-font);
+
+  --s: 0;
+  --gas: 0;
+  --brake: 0;
+
+  --lock: 78deg;                                  /* must match settings.wheelLock */
+  --wheel: clamp(8rem, 27vmin, 13rem);
+  --travel: clamp(3rem, 10vw, 5rem);
+  --pad: clamp(4.4rem, 15vmin, 6.6rem);
+  --btn: clamp(2.75rem, 8vmin, 3.9rem);
+  --edge: calc(0.6rem + var(--gap) * 0.4);
+
+  --face: rgba(14, 17, 22, 0.52);
+  --face-lit: rgba(28, 33, 41, 0.72);
+}
+
+.touch.is-hidden { display: none; }
+
+/* Every control is a button, and every button starts from nothing. */
+.touch button {
+  appearance: none;
+  -webkit-appearance: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  touch-action: none;
+  pointer-events: auto;
+  cursor: default;
+}
+.touch button:focus { outline: none; }
+
+/* Anything a thumb has to hit clears 44 px in both directions. */
+.touch__btn,
+.touch__hand,
+.touch__pad,
+.touch__chip {
+  min-inline-size: 2.75rem;
+  min-block-size: 2.75rem;
+  display: grid;
+  place-items: center;
+  text-align: center;
+  border-radius: var(--round);
+  border: 1px solid var(--panel-edge);
+  /* Deliberately a flat translucent fill and not backdrop-filter: blurring the
+     backdrop means reading back the live 3D canvas underneath every control,
+     every frame, which is a straight tax on the frame budget the game needs. */
+  background: var(--face);
+  color: var(--ink-dim);
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  font-weight: 700;
+  line-height: 1.1;
+  transition: transform 0.08s ease, background-color 0.08s ease, color 0.08s ease, border-color 0.08s ease;
+}
+
+.touch__btn.is-on,
+.touch__hand.is-on,
+.touch__chip.is-on {
+  transform: scale(0.94);
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+
+/* ---- steering ----------------------------------------------------------- */
+
+.touch__steer {
+  position: absolute;
+  left: calc(var(--safe-l) + var(--edge));
+  bottom: calc(var(--safe-b) + var(--edge));
+  inline-size: clamp(10rem, 34vw, 17rem);
+  block-size: clamp(8.5rem, 30vh, 13.5rem);
+  display: grid;
+  place-items: center;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+/* In tilt mode the sensor owns steering, so the zone must not swallow a thumb
+   that is only reaching for a chip. touch.js refuses steer grabs in tilt mode
+   too — a stuck steering input is not something to leave to a stylesheet. */
+.touch[data-layout="tilt"] .touch__steer { pointer-events: none; }
+.touch[data-layout="tilt"] .touch__chip { pointer-events: auto; }
+
+.touch__wheel,
+.touch__slider,
+.touch__cal { display: none; }
+
+.touch[data-layout="wheel"] .touch__wheel { display: block; }
+.touch[data-layout="slider"] .touch__slider,
+.touch[data-layout="tilt"] .touch__slider { display: block; }
+.touch[data-layout="tilt"] .touch__cal { display: flex; }
+
+/* --- the wheel --- */
+
+.touch__wheel {
+  position: relative;
+  inline-size: var(--wheel);
+  block-size: var(--wheel);
+  transform: rotate(calc(var(--s) * var(--lock)));
+  will-change: transform;
+}
+
+.touch__rim {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 0.62rem solid var(--face-lit);
+  box-shadow:
+    inset 0 0 0 1px var(--panel-edge),
+    0 0 0 1px var(--panel-edge),
+    0 0.4rem 1.4rem rgba(0, 0, 0, 0.35);
+}
+
+/* Three spokes, the classic open-bottom road wheel: two at the quarters and
+   one straight down, so the rim's rotation is readable at a glance. */
+.touch__spoke {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  inline-size: calc(var(--wheel) * 0.40);
+  block-size: 0.42rem;
+  border-radius: 0.21rem;
+  background: var(--face-lit);
+  box-shadow: inset 0 0 0 1px var(--panel-edge);
+  transform-origin: 0 50%;
+}
+.touch__spoke--l { transform: translate(0, -50%) rotate(180deg); }
+.touch__spoke--r { transform: translate(0, -50%) rotate(0deg); }
+.touch__spoke--d { transform: translate(0, -50%) rotate(90deg); }
+
+.touch__hub {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  inline-size: calc(var(--wheel) * 0.26);
+  block-size: calc(var(--wheel) * 0.26);
+  margin: calc(var(--wheel) * -0.13) 0 0 calc(var(--wheel) * -0.13);
+  border-radius: 50%;
+  background: var(--face-lit);
+  box-shadow: inset 0 0 0 1px var(--panel-edge);
+}
+
+/* Twelve o'clock marker: the only thing that tells you how much lock you have. */
+.touch__mark {
+  position: absolute;
+  left: 50%;
+  top: 0.28rem;
+  inline-size: 0.34rem;
+  block-size: 0.9rem;
+  margin-left: -0.17rem;
+  border-radius: 0.17rem;
+  background: var(--accent);
+  opacity: 0.85;
+}
+
+.touch__steer.is-on .touch__rim {
+  border-color: rgba(255, 176, 32, 0.30);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 176, 32, 0.45),
+    0 0 0 1px rgba(255, 176, 32, 0.35),
+    0 0.4rem 1.6rem rgba(0, 0, 0, 0.4);
+}
+
+/* --- the slider, which doubles as the tilt read-out --- */
+
+.touch__slider {
+  position: relative;
+  inline-size: calc(var(--travel) * 2 + 3.4rem);
+  block-size: 3.4rem;
+}
+
+.touch__track {
+  position: absolute;
+  inset: 50% 0 auto 0;
+  block-size: 0.5rem;
+  margin-block-start: -0.25rem;
+  border-radius: 0.25rem;
+  background: var(--face);
+  box-shadow: inset 0 0 0 1px var(--panel-edge);
+}
+
+.touch__notch {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  inline-size: 0.14rem;
+  block-size: 1.3rem;
+  margin: -0.65rem 0 0 -0.07rem;
+  border-radius: 0.07rem;
+  background: var(--ink-faint);
+}
+
+.touch__knob {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  inline-size: 3.1rem;
+  block-size: 3.1rem;
+  border-radius: 50%;
+  background: var(--face-lit);
+  box-shadow:
+    inset 0 0 0 1px var(--panel-edge),
+    0 0.3rem 1rem rgba(0, 0, 0, 0.35);
+  transform: translate(-50%, -50%) translateX(calc(var(--s) * var(--travel)));
+  will-change: transform;
+}
+.touch__knob::after {
+  content: "";
+  position: absolute;
+  inset: 0.9rem;
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: calc(0.25 + 0.75 * max(var(--s), calc(-1 * var(--s))));
+}
+
+.touch__steer.is-on .touch__knob { box-shadow: inset 0 0 0 1px var(--accent), 0 0.3rem 1rem rgba(0, 0, 0, 0.4); }
+
+/* --- tilt calibration --- */
+
+.touch__cal {
+  position: absolute;
+  inset-block-end: 0;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  justify-content: center;
+  inline-size: 100%;
+}
+
+.touch__chip {
+  padding: 0 0.8rem;
+  font-size: 0.68rem;
+}
+
+.touch__note {
+  flex: 1 0 100%;
+  margin: 0;
+  font-size: 0.66rem;
+  letter-spacing: 0.06em;
+  text-align: center;
+  color: var(--ink-faint);
+  min-block-size: 1.1em;
+}
+
+/* ---- pedals ------------------------------------------------------------- */
+
+.touch__pads {
+  position: absolute;
+  right: calc(var(--safe-r) + var(--edge));
+  bottom: calc(var(--safe-b) + var(--edge));
+  display: flex;
+  align-items: flex-end;
+  gap: 0.55rem;
+}
+
+.touch__pad {
+  position: relative;
+  inline-size: var(--pad);
+  block-size: calc(var(--pad) * 1.16);
+  overflow: hidden;
+  font-size: 0.74rem;
+}
+
+/* The fill is how much pedal you actually have on. Sliding a thumb down the
+   pad eases off (see featherAt in touch.js), and without a visible level that
+   gesture would just feel like the throttle randomly losing interest. */
+.touch__pad::before {
+  content: "";
+  position: absolute;
+  inset-inline: 0;
+  inset-block-end: 0;
+  block-size: calc(var(--fill, 0) * 100%);
+  background: var(--tint);
+  opacity: 0.9;
+}
+.touch__pad span { position: relative; }
+
+.touch__pad--gas   { --fill: var(--gas);   --tint: var(--good); }
+.touch__pad--brake { --fill: var(--brake); --tint: var(--bad); }
+
+.touch__pad.is-on {
+  transform: scale(0.97);
+  border-color: rgba(255, 255, 255, 0.24);
+  color: var(--ink);
+}
+
+.touch__hand {
+  inline-size: calc(var(--pad) * 0.82);
+  block-size: calc(var(--pad) * 0.82);
+  font-size: 0.64rem;
+}
+
+/* ---- camera, horn, look ------------------------------------------------- */
+
+.touch__aux {
+  position: absolute;
+  right: calc(var(--safe-r) + var(--edge));
+  bottom: calc(var(--safe-b) + var(--edge) + var(--pad) * 1.16 + 0.55rem);
+  display: flex;
+  gap: 0.5rem;
+}
+
+.touch__btn {
+  inline-size: var(--btn);
+  block-size: var(--btn);
+  font-size: 0.64rem;
+}
+
+/* ---- shape for small and portrait screens ------------------------------- */
+
+/* Portrait puts the road up top and the controls in the bottom third, so the
+   rig can afford to be bigger and sit further from the home indicator. */
+@media (orientation: portrait) {
+  .touch {
+    --wheel: clamp(7.5rem, 34vw, 11rem);
+    --pad: clamp(4.2rem, 20vw, 6rem);
+  }
+  .touch__steer {
+    block-size: clamp(8rem, 22vh, 12rem);
+    inline-size: clamp(9rem, 44vw, 14rem);
+  }
+  .touch__aux {
+    right: auto;
+    left: 50%;
+    transform: translateX(-50%);
+    bottom: calc(var(--safe-b) + var(--edge) + var(--pad) * 1.16 + 0.55rem);
+  }
+}
+
+/* Landscape on a small phone: every rem counts, and the wheel is the first
+   thing that has to give. */
+@media (orientation: landscape) and (max-height: 26rem) {
+  .touch {
+    --wheel: clamp(6.5rem, 34vh, 9rem);
+    --pad: clamp(3.6rem, 19vh, 5rem);
+    --btn: 2.75rem;
+    --edge: 0.5rem;
+  }
+  .touch__steer {
+    inline-size: clamp(8rem, 28vw, 12rem);
+    block-size: clamp(7rem, 44vh, 10rem);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .touch__btn, .touch__hand, .touch__pad, .touch__chip { transition: none; }
+}

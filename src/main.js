@@ -112,10 +112,10 @@ async function boot() {
   const ground = await stage(0.18, 'grading the roads', () => createGround(world));
   if (!ground) { progress(1, 'The ground failed to build.'); return; }
 
-  await stage(0.30, 'zoning the city', () => world.buildLots());
+  await stage(0.30, 'zoning the city', () => world.buildLots(ground));
   await stage(0.38, 'planting', () => world.buildProps(ground));
 
-  const collision = await stage(0.44, 'making the city solid', () => createCollision(world));
+  const collision = await stage(0.44, 'making the city solid', () => createCollision(world, { ground }));
 
   // ---- layers -------------------------------------------------------------
   const [mTerrain, mRoads, mCity, mProps, mCar, mSky, mFx, mParticles, mTraffic, mHud, mMenus, mAudio, mTouch] =
@@ -389,11 +389,12 @@ async function boot() {
     while (accumulator >= PHYS_DT && steps < MAX_SUBSTEPS) {
       car.step(PHYS_DT);
       if (collision) {
-        const hit = collision.resolve(car);
+        const hit = collision.resolve(car, PHYS_DT);
         if (hit.hit && hit.severity > 0.04) {
           audio.playCollision(hit.severity);
           particles.emitSparks(hit.x, car.y + 0.4, hit.z, hit.severity * 14, hit.nx, hit.nz);
         }
+        if (hit.recovered) hud.toast('Recovered to the road', 2.5);
       }
       accumulator -= PHYS_DT;
       steps++;

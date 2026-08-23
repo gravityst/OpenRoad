@@ -110,9 +110,6 @@ uniform float uVignette;   // resting corner darkening
 varying vec2 vUv;
 
 void main() {
-  vec4 base = texture2D(tDiffuse, vUv);
-  vec3 col = base.rgb;
-
   vec2 d = vUv - uFocus;
   // Aspect-corrected radius. Without it the vignette turns into an ellipse and
   // reads as a letterbox rather than as a lens.
@@ -120,14 +117,15 @@ void main() {
 
   float amt = uAmount * smoothstep(0.18, 0.95, r);
 
-  // Uniform-coherent branch: at town speeds the whole draw skips the tap loop.
+  // Uniform-coherent branch: at town speeds the whole draw is a single tap.
+  vec4 col;
   if (amt > 0.002) {
-    vec3 sum = vec3(0.0);
+    vec4 sum = vec4(0.0);
     float wsum = 0.0;
     for (int i = 0; i < TAPS; i++) {
       float t = float(i) / float(TAPS - 1);
       float w = 1.0 - 0.45 * t;
-      sum += texture2D(tDiffuse, vUv - d * (t * amt * uShift)).rgb * w;
+      sum += texture2D(tDiffuse, vUv - d * (t * amt * uShift)) * w;
       wsum += w;
     }
     col = sum / wsum;
@@ -139,14 +137,16 @@ void main() {
       col.r = mix(col.r, texture2D(tDiffuse, vUv + d * ca).r, 0.7);
       col.b = mix(col.b, texture2D(tDiffuse, vUv - d * ca).b, 0.7);
     #endif
+  } else {
+    col = texture2D(tDiffuse, vUv);
   }
 
   // Vignette deepens with speed. Done in linear light so ACES rolls the falloff
   // off smoothly; darkening after the tone map would band in the corners.
   float vig = uVignette * (1.0 + 1.9 * uAmount);
-  col *= 1.0 - vig * smoothstep(0.30, 1.05, r);
+  col.rgb *= 1.0 - vig * smoothstep(0.30, 1.05, r);
 
-  gl_FragColor = vec4(col, base.a);
+  gl_FragColor = col;
 }`;
 
 /**
@@ -244,14 +244,15 @@ export function createEffects(renderer, scene, camera, opts = {}) {
 
     // composer.setSize() has just resized every pass to the full framebuffer.
     // Bloom is the one pass deliberately run below that, so it is corrected
-    // afterwards rather than fighting the composer for ownership.
+    // afterwards rather than fighting the composer for ownership. When it is
+    // switched off entirely its eleven render targets are shrunk to nothing,
+    // because the tier that turns bloom off is the tier with no VRAM to spare.
     const t = TIERS[quality];
-    if (t.bloom) {
-      bloomPass.setSize(
-        Math.max(2, Math.round(width * pr * t.bloomScale)),
-        Math.max(2, Math.round(height * pr * t.bloomScale)),
-      );
-    }
+    const scale = t.bloom ? t.bloomScale : 0;
+    bloomPass.setSize(
+      scale > 0 ? Math.max(64, Math.round(width * pr * scale)) : 64,
+      scale > 0 ? Math.max(64, Math.round(height * pr * scale)) : 64,
+    );
   }
 
   function applyTier() {

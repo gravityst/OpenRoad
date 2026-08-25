@@ -30,6 +30,7 @@
 // change with a clear entry and exit condition, not an emergent accident.
 
 import { clamp, lerp, smoothstep } from '../world/noise.js';
+import { createDamage } from './damage.js';
 
 const G = 9.81;
 
@@ -79,6 +80,11 @@ function tyreCurve(slip, B, C, D) {
 export function createVehicle(opts = {}) {
   const spec = { ...DEFAULT_SPEC, ...(opts.spec || {}) };
   const ground = opts.ground;
+  // Damage is part of the car, not something bolted on beside it: every force
+  // below is scaled by it, so a wrecked car is slow and wayward in the physics
+  // rather than merely in the paintwork.
+  const damage = opts.damage === false ? null : createDamage(spec);
+  const dmg = damage ? damage.effects : null;
 
   const car = {
     spec,
@@ -133,6 +139,7 @@ export function createVehicle(opts = {}) {
 
   const gsample = {};
   const wheelG = [{}, {}, {}, {}];
+  const wheelSurf = ['asphalt', 'asphalt', 'asphalt', 'asphalt'];
 
   function forwardX() { return -Math.sin(car.yaw); }
   function forwardZ() { return -Math.cos(car.yaw); }
@@ -146,6 +153,7 @@ export function createVehicle(opts = {}) {
     car.gear = 1; car.rpm = spec.idleRpm; car.shiftTimer = 0; car.wheelSpin = 0;
     car.airborne = false; car.airTime = 0;
     car.steerAngle = 0;
+    if (damage && opts.repairOnReset !== false) damage.reset();
     const g = ground.sample(x, z, gsample);
     car.groundY = g.y;
     car.height = spec.rideHeight;
@@ -251,6 +259,10 @@ export function createVehicle(opts = {}) {
     const rate = spec.steerRate * (car.input.steer === 0 ? 1.8 : 1) * dt;
     car.steerAngle += clamp(wanted - car.steerAngle, -rate, rate);
     car.steerAngle = clamp(car.steerAngle, -maxSteerNow, maxSteerNow);
+    // A blown tyre or bent steering pulls the ROAD WHEELS, not the input. The
+    // player keeps full authority and simply has to hold against it, which is
+    // the difference between a damaged car and a car that fights you.
+    const pulled = dmg ? car.steerAngle + dmg.steerPull * 0.055 * Math.min(1, planarSpeed / 14) : car.steerAngle;
 
     // ---- Sample the ground under each wheel ------------------------------
     const hw = spec.track / 2, hb = spec.wheelbase / 2;
@@ -351,6 +363,7 @@ export function createVehicle(opts = {}) {
     if (car.shiftTimer > 0) throttle *= 0.06;
     const crankTorque = engineTorque(car.rpm, throttle);
     let driveForce = (crankTorque * ratio) / spec.wheelRadius;
+    if (dmg) driveForce *= dmg.powerScale;
 
     // Traction control: cut drive when the driven tyres are asking for more
     // than the surface can give.
@@ -365,6 +378,7 @@ export function createVehicle(opts = {}) {
     // ---- Brakes ----------------------------------------------------------
     const brakePedal = clamp(car.input.brake, 0, 1);
     let brakeForce = (brakePedal * spec.brakeTorque * 2) / spec.wheelRadius;
+    if (dmg) brakeForce *= dmg.brakeScale;
     const handbrake = clamp(car.input.handbrake, 0, 1);
 
     // ABS: bound total braking to what the tyres can hold, with a little
@@ -387,7 +401,7 @@ export function createVehicle(opts = {}) {
     // signs the other way the rear tyre pushes the car further into the turn
     // instead of resisting it, the model loses its natural yaw damping, and the
     // car spins on the spot at any real steering angle.
-    const frontSlip = Math.atan2(vLat - car.yawRate * hb, absLong) - car.steerAngle * Math.sign(vLong || 1);
+    const frontSlip = Math.atan2(vLat - car.yawRate * hb, absLong) - pulled * Math.sign(vLong || 1);
     const rearSlip = Math.atan2(vLat + car.yawRate * hb, absLong);
 
     const frontLoad = loads[0] + loads[1];
@@ -396,8 +410,13 @@ export function createVehicle(opts = {}) {
     // the grip, which is what makes weight transfer matter.
     const loadSens = (Fz, Fz0) => Math.pow(Fz0 / Math.max(200, Fz), 0.12);
 
-    const muF = surfGrip * spec.gripFront * loadSens(frontLoad, weight * spec.cgBias);
-    let muR = surfGrip * spec.gripRear * loadSens(rearLoad, weight * (1 - spec.cgBias));
+    // Per-corner damage is averaged onto its own axle. A single blown front
+    // tyre therefore halves front grip rather than the car's, which is what
+    // makes it pull and understeer instead of simply going slower.
+    const dmgF = dmg ? (dmg.gripScale[0] + dmg.gripScale[1]) * 0.5 : 1;
+    const dmgR = dmg ? (dmg.gripScale[2] + dmg.gripScale[3]) * 0.5 : 1;
+    const muF = surfGrip * spec.gripFront * dmgF * loadSens(frontLoad, weight * spec.cgBias);
+    let muR = surfGrip * spec.gripRear * dmgR * loadSens(rearLoad, weight * (1 - spec.cgBias));
     // Handbrake breaks the rear away on purpose.
     if (handbrake > 0) muR *= lerp(1, 0.42, handbrake);
 
@@ -433,7 +452,7 @@ export function createVehicle(opts = {}) {
     }
 
     // ---- Integrate the planar body --------------------------------------
-    const dragForce = 0.5 * 1.225 * spec.dragArea * planarSpeed * planarSpeed;
+    const dragForce = 0.5 * 1.225 * (spec.dragArea + (dmg ? dmg.dragAdd : 0)) * planarSpeed * planarSpeed;
     const rollingForce = rollRes * totalLoad * (1 + rough * 0.6);
 
     const aLong = (netLong - Math.sign(vLong || 1) * (dragForce + rollingForce)) / spec.mass + slopeAccelLong;
@@ -500,6 +519,12 @@ export function createVehicle(opts = {}) {
     car.pitch = lerp(car.pitch, pitchFromGround + dive, k);
     car.roll = lerp(car.roll, rollFromGround + lean, k);
 
+    if (damage) {
+      for (let i = 0; i < 4; i++) wheelSurf[i] = car.wheels[i].surface;
+      damage.abrade(dt, wheelSurf, planarSpeed, car.slipping);
+      damage.step(dt, clamp(Math.abs(throttle) * 0.7 + Math.abs(car.lonG) * 0.5, 0, 1.4), planarSpeed);
+    }
+
     finishTelemetry(dt, vLong, vLat, frontSlip, rearSlip);
 
     // Per-wheel readouts for the renderer and HUD.
@@ -519,6 +544,7 @@ export function createVehicle(opts = {}) {
     car.vLong = vLong; car.vLat = vLat;
   }
 
+  car.damage = damage;
   car.reset = reset;
   car.step = step;
   car.forward = () => ({ x: forwardX(), y: 0, z: forwardZ() });

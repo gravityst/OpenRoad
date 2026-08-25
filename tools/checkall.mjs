@@ -14,6 +14,7 @@ const CHECKS = [
   ['vehicle', 'the car accelerates, stops, corners and steers the right way'],
   ['catalog', 'every car matches the figures the garage quotes'],
   ['collision', 'buildings are solid and can never add energy'],
+  ['damage', 'damage only ever takes capability away'],
   ['traffic', 'the other cars behave like traffic'],
   ['brand', 'every name in the game is invented'],
 ];

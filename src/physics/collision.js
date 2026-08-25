@@ -150,6 +150,20 @@ export function createCollision(world, opts = {}) {
     result.hit = true;
     result.nx = bestNx; result.nz = bestNz;
     result.x = cornerX[bestCorner]; result.z = cornerZ[bestCorner];
+
+    // Tell the damage model WHERE it was hit, in the car's own frame. A model
+    // that only knows "you hit something, this hard" cannot tell a clipped wing
+    // mirror from a head-on into a wall, and every consequence downstream —
+    // which panel folds, which light goes, whether the radiator is holed —
+    // depends on that distinction.
+    if (car.damage && result.severity > 0) {
+      const wx = result.x - car.x, wz = result.z - car.z;
+      car.damage.impact(
+        result.severity,
+        wx * rx + wz * rz,          // metres right of centre
+        wx * fx + wz * fz,          // metres forward of centre
+        hwid, hb, -vn);
+    }
     return result;
   }
 

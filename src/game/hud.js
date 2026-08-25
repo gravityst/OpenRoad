@@ -32,6 +32,14 @@
 //      it last wrote. A HUD that hands the collector a few hundred bytes a frame
 //      buys a dropped frame every second or two, which is worse than no HUD.
 //
+//   3. A panel that shows a STATE rather than a value is redrawn only when the
+//      state changes. The damage silhouette folds every dent, pane of glass,
+//      light, tyre and corner into one 32-bit signature; if it matches the last
+//      frame's, the entire draw is skipped — which on an undamaged car is every
+//      frame, and on a wrecked one is every frame between impacts. The drift
+//      gauge is the opposite case, a needle that genuinely moves, so it is
+//      drawn while a drift is live and not touched at all otherwise.
+//
 // Text lives in the DOM, not on the canvas. fillText is the most expensive call
 // in a 2D context and it re-shapes its glyphs every single time; a <span> whose
 // textContent has not changed costs nothing at all. The only per-frame text is
@@ -127,10 +135,201 @@ const TENTH = new Array(10);
 for (let i = 0; i < 10; i++) TENTH[i] = '.' + i;
 const GEAR_STR = ['R', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
 
+// ---- the damage silhouette ------------------------------------------------
+//
+// A plan view, nose up, laid out in a 0..1 box. x grows to the CAR'S RIGHT
+// because the drawing looks straight down, exactly as the minimap does: world
+// +X to the right, forward (-Z) up the screen. So wingFL is on the left of the
+// picture, and a dented left front corner is drawn at the corner the player
+// actually hit. That correspondence is the entire value of the panel — get the
+// handedness wrong and it is worse than useless, because it points at the wrong
+// side of the car with total confidence.
+//
+// Each row is [key, x0, y0, x1, y1]. Built once; the redraw walks it by index.
+const DMG_PANEL = [
+  ['frontBumper', 0.170, 0.012, 0.830, 0.078],
+  ['bonnet',      0.332, 0.086, 0.668, 0.268],
+  ['wingFL',      0.160, 0.086, 0.325, 0.288],
+  ['wingFR',      0.675, 0.086, 0.840, 0.288],
+  ['doorL',       0.160, 0.296, 0.325, 0.596],
+  ['doorR',       0.675, 0.296, 0.840, 0.596],
+  ['roof',        0.378, 0.360, 0.622, 0.578],
+  ['wingRL',      0.160, 0.604, 0.325, 0.906],
+  ['wingRR',      0.675, 0.604, 0.840, 0.906],
+  ['boot',        0.332, 0.670, 0.668, 0.878],
+  ['rearBumper',  0.170, 0.920, 0.830, 0.986],
+];
+
+const DMG_GLASS = [
+  ['windscreen', 0.332, 0.276, 0.668, 0.352],
+  ['sideL',      0.332, 0.372, 0.372, 0.566],
+  ['sideR',      0.628, 0.372, 0.668, 0.566],
+  ['rear',       0.332, 0.586, 0.668, 0.662],
+];
+
+// Head first, tail second — the draw uses the index to pick warm white against
+// red rather than carrying a colour per row.
+const DMG_LIGHT = [
+  ['headL', 0.200, 0.018, 0.310, 0.060],
+  ['headR', 0.690, 0.018, 0.800, 0.060],
+  ['tailL', 0.200, 0.938, 0.310, 0.980],
+  ['tailR', 0.690, 0.938, 0.800, 0.980],
+];
+
+// Trim that reports itself only by its absence: once one of these detaches its
+// mark simply stops being drawn. At this size a missing shape is a louder
+// signal than any amount of colour on a shape that is still there.
+const DMG_TRIM = [
+  ['mirrorL', 0.096, 0.300, 0.158, 0.336],
+  ['mirrorR', 0.842, 0.300, 0.904, 0.336],
+  ['spoiler', 0.300, 0.884, 0.700, 0.912],
+  ['exhaust', 0.560, 0.984, 0.648, 1.000],
+];
+
+// Flat [x0, y0, x1, y1] per wheel, in damage.tyre order: fl, fr, rl, rr. The
+// wheels sit outboard of the body, which is why the box runs past 0 and 1.
+const DMG_WHEEL = [
+  0.042, 0.132, 0.158, 0.250,
+  0.842, 0.132, 0.958, 0.250,
+  0.042, 0.742, 0.158, 0.860,
+  0.842, 0.742, 0.958, 0.860,
+];
+
+// Twelve-step ramps, pre-built. The silhouette picks a colour per panel, per
+// pane and per wheel; composing 'rgb(...)' at that point would allocate on
+// every impact, and impacts arrive in bursts of a dozen while a car grinds
+// along a wall. Slate through amber to red, so an undamaged car is quiet and
+// the first real dent is the brightest thing in the corner of the eye.
+const DENT_RAMP = [
+  '#2f3742', '#3b414a', '#4c4749', '#61503f', '#7a5c3a', '#976a35',
+  '#b47230', '#c96b2f', '#da5a2f', '#e8462d', '#f4362a', '#ff2a20',
+];
+// Green through red: a tyre reads as a condition, not as a wound, so it starts
+// somewhere positive rather than at the body's neutral slate.
+const TYRE_RAMP = [
+  '#3f9c72', '#4c9c68', '#619b5d', '#7c9a51', '#989747', '#ad8b3f',
+  '#bf7a39', '#ca6534', '#d35131', '#da402e', '#df332b', '#e42a26',
+];
+
+const COL_SHELL = 'rgba(14,18,24,0.94)';
+const COL_SHELL_EDGE = 'rgba(255,255,255,0.16)';
+const COL_GONE = 'rgba(255,92,72,0.78)';
+const COL_GLASS_OK = 'rgba(120,196,224,0.34)';
+const COL_GLASS_CRAZED = 'rgba(206,224,236,0.52)';
+const COL_CRACK = 'rgba(250,252,255,0.85)';
+const COL_LIGHT_HEAD = 'rgba(255,238,196,0.92)';
+const COL_LIGHT_TAIL = 'rgba(255,96,72,0.88)';
+const COL_LIGHT_CRACKED = 'rgba(186,178,160,0.60)';
+const COL_LIGHT_DEAD = 'rgba(102,110,120,0.55)';
+const COL_TRIM = 'rgba(198,212,226,0.60)';
+const COL_TRACK_BG = 'rgba(255,255,255,0.10)';
+// Mutated in place before setLineDash, so the dash scales with the canvas
+// without handing the collector an array on every redraw.
+const GAP_DASH = [3, 3];
+
+// The temperature bar stays hidden below this. damage.js idles at 0.35 and
+// smoke does not start until 0.72, so anything under about 0.6 is a car working
+// hard rather than a car in trouble — showing the gauge there would train the
+// player to ignore it.
+const TEMP_SHOW = 0.60;
+
+// ---- the drift gauge ------------------------------------------------------
+
+// The needle rides drift.holdRatio, not the raw angle: the drift module already
+// knows what counts as a spin ON THIS SURFACE (state.spinAngle moves with grip)
+// and publishes |angle| / spinAngle, where 1.0 is the edge of the cliff. A dial
+// baked in ratio space is therefore correct on gravel and on asphalt from one
+// bake, and — more to the point — the needle answers "how close am I to losing
+// this" rather than "how many degrees is it", which is the question the player
+// is actually asking mid-corner. The degrees are still printed in the hub, so
+// nothing is lost by moving the needle to the more useful scale.
+const DRIFT_RATIO_MAX = 1.25;      // full scale, a quarter past the spin line
+const DRIFT_SWEEP = 78;            // degrees of needle travel at full scale
+const DRIFT_BAND = [0.25, 0.75, 1.0];  // loose | scoring | committed | spinning
+const DRIFT_COL = ['rgba(226,236,245,0.42)', '#4ad295', '#ffb648', '#ff5a48'];
+const DRIFT_TRACK = [
+  'rgba(255,255,255,0.07)', 'rgba(74,210,149,0.20)',
+  'rgba(255,182,72,0.22)', 'rgba(255,90,72,0.26)',
+];
+// A lost chain says WHY it was lost. drift.js only ever reports these three,
+// and the fallback covers a reason it might learn to report later.
+const TAG_DRIFT = 'DRIFT';
+const TAG_BANKED = 'BANKED';
+const TAG_LOST = 'LOST';
+const LOST_TAG = { spin: 'SPUN', slow: 'TOO SLOW', crash: 'CRASHED' };
+
+// ---- more pre-rendered text ------------------------------------------------
+
+// Past 90 degrees the car is travelling backwards and the chain is already
+// gone, so the readout has no reason to count higher.
+const ANGLE_MAX = 90;
+const ANGLE_STR = new Array(ANGLE_MAX + 1);
+for (let i = 0; i <= ANGLE_MAX; i++) ANGLE_STR[i] = INT_STR[i] + '°';
+const MULT_STR = new Array(100);
+for (let i = 0; i < 100; i++) MULT_STR[i] = '×' + ((i / 10) | 0) + '.' + (i % 10);
+const DIGIT = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
+const BLANK = '';
+// Most significant first, so writeScore() can walk the spans left to right.
+const POW10 = [100000, 10000, 1000, 100, 10, 1];
+
+// Bar fills are set through transform rather than width, because a width change
+// is layout and a transform is not. Sixty-four steps is finer than a pixel on
+// any bar this HUD draws, and every step is a string that already exists.
+const SCALE_STEPS = 64;
+const SCALE_STR = new Array(SCALE_STEPS + 1);
+for (let i = 0; i <= SCALE_STEPS; i++) SCALE_STR[i] = 'scaleX(' + (i / SCALE_STEPS) + ')';
+
+// One className write instead of two classList.toggle calls, off a table.
+const LAMP_CLASS = ['hud__lamp', 'hud__lamp is-warn', 'hud__lamp is-crit'];
+const TEMP_CLASS = [
+  'hud__temp is-off', 'hud__temp', 'hud__temp is-warm',
+  'hud__temp is-hot', 'hud__temp is-crit',
+];
+const DRIFT_CLASS = [
+  'hud__drift', 'hud__drift is-on',
+  'hud__drift is-on is-bank', 'hud__drift is-on is-lost',
+];
+
 function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
 
 function fontFor(px, weight) {
   return weight + ' ' + Math.max(6, Math.round(px)) + 'px ' + FONT_MONO;
+}
+
+/**
+ * A rounded rectangle path. arcTo rather than roundRect, which is younger than
+ * some of the browsers this game is expected to run in and would take the
+ * damage panel out entirely on those.
+ */
+function rrect(g, x, y, w, h, r) {
+  const k = Math.min(r, w * 0.5, h * 0.5);
+  g.beginPath();
+  g.moveTo(x + k, y);
+  g.arcTo(x + w, y, x + w, y + h, k);
+  g.arcTo(x + w, y + h, x, y + h, k);
+  g.arcTo(x, y + h, x, y, k);
+  g.arcTo(x, y, x + w, y, k);
+  g.closePath();
+}
+
+/** Index into a twelve-step ramp from a 0..1 fraction, NaN-safe. */
+function rampIndex(t) {
+  const i = (t * 11) | 0;
+  return i > 11 ? 11 : i > 0 ? i : 0;
+}
+
+/** Radians of needle deflection per unit of drift hold ratio. */
+const SWEEP_K = (DRIFT_SWEEP / DRIFT_RATIO_MAX) * DEG;
+
+/** A signed drift hold ratio, in radians of needle deflection. */
+function sweep(ratio) {
+  return ratio * SWEEP_K;
+}
+
+const FNV_PRIME = 0x01000193;
+/** One step of FNV-1a over a small integer. */
+function fold(h, v) {
+  return Math.imul(h ^ v, FNV_PRIME);
 }
 
 /**
@@ -175,6 +374,45 @@ export function createHUD(root, opts = {}) {
   const odoT = elem('span', 'hud__odoT', odoEl);
   elem('span', 'hud__odoU', odoEl).textContent = 'km';
 
+  // Top left, diagonally opposite the cluster and on the other side of the
+  // screen from the minimap: the four corners each carry one question, and
+  // "what have I broken" is the one the player checks least often.
+  const dmgBox = elem('div', 'hud__damage is-off', grid);
+  const dmgCanvas = elem('canvas', 'hud__damageCanvas', dmgBox);
+  const tempEl = elem('div', 'hud__temp is-off', dmgBox);
+  elem('span', 'hud__tempLabel', tempEl).textContent = 'TEMP';
+  const tempFill = elem('i', 'hud__tempFill', elem('div', 'hud__tempTrack', tempEl));
+  const lampBox = elem('div', 'hud__lamps', dmgBox);
+  // Left to right in the order these systems actually give out — see the
+  // comment over the lamp thresholds in update().
+  const lampEl = [
+    elem('div', 'hud__lamp', lampBox), elem('div', 'hud__lamp', lampBox),
+    elem('div', 'hud__lamp', lampBox), elem('div', 'hud__lamp', lampBox),
+  ];
+  lampEl[0].textContent = 'COOL';
+  lampEl[1].textContent = 'TYRE';
+  lampEl[2].textContent = 'ENG';
+  lampEl[3].textContent = 'FIRE';
+
+  const driftBox = elem('div', 'hud__drift', grid);
+  const driftDial = elem('div', 'hud__driftDial', driftBox);
+  const driftCanvas = elem('canvas', 'hud__driftGauge', driftDial);
+  const driftAngleEl = elem('div', 'hud__driftAngle', driftDial);
+  driftAngleEl.textContent = ANGLE_STR[0];
+  const driftRow = elem('div', 'hud__driftRow', driftBox);
+  const scoreEl = elem('div', 'hud__driftScore', driftRow);
+  // One span per digit. The score outgrows any practical lookup table, so it is
+  // written a character at a time out of DIGIT — which costs at most six
+  // guarded comparisons and never builds a string, at any magnitude.
+  const scoreDigits = [
+    elem('span', null, scoreEl), elem('span', null, scoreEl), elem('span', null, scoreEl),
+    elem('span', null, scoreEl), elem('span', null, scoreEl), elem('span', null, scoreEl),
+  ];
+  const multEl = elem('div', 'hud__driftMult', driftRow);
+  multEl.textContent = MULT_STR[10];
+  const driftTagEl = elem('div', 'hud__driftTag', driftBox);
+  driftTagEl.textContent = TAG_DRIFT;
+
   const mapBox = elem('div', 'hud__map', grid);
   const mapCanvas = elem('canvas', 'hud__mapCanvas', mapBox);
   const surfaceEl = elem('div', 'hud__surface', mapBox);
@@ -205,8 +443,12 @@ export function createHUD(root, opts = {}) {
   const mapCtx = mapCanvas.getContext('2d');
   const dialCtx = dialCanvas.getContext('2d');
   const compCtx = compCanvas.getContext('2d');
+  const dmgCtx = dmgCanvas.getContext('2d');
+  const driftCtx = driftCanvas.getContext('2d');
   const dialBase = elem('canvas');            // a cache, deliberately not attached
   const dialBaseCtx = dialBase.getContext('2d');
+  const driftBase = elem('canvas');           // likewise: the gauge's baked face
+  const driftBaseCtx = driftBase.getContext('2d');
   let tape = null;
   let tapeCtx = null;
 
@@ -404,6 +646,12 @@ export function createHUD(root, opts = {}) {
     }
 
     if (fitCanvas(compCanvas)) buildCompassTape();
+
+    // A resize invalidates the cached picture, not the state behind it, so the
+    // signature is poisoned rather than recomputed — the next update() redraws
+    // once at the new size and then goes quiet again.
+    if (fitCanvas(dmgCanvas)) dmgSig = -1;
+    if (fitCanvas(driftCanvas)) buildDriftBase();
   }
 
   // ---- the dial ----------------------------------------------------------
@@ -692,6 +940,324 @@ export function createHUD(root, opts = {}) {
     g.restore();
   }
 
+  // ---- the damage panel --------------------------------------------------
+
+  let dmgSig = -1;
+
+  /**
+   * Everything the silhouette can show, quantised and folded into one 32-bit
+   * number. Dents to twelve steps because that is the length of the ramp, glass
+   * and lights to three because that is all the states they are drawn in,
+   * integrity to forty because that is roughly the bar's length in device
+   * pixels. Nothing is quantised finer than the picture can express, so the
+   * signature changes exactly when the picture would.
+   *
+   * WHY THIS IS WRITTEN OUT LONGHAND instead of walking the geometry tables,
+   * which is what it did first and what it obviously should do:
+   *
+   * damage.panel, damage.glass and damage.light are plain objects holding
+   * DOUBLES, and a keyed load with a variable name — d.panel[k] — goes through
+   * the generic path and hands back a boxed heap number. Reading eleven panels
+   * that way allocated about 96 bytes every single frame; measured over five
+   * million calls with a 1 MB nursery it was 459 scavenges against zero for the
+   * same arithmetic through named properties. Indexed reads off the tyre,
+   * blown and suspension ARRAYS are free and stay in a loop.
+   *
+   * So the cost of this being ugly is that a panel added to DMG_PANEL must be
+   * added here too, and the benefit is that the HUD hands the collector nothing
+   * on a frame where nothing has broken — which is nearly every frame.
+   */
+  function damageSignature(d) {
+    const p = d.panel, gl = d.glass, li = d.light, at = d.attached;
+    let h = 0x811c9dc5;
+
+    h = fold(h, rampIndex(p.frontBumper) | (at.frontBumper === false ? 16 : 0));
+    h = fold(h, rampIndex(p.rearBumper) | (at.rearBumper === false ? 16 : 0));
+    h = fold(h, rampIndex(p.bonnet) | (at.bonnet === false ? 16 : 0));
+    h = fold(h, rampIndex(p.boot) | (at.boot === false ? 16 : 0));
+    h = fold(h, rampIndex(p.doorL) | (at.doorL === false ? 16 : 0));
+    h = fold(h, rampIndex(p.doorR) | (at.doorR === false ? 16 : 0));
+    h = fold(h, rampIndex(p.roof));
+    h = fold(h, rampIndex(p.wingFL));
+    h = fold(h, rampIndex(p.wingFR));
+    h = fold(h, rampIndex(p.wingRL));
+    h = fold(h, rampIndex(p.wingRR));
+
+    h = fold(h, (gl.windscreen * 2) | 0);
+    h = fold(h, (gl.sideL * 2) | 0);
+    h = fold(h, (gl.sideR * 2) | 0);
+    h = fold(h, (gl.rear * 2) | 0);
+
+    h = fold(h, (li.headL * 2) | 0);
+    h = fold(h, (li.headR * 2) | 0);
+    h = fold(h, (li.tailL * 2) | 0);
+    h = fold(h, (li.tailR * 2) | 0);
+
+    // The trim is drawn or not drawn, so four bits carry all of it.
+    h = fold(h, (at.mirrorL === false ? 1 : 0) | (at.mirrorR === false ? 2 : 0)
+      | (at.spoiler === false ? 4 : 0) | (at.exhaust === false ? 8 : 0));
+
+    for (let i = 0; i < 4; i++) {
+      h = fold(h, rampIndex(d.tyre[i]) | (d.blown[i] ? 16 : 0)
+        | (rampIndex(d.suspension[i]) << 5));
+    }
+    return fold(h, (d.integrity * 40) | 0);
+  }
+
+  /**
+   * The whole car, in about seventy paths. Called only when damageSignature()
+   * moves.
+   *
+   * Order matters: the dark shell goes down first so that anything drawn as an
+   * absence — a detached bumper, a windscreen that has left the frame — shows
+   * the body cavity underneath rather than a hole punched clean through the
+   * HUD onto the road.
+   */
+  function drawDamage(d) {
+    const w = dmgCanvas.width, h = dmgCanvas.height;
+    if (w < 16) return;
+    const g = dmgCtx;
+    g.clearRect(0, 0, w, h);
+
+    const bh = h * 0.93;                 // the bottom strip is the integrity bar
+    const r = w * 0.05;
+    const hair = Math.max(1, w * 0.012);
+    GAP_DASH[0] = Math.max(2, w * 0.036);
+    GAP_DASH[1] = GAP_DASH[0];
+
+    rrect(g, w * 0.155, bh * 0.006, w * 0.69, bh * 0.988, r);
+    g.fillStyle = COL_SHELL;
+    g.fill();
+    g.strokeStyle = COL_SHELL_EDGE;
+    g.lineWidth = hair;
+    g.stroke();
+
+    for (let i = 0; i < DMG_PANEL.length; i++) {
+      const p = DMG_PANEL[i];
+      const x = p[1] * w, y = p[2] * bh;
+      rrect(g, x, y, (p[3] - p[1]) * w, (p[4] - p[2]) * bh, r * 0.42);
+      // Panels that are not in DETACHABLE never have an `attached` entry, and
+      // `undefined === false` is false — so the roof can never read as missing.
+      if (d.attached[p[0]] === false) {
+        g.setLineDash(GAP_DASH);
+        g.strokeStyle = COL_GONE;
+        g.lineWidth = hair;
+        g.stroke();
+        g.setLineDash(NO_DASH);
+        continue;
+      }
+      g.fillStyle = DENT_RAMP[rampIndex(d.panel[p[0]])];
+      g.fill();
+    }
+
+    for (let i = 0; i < DMG_GLASS.length; i++) {
+      const q = DMG_GLASS[i];
+      const x = q[1] * w, y = q[2] * bh;
+      const gw = (q[3] - q[1]) * w, gh = (q[4] - q[2]) * bh;
+      const v = d.glass[q[0]] || 0;
+      rrect(g, x, y, gw, gh, r * 0.3);
+      if (v >= 1) {
+        g.setLineDash(GAP_DASH);
+        g.strokeStyle = COL_GONE;
+        g.lineWidth = hair;
+        g.stroke();
+        g.setLineDash(NO_DASH);
+        continue;
+      }
+      g.fillStyle = v >= 0.5 ? COL_GLASS_CRAZED : COL_GLASS_OK;
+      g.fill();
+      if (v < 0.5) continue;
+      // Three strokes: at this size that is as much spidering as the pane can
+      // hold before it turns into a solid white block.
+      g.strokeStyle = COL_CRACK;
+      g.lineWidth = Math.max(1, w * 0.006);
+      g.beginPath();
+      g.moveTo(x, y); g.lineTo(x + gw, y + gh);
+      g.moveTo(x + gw, y); g.lineTo(x, y + gh);
+      g.moveTo(x + gw * 0.5, y); g.lineTo(x + gw * 0.5, y + gh);
+      g.stroke();
+    }
+
+    for (let i = 0; i < DMG_LIGHT.length; i++) {
+      const l = DMG_LIGHT[i];
+      const v = d.light[l[0]] || 0;
+      rrect(g, l[1] * w, l[2] * bh, (l[3] - l[1]) * w, (l[4] - l[2]) * bh, r * 0.24);
+      g.fillStyle = v >= 1 ? COL_LIGHT_DEAD
+        : v >= 0.5 ? COL_LIGHT_CRACKED
+        : i < 2 ? COL_LIGHT_HEAD : COL_LIGHT_TAIL;
+      g.fill();
+    }
+
+    g.fillStyle = COL_TRIM;
+    for (let i = 0; i < DMG_TRIM.length; i++) {
+      const t = DMG_TRIM[i];
+      if (d.attached[t[0]] === false) continue;
+      rrect(g, t[1] * w, t[2] * bh, (t[3] - t[1]) * w, (t[4] - t[2]) * bh, r * 0.22);
+      g.fill();
+    }
+
+    for (let i = 0; i < 4; i++) {
+      const o = i * 4;
+      const x = DMG_WHEEL[o] * w, y = DMG_WHEEL[o + 1] * bh;
+      const ww = (DMG_WHEEL[o + 2] - DMG_WHEEL[o]) * w;
+      const wh = (DMG_WHEEL[o + 3] - DMG_WHEEL[o + 1]) * bh;
+      rrect(g, x, y, ww, wh, ww * 0.34);
+      if (d.blown[i]) {
+        // The one failure on this panel drawn both hollow AND in red. A blown
+        // tyre changes what the car will do in the next two seconds, so it gets
+        // the loudest mark the silhouette has.
+        g.fillStyle = COL_SHELL;
+        g.fill();
+        g.strokeStyle = COL_WARN;
+        g.lineWidth = Math.max(1.5, w * 0.018);
+        g.stroke();
+        g.beginPath();
+        g.moveTo(x, y);
+        g.lineTo(x + ww, y + wh);
+        g.stroke();
+      } else {
+        g.fillStyle = TYRE_RAMP[rampIndex(1 - d.tyre[i])];
+        g.fill();
+      }
+      // Suspension, as a bar OUTBOARD of the wheel that shortens as the corner
+      // folds. Outboard because inboard is body, and two marks stacked on the
+      // wing would read as one confused smear at a glance. Two marks per corner,
+      // both at the corner, answers "which corner is wrecked" in one look.
+      const sus = clamp(d.suspension[i], 0, 1);
+      const barH = wh * (0.20 + 0.80 * sus);
+      const bx = i % 2 === 0 ? x - w * 0.032 : x + ww + w * 0.010;
+      g.fillStyle = DENT_RAMP[rampIndex(1 - sus)];
+      g.fillRect(bx, y + (wh - barH) * 0.5, w * 0.022, barH);
+    }
+
+    // One overall number, on the green-to-red ramp so an intact car shows a
+    // full green bar and there is something to watch it leave.
+    const integ = clamp(d.integrity, 0, 1);
+    const iy = h * 0.952, ih = h * 0.030;
+    g.fillStyle = COL_TRACK_BG;
+    g.fillRect(w * 0.06, iy, w * 0.88, ih);
+    g.fillStyle = TYRE_RAMP[rampIndex(1 - integ)];
+    g.fillRect(w * 0.06, iy, w * 0.88 * integ, ih);
+  }
+
+  // ---- the drift gauge ---------------------------------------------------
+
+  let dcx = 0, dcy = 0, dR = 0, dBand = 0;
+  let driftBaseReady = false;
+
+  /**
+   * Bakes the face: the four bands mirrored either side of top-dead-centre, the
+   * ticks, and the index mark. Everything here is static, so the live gauge is
+   * one blit, one arc and one line.
+   */
+  function buildDriftBase() {
+    const w = driftCanvas.width, h = driftCanvas.height;
+    driftBaseReady = false;
+    if (w < 32) return;
+    driftBase.width = w;
+    driftBase.height = h;
+    const g = driftBaseCtx;
+    dcx = w * 0.5;
+    dcy = h * 0.96;
+    dBand = h * 0.17;
+    dR = Math.min(w * 0.48, h * 0.88) - dBand * 0.5;
+
+    g.lineCap = 'butt';
+    g.lineWidth = dBand;
+    for (let side = -1; side <= 1; side += 2) {
+      let from = 0;
+      for (let b = 0; b < 4; b++) {
+        const to = b < 3 ? DRIFT_BAND[b] : DRIFT_RATIO_MAX;
+        g.strokeStyle = DRIFT_TRACK[b];
+        g.beginPath();
+        if (side > 0) g.arc(dcx, dcy, dR, -HALF_PI + sweep(from), -HALF_PI + sweep(to));
+        else g.arc(dcx, dcy, dR, -HALF_PI - sweep(to), -HALF_PI - sweep(from));
+        g.stroke();
+        from = to;
+      }
+    }
+
+    // One tick, at the spin line. More would be decoration: there is exactly
+    // one boundary on this dial that costs the player anything to cross.
+    g.strokeStyle = COL_LABEL;
+    g.lineWidth = Math.max(1, w * 0.007);
+    const r0 = dR - dBand * 0.5, r1 = dR + dBand * 0.5;
+    for (let side = -1; side <= 1; side += 2) {
+      const t = side * sweep(DRIFT_BAND[2]);
+      const ct = Math.sin(t), st = -Math.cos(t);
+      g.beginPath();
+      g.moveTo(dcx + ct * r0, dcy + st * r0);
+      g.lineTo(dcx + ct * r1, dcy + st * r1);
+      g.stroke();
+    }
+
+    // Straight ahead, and the thing the needle is trying to get back to.
+    g.strokeStyle = COL_LABEL;
+    g.lineWidth = Math.max(1.5, w * 0.009);
+    g.beginPath();
+    g.moveTo(dcx, dcy - dR - dBand * 0.5);
+    g.lineTo(dcx, dcy - dR - dBand * 1.15);
+    g.stroke();
+    driftBaseReady = true;
+  }
+
+  /**
+   * The needle position, handed over in `needle` rather than as an argument.
+   *
+   * A double passed to a function this size is boxed into a heap number at the
+   * call site — TurboFan will not inline a body with this many canvas calls in
+   * it — which cost about 16 bytes a frame while a drift was live. A one-slot
+   * Float64Array holds the value unboxed and the call takes no arguments at
+   * all. drawDial() above has the same leak for five of its six arguments and
+   * would take the same fix; it is left alone here only because changing it is
+   * not what this change is for.
+   */
+  const needle = new Float64Array(1);
+
+  /**
+   * needle[0] is a signed hold ratio: |angle| / spinAngle carrying the sign of
+   * the angle. Positive swings the needle right, matching drift.js — positive
+   * angle is the tail out to the right — and matching yaw growing
+   * counter-clockwise seen from above.
+   */
+  function drawDriftGauge() {
+    const w = driftCanvas.width;
+    if (!driftBaseReady || w < 32) return;
+    const g = driftCtx;
+    g.clearRect(0, 0, w, driftCanvas.height);
+    g.drawImage(driftBase, 0, 0);
+
+    let r = needle[0];
+    if (r > DRIFT_RATIO_MAX) r = DRIFT_RATIO_MAX;
+    else if (r < -DRIFT_RATIO_MAX) r = -DRIFT_RATIO_MAX;
+    const mag = r < 0 ? -r : r;
+    g.strokeStyle = mag < DRIFT_BAND[0] ? DRIFT_COL[0]
+      : mag < DRIFT_BAND[1] ? DRIFT_COL[1]
+      : mag < DRIFT_BAND[2] ? DRIFT_COL[2] : DRIFT_COL[3];
+
+    // The sweep from centre out to the needle. Magnitude as an area rather than
+    // as a position is what makes the gauge legible while the player's eyes are
+    // on the apex and not on the HUD.
+    const a = r * SWEEP_K;
+    g.lineCap = 'butt';
+    g.lineWidth = dBand;
+    g.beginPath();
+    if (a >= 0) g.arc(dcx, dcy, dR, -HALF_PI, -HALF_PI + a);
+    else g.arc(dcx, dcy, dR, -HALF_PI + a, -HALF_PI);
+    g.stroke();
+
+    // Top-dead-centre is (0,-1) in canvas space; rotating it by `a` clockwise —
+    // which is the positive direction here, because canvas Y points down — puts
+    // it at (sin a, -cos a).
+    const ca = Math.sin(a), sa = -Math.cos(a);
+    g.strokeStyle = COL_NEEDLE;
+    g.lineWidth = Math.max(1.5, w * 0.010);
+    g.beginPath();
+    g.moveTo(dcx + ca * dR * 0.34, dcy + sa * dR * 0.34);
+    g.lineTo(dcx + ca * (dR + dBand * 0.7), dcy + sa * (dR + dBand * 0.7));
+    g.stroke();
+  }
+
   // ---- state -------------------------------------------------------------
   let visible = opts.visible !== false;
   if (!visible) layer.classList.add('is-hidden');
@@ -703,6 +1269,33 @@ export function createHUD(root, opts = {}) {
   // able to react to, and `undefined !== undefined` would never fire.
   let lastDistrict = 0, lastSurface = 0, lastLimit = -1;
   let lastOver = false, lastHand = false, lastSlip = false, lastAir = false, lastShift = false;
+
+  let dmgOn = false, lastTempState = -1, lastTempFill = -1;
+  const lampWas = new Int8Array(4).fill(-1);
+
+  let lastDriftClass = -1, lastMult = -1, lastAngleDeg = -1, lastTag = BLANK;
+  const scoreWas = new Int8Array(6).fill(-2);
+
+  function setLamp(i, state) {
+    if (lampWas[i] === state) return;
+    lampWas[i] = state;
+    lampEl[i].className = LAMP_CLASS[state];
+  }
+
+  /**
+   * The live score, written a digit at a time. Leading zeros are blanked rather
+   * than drawn, so a three-figure chain is three characters wide instead of
+   * reading as 000420.
+   */
+  function writeScore(v) {
+    for (let i = 0; i < 6; i++) {
+      const p = POW10[i];
+      const show = i === 5 || v >= p ? ((v / p) | 0) % 10 : -1;
+      if (scoreWas[i] === show) continue;
+      scoreWas[i] = show;
+      scoreDigits[i].textContent = show < 0 ? BLANK : DIGIT[show];
+    }
+  }
 
   function update(s) {
     if (!visible || !s) return;
@@ -817,6 +1410,141 @@ export function createHUD(root, opts = {}) {
       lastShift = shift;
     }
 
+    // ---- damage, temperature and the warning lamps ----------------------
+    // Absent until main.js hands over car.damage.state, and the panel simply
+    // does not exist until then rather than showing an undamaged car that is
+    // not being measured.
+    const d = s.damage;
+    if (d) {
+      if (!dmgOn) {
+        dmgOn = true;
+        dmgBox.classList.remove('is-off');
+        // The panel is display:none until exactly this moment, so the size
+        // relayout() measured for its canvas at construction was the size of a
+        // box with no layout at all: zero, which fitCanvas floors to 1x1, which
+        // drawDamage() then rejects on its own `w < 16` guard. Nothing would
+        // ever come back and fix it — the ResizeObserver watches the layer, and
+        // the layer does not change size when one of its children appears — so
+        // without this call the silhouette stays blank for the whole session
+        // while the signature happily reports it as up to date. Measure now
+        // that the box has a size. Once, on the frame damage first arrives.
+        relayout();
+      }
+      const sig = damageSignature(d);
+      if (sig !== dmgSig) {
+        dmgSig = sig;
+        drawDamage(d);
+      }
+
+      // TEMPERATURE. damage.js idles at 0.35 and runs to 1.4: smoke starts at
+      // 0.72, the engine begins cooking itself at 0.86, and it catches at 1.0.
+      // The bar is scaled so that its far end IS ignition, because that is the
+      // only number on it the player can do anything about — lift off, or find
+      // some airflow. Overheating has no other tell at all until the smoke, by
+      // which point the engine is already being eaten.
+      const temp = d.temp || 0;
+      const tState = temp < TEMP_SHOW ? 0
+        : temp < 0.72 ? 1 : temp < 0.86 ? 2 : temp < 0.97 ? 3 : 4;
+      if (tState !== lastTempState) {
+        tempEl.className = TEMP_CLASS[tState];
+        lastTempState = tState;
+      }
+      if (tState > 0) {
+        let tf = ((temp - TEMP_SHOW) / (1 - TEMP_SHOW) * SCALE_STEPS) | 0;
+        if (tf < 0) tf = 0;
+        else if (tf > SCALE_STEPS) tf = SCALE_STEPS;
+        if (tf !== lastTempFill) {
+          tempFill.style.transform = SCALE_STR[tf];
+          lastTempFill = tf;
+        }
+      }
+
+      // LAMPS, left to right in the order these systems actually give out.
+      // A nose-on impact hands the radiator the full weight of the hit and the
+      // engine barely half of it (ZONE_TO_SYSTEM in damage.js: front radiator
+      // 1.00, engine 0.55), so COOL always crosses its threshold first. Tyres
+      // go next, from abrasion as often as from impact. The engine only starts
+      // cooking once the coolant has actually drained away, which takes tens of
+      // seconds. Fire is the end of that chain and never the start of it. So
+      // reading the row from the left reads the crash back in order.
+      setLamp(0, d.coolant < 0.35 || d.radiator < 0.30 ? 2
+        : d.coolant < 0.88 || d.radiator < 0.80 ? 1 : 0);
+      setLamp(1, d.blown[0] || d.blown[1] || d.blown[2] || d.blown[3] ? 2
+        : d.tyre[0] < 0.55 || d.tyre[1] < 0.55 || d.tyre[2] < 0.55 || d.tyre[3] < 0.55 ? 1 : 0);
+      setLamp(2, d.engine < 0.30 || temp > 0.97 ? 2
+        : d.engine < 0.72 || temp > 0.80 ? 1 : 0);
+      setLamp(3, d.onFire > 0 ? 2 : 0);
+    } else if (dmgOn) {
+      dmgOn = false;
+      dmgBox.classList.add('is-off');
+    }
+
+    // ---- drift ----------------------------------------------------------
+    // Everything here is read straight off the drift module's live state; the
+    // HUD infers nothing and owns no timers of its own. In particular the flash
+    // is NOT triggered by `active` going false — a chain survives up to 1.25 s
+    // of straight running between linked slides, so `active` drops several
+    // times inside one chain and a flash on that edge would fire three times a
+    // corner. The chain is alive while `combo > 0`; it has ended when
+    // `lastResult.kind` says so and `flash` is still decaying.
+    const dr = s.drift;
+    const live = !!(dr && (dr.active || dr.combo > 0));
+    let dClass = 0;
+    if (dr && !live && dr.flash > 0) {
+      dClass = dr.lastResult && dr.lastResult.kind === 'banked' ? 2
+        : dr.lastResult && dr.lastResult.kind === 'lost' ? 3 : 0;
+    } else if (live) {
+      dClass = 1;
+    }
+    if (dClass !== lastDriftClass) {
+      driftBox.className = DRIFT_CLASS[dClass];
+      lastDriftClass = dClass;
+    }
+
+    if (dClass > 0) {
+      // While the chain runs, the number is `pending` — what banking right now
+      // would actually pay, multiplier included. Once it has ended the number
+      // is `lastResult.points`, which is the same figure frozen at the moment
+      // it landed or was lost. So the digits never jump at the transition; they
+      // just stop moving and change colour.
+      const raw = dClass === 1 ? dr.pending : dr.lastResult.points;
+      const val = raw > 0 ? (raw > 999999 ? 999999 : raw | 0) : 0;
+      writeScore(val);
+
+      const m = dr.multiplier > 0 ? (dr.multiplier * 10) | 0 : 10;
+      const mi = m < 10 ? 10 : m > 99 ? 99 : m;
+      if (mi !== lastMult) {
+        multEl.textContent = MULT_STR[mi];
+        lastMult = mi;
+      }
+
+      const tag = dClass === 1 ? TAG_DRIFT
+        : dClass === 2 ? TAG_BANKED
+        : LOST_TAG[dr.lastResult.reason] || TAG_LOST;
+      if (tag !== lastTag) {
+        driftTagEl.textContent = tag;
+        lastTag = tag;
+      }
+
+      // drift.js publishes angleDeg beside angle, so the readout is a truncate
+      // and a table lookup with no conversion of its own.
+      let ad = (dr.angleDeg < 0 ? -dr.angleDeg : dr.angleDeg) | 0;
+      if (!(ad >= 0)) ad = 0;
+      else if (ad > ANGLE_MAX) ad = ANGLE_MAX;
+      if (ad !== lastAngleDeg) {
+        driftAngleEl.textContent = ANGLE_STR[ad];
+        lastAngleDeg = ad;
+      }
+
+      // holdRatio is unsigned; the needle needs the angle's sign back. The
+      // needle stays live through the flash rather than freezing with the
+      // score: after a chain lost to a spin, the angle that killed it is the
+      // most useful thing on the display, and a stopped needle beside a
+      // still-sliding car reads as a broken gauge.
+      needle[0] = dr.angle < 0 ? -dr.holdRatio : dr.holdRatio;
+      drawDriftGauge();
+    }
+
     drawDial(rpm, redline, kmhF, s.throttle || 0, s.brake || 0, shift);
     drawCompass(bearing);
     drawMap(s.x || 0, s.z || 0, yaw);
@@ -859,9 +1587,12 @@ export function createHUD(root, opts = {}) {
     if (worldMap) { worldMap.width = 0; worldMap.height = 0; }
     if (tape) { tape.width = 0; tape.height = 0; }
     dialBase.width = 0; dialBase.height = 0;
+    driftBase.width = 0; driftBase.height = 0;
     mapCanvas.width = 0; mapCanvas.height = 0;
     dialCanvas.width = 0; dialCanvas.height = 0;
     compCanvas.width = 0; compCanvas.height = 0;
+    dmgCanvas.width = 0; dmgCanvas.height = 0;
+    driftCanvas.width = 0; driftCanvas.height = 0;
   }
 
   const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(relayout);

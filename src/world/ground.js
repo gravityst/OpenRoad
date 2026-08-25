@@ -96,15 +96,32 @@ export function createGround(world, opts = {}) {
       }
     }
 
-    const isDirt = e.surface === 'dirt';
-    const shoulder = isDirt ? 1.6 : e.kind === 'highway' ? 3.5 : 2.4;
+    // The carriageway material comes from the road's OWN surface, not from a
+    // dirt/not-dirt flag. When gravel roads were added they inherited the
+    // "not dirt" branch and came out as tarmac underfoot — 21 km of rally
+    // stage with full asphalt grip, which is the one thing a rally stage must
+    // not have.
+    const loose = e.surface === 'dirt' || e.surface === 'gravel';
+    const carriageMat = e.surface === 'dirt' ? MAT_DIRT
+      : e.surface === 'gravel' ? MAT_GRAVEL
+      : MAT_ASPHALT;
+    // A loose road's verge is the same loose stuff; a paved road's is gravel.
+    const shoulderMat = loose ? carriageMat : MAT_GRAVEL;
+    // Shoulder WIDTH is a physical property of the road, not of its material,
+    // and it is load-bearing here for a non-obvious reason: it sets how wide
+    // the pinned band is in the height field. Narrowing it for gravel — which
+    // seemed harmless, since only the material was meant to change — left a
+    // 7.5 m road with under two pinned cells at 3 m resolution, and the
+    // centreline started picking up the membrane between them. Slope kinks on
+    // loose roads went from 0.84% to 2.38% on that one edit.
+    const shoulder = e.surface === 'dirt' ? 1.6 : e.kind === 'highway' ? 3.5 : 2.4;
     const city = e.kind === 'street' || e.kind === 'avenue' || e.kind === 'link';
     for (let k = 0; k < n; k++) {
       const a = pts[k], b = pts[k + 1], o = si * STRIDE;
       seg[o] = a.x; seg[o + 1] = a.z; seg[o + 2] = a.y;
       seg[o + 3] = b.x; seg[o + 4] = b.z; seg[o + 5] = b.y;
       seg[o + 6] = e.width / 2; seg[o + 7] = shoulder;
-      seg[o + 8] = isDirt ? 1 : 0; seg[o + 9] = e.i;
+      seg[o + 8] = carriageMat * 16 + shoulderMat; seg[o + 9] = e.i;
       seg[o + 10] = a.s; seg[o + 11] = Math.max(1e-4, b.s - a.s);
       seg[o + 12] = m[k]; seg[o + 13] = m[k + 1];
       meta[si] = { edge: e, city };
@@ -152,7 +169,8 @@ export function createGround(world, opts = {}) {
     const o = sI * STRIDE;
     const ax = seg[o], az = seg[o + 1], bx = seg[o + 3], bz = seg[o + 4];
     const halfW = seg[o + 6], shoulder = seg[o + 7];
-    const isDirt = seg[o + 8] === 1;
+    const carriageMat = (seg[o + 8] / 16) | 0;
+    const shoulderMat = seg[o + 8] % 16;
     const city = meta[sI].city;
     const pad = halfW + shoulder + NEAR;
     const inner = halfW * 0.85, outer = halfW + shoulder;
@@ -181,10 +199,10 @@ export function createGround(world, opts = {}) {
           Tg[c] += w * (hermite(o, t) - terrain.height(x, z));
         }
         // Material is a hard choice, unlike height: nearest road wins.
-        if (d <= halfW) mat[c] = isDirt ? MAT_DIRT : MAT_ASPHALT;
+        if (d <= halfW) mat[c] = carriageMat;
         else if (mat[c] === MAT_NONE || mat[c] === MAT_GRAVEL) {
           if (city && d < halfW + SIDEWALK_W) mat[c] = MAT_SIDEWALK;
-          else if (d <= outer) mat[c] = isDirt ? MAT_DIRT : MAT_GRAVEL;
+          else if (d <= outer) mat[c] = shoulderMat;
         }
       }
     }

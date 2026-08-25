@@ -25,6 +25,12 @@
   --hud-gap: calc(var(--hud-u) * 1.15);
   --hud-map: calc(var(--hud-u) * 13.5);
   --hud-dial: calc(var(--hud-u) * 14.5);
+  --hud-dmg: calc(var(--hud-u) * 6.6);
+  /* Capped against the viewport as well as the unit, because the drift dial is
+   * the one fixed-width thing in the flexible middle column and it has nothing
+   * either side of it to push against. Deriving its height from the same
+   * property keeps the canvas's aspect exact whichever term wins. */
+  --hud-drift: min(calc(var(--hud-u) * 15), 42vw);
   --hud-radius: calc(var(--hud-u) * 0.85);
 
   --hud-ink: #eef4fa;
@@ -184,6 +190,255 @@
 .hud__odoU {
   margin-left: 0.35em;
   opacity: 0.7;
+}
+
+/* ---- damage panel, top left ---------------------------------------------
+ *
+ * Top left is the last free corner, and it is the right one: the four corners
+ * each answer a different question, and "what have I broken" is the one the
+ * player checks least often. It is also as far as the grid allows from the
+ * cluster, so a glance at the damage never lands on the tachometer instead.
+ */
+
+.hud__damage {
+  grid-area: 1 / 1 / 2 / 2;
+  justify-self: start;
+  align-self: start;
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--hud-u) * 0.4);
+  width: var(--hud-dmg);
+  padding: calc(var(--hud-u) * 0.5);
+  border: 1px solid var(--hud-edge);
+  border-radius: var(--hud-radius);
+  background: var(--hud-panel);
+  box-shadow: var(--hud-shadow);
+}
+
+/* Not merely transparent: until main.js hands over a damage state there is
+ * nothing to show, and an empty frame in the corner is worse than no frame. */
+.hud__damage.is-off { display: none; }
+
+.hud__damageCanvas {
+  width: 100%;
+  /* The silhouette is stylised wider than a real car in plan, because at this
+   * size a true 0.45 aspect turns the door panels into hairlines. */
+  height: calc(var(--hud-dmg) * 1.62);
+}
+
+/* ---- temperature --------------------------------------------------------
+ *
+ * Hidden entirely until the car is running hot. A gauge that sits at a quarter
+ * for the whole game teaches the player to stop reading it, and this one has
+ * about ten seconds of usefulness before the engine catches.
+ */
+
+.hud__temp {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--hud-u) * 0.35);
+}
+
+.hud__temp.is-off { display: none; }
+
+.hud__tempLabel {
+  color: var(--hud-dim);
+  font-size: calc(var(--hud-u) * 0.56);
+  font-weight: 800;
+  letter-spacing: 0.12em;
+}
+
+.hud__tempTrack {
+  position: relative;
+  flex: 1;
+  height: calc(var(--hud-u) * 0.5);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+}
+
+/* The bar spans temp 0.60 to 1.00, and the engine starts cooking itself at
+ * 0.86 — which lands at 65% of the way along. Left of the mark is heat; right
+ * of it is damage already being done. */
+.hud__tempTrack::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 65%;
+  width: 1px;
+  background: rgba(255, 255, 255, 0.5);
+}
+
+.hud__tempFill {
+  display: block;
+  width: 100%;
+  height: 100%;
+  transform-origin: left center;
+  transform: scaleX(0);
+  background: var(--hud-cool);
+  transition: background-color 200ms linear;
+}
+
+.hud__temp.is-warm .hud__tempFill { background: var(--hud-accent); }
+.hud__temp.is-hot .hud__tempFill { background: var(--hud-warn); }
+
+.hud__temp.is-crit .hud__tempFill { background: var(--hud-warn); }
+.hud__temp.is-crit .hud__tempLabel { color: var(--hud-warn); }
+.hud__temp.is-crit { animation: hud-flare 0.45s ease-in-out infinite; }
+
+@keyframes hud-flare { 50% { opacity: 0.3; } }
+
+/* ---- warning lamps ------------------------------------------------------ */
+
+.hud__lamps {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: calc(var(--hud-u) * 0.22);
+}
+
+/* Like the telltales, these hold their space when dark, so nothing on the
+ * panel moves when one lights. */
+.hud__lamp {
+  padding: calc(var(--hud-u) * 0.14) 0;
+  border: 1px solid transparent;
+  border-radius: calc(var(--hud-u) * 0.28);
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(160, 172, 186, 0.26);
+  font-size: calc(var(--hud-u) * 0.55);
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-align: center;
+  transition: color 90ms linear, background-color 90ms linear, border-color 90ms linear;
+}
+
+.hud__lamp.is-warn {
+  border-color: rgba(255, 182, 72, 0.7);
+  background: var(--hud-accent);
+  color: #12161b;
+}
+
+.hud__lamp.is-crit {
+  border-color: #ff8a78;
+  background: #d8322c;
+  color: #fff;
+  animation: hud-flare 0.7s ease-in-out infinite;
+}
+
+/* ---- drift, upper centre ------------------------------------------------
+ *
+ * The only part of the HUD that sits over the road, and it earns that by being
+ * gone the instant the chain ends. Upper centre rather than dead centre: high
+ * enough to clear the apex the player is actually looking at, central enough
+ * that it needs no eye movement at all.
+ */
+
+.hud__drift {
+  grid-area: 2 / 2 / 3 / 3;
+  justify-self: center;
+  align-self: start;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: calc(var(--hud-u) * 0.1);
+  margin-top: calc(var(--hud-u) * 1.4);
+  visibility: hidden;
+  opacity: 0;
+  transform: translateY(calc(var(--hud-u) * -0.5)) scale(0.94);
+  /* visibility is not interpolable, so it is delayed by the length of the fade
+   * instead — without that it snaps to hidden on frame one and the fade-out is
+   * never seen. On the way in it must not be delayed at all. */
+  transition: opacity 130ms ease, transform 130ms ease, visibility 0s linear 130ms;
+}
+
+.hud__drift.is-on {
+  visibility: visible;
+  opacity: 1;
+  transform: none;
+  transition: opacity 130ms ease, transform 130ms ease, visibility 0s;
+}
+
+.hud__driftDial {
+  position: relative;
+  width: var(--hud-drift);
+  height: calc(var(--hud-drift) * 0.54);
+}
+
+.hud__driftGauge {
+  width: 100%;
+  height: 100%;
+}
+
+/* In the hub of the arc, where the needle points away from it. */
+.hud__driftAngle {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  text-align: center;
+  font-family: var(--hud-mono);
+  font-size: calc(var(--hud-u) * 1.45);
+  font-weight: 700;
+  line-height: 1;
+  text-shadow: 0 0 calc(var(--hud-u) * 0.5) rgba(0, 0, 0, 0.9);
+}
+
+.hud__driftRow {
+  display: flex;
+  align-items: baseline;
+  gap: calc(var(--hud-u) * 0.5);
+}
+
+/* A text-shadow rather than a panel behind the numbers: over a moving road the
+ * shadow is enough to hold them, and a translucent slab in the middle of the
+ * windscreen is exactly what a drift display must not be. */
+.hud__driftScore {
+  font-family: var(--hud-mono);
+  font-size: calc(var(--hud-u) * 2.5);
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -0.01em;
+  text-shadow: 0 0 calc(var(--hud-u) * 0.8) rgba(0, 0, 0, 0.9);
+}
+
+.hud__driftMult {
+  color: var(--hud-accent);
+  font-family: var(--hud-mono);
+  font-size: calc(var(--hud-u) * 1.2);
+  font-weight: 800;
+  text-shadow: 0 0 calc(var(--hud-u) * 0.6) rgba(0, 0, 0, 0.9);
+}
+
+.hud__driftTag {
+  color: var(--hud-dim);
+  font-size: calc(var(--hud-u) * 0.7);
+  font-weight: 800;
+  letter-spacing: 0.3em;
+  text-indent: 0.3em;
+  text-shadow: 0 0 calc(var(--hud-u) * 0.5) rgba(0, 0, 0, 0.9);
+}
+
+/* Banked swells and holds green; lost shakes and goes red. Two completely
+ * different motions, because at the end of a chain the player is still looking
+ * at the road and only the shape of the movement gets through. */
+.hud__drift.is-bank .hud__driftScore,
+.hud__drift.is-bank .hud__driftTag { color: #4ad295; }
+
+.hud__drift.is-bank { animation: hud-bank 520ms ease-out; }
+
+.hud__drift.is-lost .hud__driftScore,
+.hud__drift.is-lost .hud__driftTag { color: var(--hud-warn); }
+
+.hud__drift.is-lost { animation: hud-lost 420ms ease-out; }
+
+@keyframes hud-bank {
+  35% { transform: scale(1.16); }
+}
+
+@keyframes hud-lost {
+  20% { transform: translateX(calc(var(--hud-u) * -0.55)); }
+  55% { transform: translateX(calc(var(--hud-u) * 0.42)); }
+  80% { transform: translateX(calc(var(--hud-u) * -0.2)); }
 }
 
 /* ---- minimap, bottom left ----------------------------------------------- */
@@ -409,9 +664,17 @@
     --hud-u: clamp(0.5rem, 2.1vmin, 0.9rem);
     --hud-map: calc(var(--hud-u) * 12);
     --hud-dial: calc(var(--hud-u) * 13);
+    /* The damage panel shrinks harder than the rest: it shares the top strip
+     * with the compass and the clock, and on a phone in landscape that strip is
+     * the only thing standing between them and each other. */
+    --hud-dmg: calc(var(--hud-u) * 5.2);
+    --hud-drift: min(calc(var(--hud-u) * 12), 38vw);
   }
 
   .hud__nav { width: min(54vw, calc(var(--hud-u) * 28)); }
+
+  .hud__driftScore { font-size: calc(var(--hud-u) * 2.1); }
+  .hud__lamp { letter-spacing: 0; }
 }
 
 /* Portrait leaves no width for a heading tape; the place line carries on alone.
@@ -426,8 +689,21 @@
 @media (prefers-reduced-motion: reduce) {
   .hud,
   .hud__toast,
-  .hud__tell { transition: none; }
+  .hud__tell,
+  .hud__lamp,
+  .hud__tempFill { transition: none; }
+
+  /* The drift box still has to appear and disappear, so its opacity keeps a
+   * short fade — only the movement goes. */
+  .hud__drift {
+    transform: none;
+    transition: opacity 130ms ease, visibility 0s linear 130ms;
+  }
 
   .hud__colon,
-  .hud__limit.is-over { animation: none; }
+  .hud__limit.is-over,
+  .hud__temp.is-crit,
+  .hud__lamp.is-crit,
+  .hud__drift.is-bank,
+  .hud__drift.is-lost { animation: none; }
 }

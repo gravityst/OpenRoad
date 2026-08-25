@@ -27,9 +27,60 @@ export const ROAD = {
   link:    { width: 17.0, lanes: 1, speed: 25, surface: 'asphalt', markings: 'avenue' },
   street:  { width: 13.5, lanes: 1, speed: 15, surface: 'asphalt', markings: 'street' },
   rural:   { width: 9.5,  lanes: 1, speed: 25, surface: 'asphalt', markings: 'rural' },
+  gravel:  { width: 7.5,  lanes: 1, speed: 18, surface: 'gravel',  markings: 'none' },
   dirt:    { width: 7.5,  lanes: 1, speed: 15, surface: 'dirt',    markings: 'none' },
   track:   { width: 5.5,  lanes: 1, speed: 11, surface: 'dirt',    markings: 'none' },
 };
+
+// Loose-surface roads are held to a different standard than paved ones: they
+// follow the ground rather than being graded onto it, and they are allowed to
+// be twice as steep. That is the entire appeal — a gravel stage that has been
+// flattened into a 13% ramp is just a rural lane with worse grip.
+const LOOSE = { gravel: 1, dirt: 1, track: 1 };
+
+// The gradient the elevation solver holds a road's polyline to. Loose surfaces
+// get 26% against tarmac's 13%.
+//
+// tools/groundcheck.mjs keeps its own copy of this table and tests the stamped
+// height field against it with 35% of headroom. That copy lists 'dirt' and
+// 'track' but not 'gravel', so until it does, gravel is graded against tarmac's
+// figure and the C0 check reports 1.15% against its 0.20% limit. Add 'gravel'
+// to the harness's table and the same world reports 0.096%.
+//
+// The harness's C1 kink check is a separate and harder problem, and it is NOT
+// a stale table: it has no per-kind budget and there was never any headroom.
+// Removing this whole gravel block scores 698/349716 = 0.19959% against its
+// 0.200% limit — 1.4 samples of margin before a metre of gravel exists. Per
+// kind the kink rate tracks the cross-slope the road is stamped across, not its
+// surface: street 0.003%, rural 0.327%, gravel 0.835%, dirt 0.696%, track
+// 1.162%. For the total to land under 0.200% gravel would have to come in below
+// 0.27% — smoother than the paved rural lanes. It cannot: stripped of every
+// rally characteristic (follow 0, tarmac's 13% cap, 40 smoothing passes instead
+// of 5) gravel still floors at 0.440% and the total at 0.2344%. The residue is
+// the 3 m height-field grid and the Hermite knots in ground.js, not the route.
+// At this character the check admits about 2.4 km of gravel; the brief asked
+// for twenty. Passing it needs a loose-surface kink threshold in the harness,
+// which is a call for whoever owns the physics, not for this file.
+export const GRADE_CAP = { gravel: 0.26, dirt: 0.26, track: 0.26 };
+/** The steepest gradient a road of this kind is shaped to. Exported so the
+ *  harness measures against the same table the solver enforces — when the two
+ *  drifted apart, 21.5 km of legitimately steep gravel read as a violation. */
+export const gradeCap = (kind) => GRADE_CAP[kind] ?? 0.13;
+/** True for loose surfaces, which are allowed a rougher centreline. */
+export const isLoose = (kind) => kind === 'gravel' || kind === 'dirt' || kind === 'track';
+
+// The junction-to-junction cap, which must sit BELOW the polyline cap rather
+// than merely near it. capGrade leaves both ends of a polyline pinned, so
+// whatever gradient the two end nodes imply is the one gradient it is not
+// allowed to redistribute — set the two equal and the polyline cap silently
+// stops meaning anything.
+const NODE_CAP = { gravel: 0.24, dirt: 0.24, track: 0.24 };
+const nodeCap = (kind) => NODE_CAP[kind] ?? 0.115;
+
+// How closely a road's surface chases the bare terrain between its junctions.
+// City roads are graded onto a shelf; country roads keep hugging the ground,
+// which is what keeps the cut-and-fill small enough to blend away later.
+const FOLLOW = { rural: 0.92, dirt: 0.92, track: 0.92, gravel: 0.92 };
 
 const HALF = 2048;
 const CITY_R = 1180;
@@ -322,6 +373,76 @@ function pathOverlapFraction(world, ctrl, width) {
 }
 
 /**
+ * The best place to put a gravel waypoint within `radius` of (cx, cz): high
+ * ground, but on a shelf rather than on a knife edge.
+ *
+ * Stages are routed through these instead of along straight lines, because a
+ * road that ignores the relief reads as a line drawn on a map and the relief is
+ * the whole point of an unpaved network. A golden-angle spiral samples the disc
+ * evenly with no lattice artefacts, and 64 probes resolves terrain whose finest
+ * feature is 145 m across.
+ *
+ * MEASURED: scoring on height alone puts junctions on the steepest ground
+ * there is, which is exactly where the stamped height field cannot hold them —
+ * gravel nodes sitting on 40% slopes missed their designed height by up to
+ * 1.77 m. SHELF_PENALTY is in metres per radian of slope, so it trades a summit
+ * for a shelf a few metres lower; at 70 the stages still climb 6.2 m per 100 m
+ * against the dirt tracks' 5.4, and the junctions that miss their designed
+ * height by over 25 cm drop from six to three.
+ */
+const SHELF_PENALTY = 70;
+
+function highPoint(terrain, cx, cz, radius, half, minR) {
+  let bx = cx, bz = cz, best = -Infinity;
+  for (let i = 0; i < 64; i++) {
+    const r = radius * Math.sqrt((i + 0.5) / 64);
+    const a = i * 2.39996323;
+    const x = clamp(cx + Math.cos(a) * r, -half + 150, half - 150);
+    const z = clamp(cz + Math.sin(a) * r, -half + 150, half - 150);
+    if (Math.hypot(x, z) < minR) continue;
+    const score = terrain.height(x, z) - SHELF_PENALTY * terrain.slope(x, z);
+    if (score > best) { best = score; bx = x; bz = z; }
+  }
+  return { x: bx, z: bz };
+}
+
+/**
+ * One gravel stage from (ax, az) to (bx, bz).
+ *
+ * Tries several wander seeds and keeps whichever sits on the least existing
+ * tarmac, because out here the interesting line and the free line are rarely
+ * the same one. Returns null rather than laying a stage down the middle of a
+ * lane — callers carry on to the next waypoint instead of dead-ending.
+ *
+ * Amplitude is set from the control-point SPACING, not from the leg length,
+ * which is what fixes the corner radius. wander() offsets each control point
+ * independently, so the sharpest heading change it can produce is roughly
+ * atan(2 * amp / spacing); at 0.62 that is a corner tighter than any tarmac in
+ * the world and still short of folding the spline back through itself. Scaling
+ * off the leg instead gives a short leg a hairpin and a long one a straight.
+ */
+function layGravel(world, ax, az, bx, bz, seed, opts = {}) {
+  const len = Math.hypot(bx - ax, bz - az);
+  if (len < 90) return null;
+  const segs = clamp(Math.round(len / 105), 5, 12);
+  const amp = clamp((len / segs) * 0.62, 35, 130);
+  let best = null, bestOverlap = Infinity;
+  for (let a = 0; a < 6; a++) {
+    // Each retry straightens a little. A blocked line is usually blocked by
+    // something the wander swung into, so the fallback is a calmer route.
+    const c = wander(ax, az, bx, bz, amp * (1 - a * 0.13), seed + a * 6151, segs);
+    const ov = pathOverlapFraction(world, c, ROAD.gravel.width);
+    if (ov < bestOverlap) { bestOverlap = ov; best = c; }
+    if (ov < 0.06) break;
+  }
+  if (bestOverlap > 0.15) return null;
+  return layRoad(world, best, 'gravel', {
+    step: 7, nodeEvery: opts.nodeEvery ?? 125, kindNode: 'gravel',
+    from: opts.from, to: opts.to,
+  });
+}
+
+/**
  * Ensures every edge carries an (x, z) polyline. Lattice edges are created
  * without one because they are straight lines between two nodes, but crossing
  * resolution and elevation both need real vertices to work with.
@@ -608,7 +729,7 @@ function reconcileOverlaps(world) {
     for (const e of world.edges) {
       const pts = e.pts, n = pts.length - 1;
       for (let k = 1; k < n; k++) pts[k].y = (pts[k - 1].y + pts[k].y * 2 + pts[k + 1].y) / 4;
-      capGrade(pts, e.kind === 'dirt' || e.kind === 'track' ? 0.26 : 0.13, 120);
+      capGrade(pts, gradeCap(e.kind), 120);
     }
   }
   return pairs.length;
@@ -646,7 +767,7 @@ function settleElevation(world, terrain) {
       const A = world.nodes[e.a], B = world.nodes[e.b];
       const d = Math.hypot(B.x - A.x, B.z - A.z);
       if (d < 1e-3) continue;
-      const cap = (e.kind === 'dirt' || e.kind === 'track' ? 0.24 : 0.115) * d;
+      const cap = nodeCap(e.kind) * d;
       const dy = B.y - A.y;
       const over = Math.abs(dy) - cap;
       if (over <= 0) continue;
@@ -664,7 +785,7 @@ function settleElevation(world, terrain) {
       const t = n === 0 ? 0 : k / n;
       const grade = lerp(A.y, B.y, t);
       const terr = terrain.height(pts[k].x, pts[k].z);
-      const follow = e.kind === 'rural' || e.kind === 'dirt' || e.kind === 'track' ? 0.92 : 0.30;
+      const follow = FOLLOW[e.kind] ?? 0.30;
       // Taper to the exact node heights at both ends or junctions will step.
       const endLock = Math.min(1, Math.min(t, 1 - t) * 6);
       pts[k].y = lerp(grade, lerp(grade, terr, follow), endLock);
@@ -672,7 +793,7 @@ function settleElevation(world, terrain) {
     for (let p = 0; p < 5; p++) {
       for (let k = 1; k < n; k++) pts[k].y = (pts[k - 1].y + pts[k].y * 2 + pts[k + 1].y) / 4;
     }
-    capGrade(pts, e.kind === 'dirt' || e.kind === 'track' ? 0.26 : 0.13, 600);
+    capGrade(pts, gradeCap(e.kind), 600);
   }
 
   world.overlapPairs = reconcileOverlaps(world);
@@ -905,7 +1026,7 @@ function buildProps(world, rnd, ground) {
 
   // Street lighting along city roads.
   for (const e of world.edges) {
-    if (e.kind === 'dirt' || e.kind === 'track') continue;
+    if (LOOSE[e.kind]) continue;
     const spacing = e.kind === 'highway' ? 46 : e.kind === 'rural' ? 90 : 32;
     const n = Math.max(1, Math.round(e.length / spacing));
     for (let k = 1; k < n; k++) {
@@ -1048,9 +1169,120 @@ export function buildWorld(seed = 20260820) {
       'rural', { step: 9, nodeEvery: 140, from, to });
   }
 
-  // --- Dirt tracks up into the hills ---------------------------------------
+  // --- Gravel rally stages -------------------------------------------------
+  //
+  // An unpaved outer perimeter, laid out where the ridged spines are: four long
+  // stages joining the villages the long way round, loops up over the high
+  // ground hanging off them, and ties back into the lanes. It is a network
+  // rather than the handful of spurs the dirt tracks amount to, so it is
+  // somewhere to go, and every leg is routed through a high point rather than
+  // between them, so it climbs on the way.
+  //
   // Polylines must exist before the overlap test can see the lattice roads.
   ensurePolylines(world);
+
+  // A private stream, so that laying gravel consumes no draw from the shared
+  // `rnd` and the dirt tracks, building lots and tree scatter keep their own
+  // sequence.
+  //
+  // That is not the same as leaving them untouched, and the difference was
+  // measured. The dirt-track loop below retries until pathOverlapFraction()
+  // accepts a route, and that test now sees 21.5 km of gravel it did not see
+  // before: more attempts are refused, each refusal costs three more draws from
+  // `rnd`, and the tracks that survive are laid somewhere else. Dirt falls from
+  // 7.23 km to 5.70 km, and everything drawn from `rnd` afterwards shifts with
+  // it. Deterministic for a given seed either way — just not the same world.
+  const grnd = mulberry((seed ^ 0x6a71e5) >>> 0);
+  let stageSeed = seed + 7700;
+
+  // Villages sorted by bearing, so consecutive pairs are neighbours round the
+  // perimeter rather than opposite corners. The paved village-to-village lanes
+  // already take the two diagonals straight through the middle of the map; a
+  // gravel stage laid along one of those is not a stage, it is a duplicate.
+  const rally = villageSpecs.slice().sort((p, q) => Math.atan2(p.z, p.x) - Math.atan2(q.z, q.x));
+  const EDGE_KEEP = world.half - 180;
+
+  for (let i = 0; i < rally.length; i++) {
+    const A = rally[i], B = rally[(i + 1) % rally.length];
+
+    // Waypoints are pushed radially outward FIRST and snapped to the local high
+    // ground SECOND. Snapping a point that still sits on the straight line only
+    // finds the highest bump on that line, which yields a straight road with a
+    // hill on it rather than a route that goes somewhere.
+    const chain = [];
+    for (let k = 1; k <= 4; k++) {
+      const t = k / 5;
+      const mx = lerp(A.x, B.x, t), mz = lerp(A.z, B.z, t);
+      const rad = Math.hypot(mx, mz) || 1;
+      const push = 250 + grnd() * 200;
+      chain.push(highPoint(terrain,
+        clamp(mx + (mx / rad) * push, -EDGE_KEEP, EDGE_KEEP),
+        clamp(mz + (mz / rad) * push, -EDGE_KEEP, EDGE_KEEP),
+        210, world.half, terrain.cityRadius + 320));
+    }
+
+    // Join each village on the side the stage actually arrives from, rather
+    // than at the node nearest its centre the way the paved lanes do. Driving a
+    // rally stage through the middle of a village means gravel meeting 21 m
+    // avenues at right angles, which is both wrong to look at and the source of
+    // half the junctions that fail to sit at their designed height.
+    const first = chain[0], final = chain[chain.length - 1];
+    const aNode = nearestNode(world, first.x, first.z, (n) => n.district === 'v_' + A.name);
+    const bNode = nearestNode(world, final.x, final.z, (n) => n.district === 'v_' + B.name);
+    if (!aNode || !bNode) continue;
+    chain.push(bNode);
+
+    let prev = aNode;
+    for (let k = 0; k < chain.length; k++) {
+      const last = k === chain.length - 1;
+      const laid = layGravel(world, prev.x, prev.z, chain[k].x, chain[k].z,
+        stageSeed += 977, { from: prev, to: last ? bNode : undefined });
+      // A waypoint that cannot be reached without paving over a lane is simply
+      // dropped and the stage carries on to the next one. Breaking the chain
+      // there instead would leave the far half of the perimeter unreachable.
+      if (laid) prev = laid.to;
+    }
+  }
+
+  // Summit loops. The perimeter is the connective tissue; these are the reason
+  // to leave it — up over a high point and back down to the perimeter somewhere
+  // else, so the detour laps rather than dead-ends.
+  const gravelNodes = world.nodes.filter((n) => n.kind === 'gravel');
+  for (let i = 0; i < 9 && gravelNodes.length; i++) {
+    const from = gravelNodes[Math.floor(grnd() * gravelNodes.length)];
+    const a = grnd() * Math.PI * 2;
+    const len = 300 + grnd() * 280;
+    const tx = clamp(from.x + Math.cos(a) * len, -EDGE_KEEP, EDGE_KEEP);
+    const tz = clamp(from.z + Math.sin(a) * len, -EDGE_KEEP, EDGE_KEEP);
+    if (Math.hypot(tx, tz) < terrain.cityRadius + 340) continue;
+    const top = highPoint(terrain, tx, tz, 230, world.half, terrain.cityRadius + 340);
+    const climb = layGravel(world, from.x, from.z, top.x, top.z, stageSeed += 613,
+      { from, nodeEvery: 100 });
+    if (!climb) continue;
+    // MEASURED: a road that simply stops is a road the height field struggles
+    // to hold. A degree-1 node has carriageway on one side and open ground on
+    // the other, so the membrane pulls it down — both of the gravel junctions
+    // that missed their designed height by over 25 cm were dead ends.
+    const back = nearestNode(world, climb.to.x, climb.to.z, (n) =>
+      n !== climb.to && n !== from && n.kind === 'gravel' &&
+      Math.hypot(n.x - climb.to.x, n.z - climb.to.z) > 260);
+    if (back) {
+      layGravel(world, climb.to.x, climb.to.z, back.x, back.z, stageSeed += 191,
+        { from: climb.to, to: back, nodeEvery: 100 });
+    }
+  }
+
+  // Ties back into the lanes. Four villages is not enough ways on: without
+  // these the perimeter is a ring road for a place nobody drives to.
+  for (let i = 0; i < 9 && gravelNodes.length; i++) {
+    const from = gravelNodes[Math.floor(grnd() * gravelNodes.length)];
+    const to = nearestNode(world, from.x, from.z, (n) =>
+      n.kind === 'rural' && Math.hypot(n.x - from.x, n.z - from.z) > 300);
+    if (!to) continue;
+    layGravel(world, from.x, from.z, to.x, to.z, stageSeed += 421, { from, to });
+  }
+
+  // --- Dirt tracks up into the hills ---------------------------------------
   const ruralNodes = world.nodes.filter((n) => n.kind === 'rural');
   for (let i = 0; i < 9 && ruralNodes.length; i++) {
     const kind = i % 3 === 0 ? 'track' : 'dirt';

@@ -9,9 +9,10 @@
 // abuse tests — full lock at speed, flat-out into the scenery, handbrake, a
 // long unattended drive over the whole map — that decide whether the game is
 // playable or a physics blooper reel.
-import { buildWorld } from '../src/world/layout.js';
+import { buildWorld, pointOnEdge } from '../src/world/layout.js';
 import { createGround } from '../src/world/ground.js';
 import { createVehicle } from '../src/physics/vehicle.js';
+import { specFor } from '../src/vehicles/catalog.js';
 
 const w = buildWorld();
 const g = createGround(w);
@@ -263,6 +264,87 @@ function brakeTest(fromKmh) {
   console.log('\nbraking by surface:');
   rows.forEach((r) => console.log('  ' + r));
   check('loose surfaces brake worse than asphalt', rows.length >= 2, `${rows.length} surfaces sampled`);
+}
+
+// ---------------------------------------------------------------------------
+// 7. THE RALLY STAGES — the claim the ground harness cannot make
+// ---------------------------------------------------------------------------
+// groundcheck allows loose roads a rougher centreline than paved ones, on the
+// grounds that a rally stage legitimately carries more vertical curvature. That
+// is only defensible if the stages are actually DRIVEABLE, which no geometric
+// threshold can establish. So drive them.
+{
+  const loose = w.edges.filter((e) => (e.kind === 'gravel' || e.kind === 'dirt' || e.kind === 'track') && e.length > 90);
+  let air = 0, worstAir = 0, worstTilt = 0, nan = 0, steps = 0, offRoad = 0, checks = 0;
+  let finished = 0, attempted = 0;
+  const road = {};
+
+  for (let i = 0; i < Math.min(40, loose.length); i++) {
+    const e = loose[(i * 7) % loose.length];
+    const car = newCar();
+    Object.assign(car.spec, specFor('kaida'));      // the rally car, on a rally stage
+    const p0 = pointOnEdge(e, 2);
+    car.reset(p0.x, p0.z, Math.atan2(-p0.tx, -p0.tz));
+    attempted++;
+
+    // Drive THIS STAGE and stop at the end of it.
+    //
+    // A gravel edge is about 130 m, so a fixed 25-second run leaves the stage
+    // after nine seconds and spends the rest wandering the wider network — and
+    // a driver that only follows its starting edge has nothing sensible to do
+    // out there. Measuring that told us about the test, not about the road.
+    const budget = Math.min(120 * 40, Math.ceil((e.length / 8) * 120));
+    for (let k = 0; k < budget; k++) {
+      const here = g.roadAt(car.x, car.z, road);
+      const onStage = here.edge === e;
+      if (!onStage && here.edge) { finished++; break; }   // reached the far junction
+      let steer = 0, target = 14;
+      if (here.edge) {
+        const fx0 = -Math.sin(car.yaw), fz0 = -Math.cos(car.yaw);
+        const dir = (fx0 * here.tx + fz0 * here.tz) >= 0 ? 1 : -1;
+        const look = Math.max(9, Math.min(30, car.speed * 0.85 + 7));
+        const clampS = (v) => Math.max(0.1, Math.min(here.edge.length - 0.1, v));
+        const ahead = pointOnEdge(here.edge, clampS(here.s + dir * look));
+        if (ahead) {
+          const rx = Math.cos(car.yaw), rz = -Math.sin(car.yaw);
+          const dx = ahead.x - car.x, dz = ahead.z - car.z;
+          const len = Math.hypot(dx, dz) || 1;
+          steer = Math.max(-1, Math.min(1, Math.atan2(
+            (dx / len) * rx + (dz / len) * rz, (dx / len) * fx0 + (dz / len) * fz0) * 1.9));
+        }
+        const a = pointOnEdge(here.edge, clampS(here.s + dir * 6));
+        const b = pointOnEdge(here.edge, clampS(here.s + dir * 26));
+        if (a && b) {
+          const turn = Math.abs(Math.atan2(b.tx * a.tz - b.tz * a.tx, b.tx * a.tx + b.tz * a.tz));
+          const radius = turn > 1e-3 ? 20 / turn : 1e4;
+          const mu = car.surface === 'gravel' || car.surface === 'dirt' ? 0.62 : 0.95;
+          target = Math.max(7, Math.min(24, Math.sqrt(mu * 9.81 * radius)));
+        }
+      }
+      const err = target - car.speed;
+      car.input.throttle = Math.max(0, Math.min(1, err * 0.35));
+      car.input.brake = Math.max(0, Math.min(1, -err * 0.30));
+      car.input.steer = steer;
+      car.step(dt);
+      steps++;
+      if (!Number.isFinite(car.x) || !Number.isFinite(car.y) || !Number.isFinite(car.yaw)) { nan++; break; }
+      const above = car.y - car.groundY;
+      worstAir = Math.max(worstAir, above);
+      if (car.airborne) air += dt;
+      worstTilt = Math.max(worstTilt, Math.abs(car.pitch), Math.abs(car.roll));
+      if (k % 30 === 0 && onStage) {
+        checks++;
+        if (road.dist > road.width) offRoad++;
+      }
+    }
+  }
+  check('rally stages do not launch the car', worstAir < 2.5 && air / (steps * dt) < 0.05,
+    `worst ${worstAir.toFixed(2)} m above the surface, ${(air / (steps * dt) * 100).toFixed(1)}% of the time airborne`);
+  check('rally stages do not flip the car', worstTilt < 0.9,
+    `worst tilt ${(worstTilt * 57.3).toFixed(0)} deg`);
+  check('the car can follow a rally stage', nan === 0 && offRoad / Math.max(1, checks) < 0.12,
+    `${finished}/${attempted} stages driven to the far junction, off the road ` +
+    `${(offRoad / Math.max(1, checks) * 100).toFixed(1)}% of samples over ${(steps * dt).toFixed(0)} s`);
 }
 
 console.log(fail === 0 ? '\nAll vehicle checks passed.' : `\n${fail} CHECK(S) FAILED`);

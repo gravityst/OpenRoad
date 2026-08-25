@@ -200,11 +200,18 @@ function acquireKit() {
         roughness: 0.42, metalness: 0, clearcoat: 0.4,
         side: THREE.DoubleSide, depthWrite: false,
       }),
-      // Blown out: alphaTest rather than blending, so what is left is solid
-      // glass and the hole is a real hole the cabin shows through.
+      // Blown out: alphaTest carves the hole the cabin shows through, and the
+      // fragments left around it are still GLASS.
+      //
+      // They were opaque pale blue, which at any distance reads as torn white
+      // plastic rather than as broken glazing — and with a fire on the car the
+      // bloom picked them out as a sheet of light. Tinting them down toward the
+      // clean glass colour and letting them stay translucent is what makes the
+      // aperture read as an empty window frame with shards around the edge.
       shattered: new THREE.MeshStandardMaterial({
-        color: 0xc6d4e0, alphaMap: kit.hole, alphaTest: 0.5,
-        roughness: 0.30, metalness: 0, side: THREE.DoubleSide,
+        color: 0x8fa2b2, alphaMap: kit.hole, alphaTest: 0.5,
+        transparent: true, opacity: 0.55,
+        roughness: 0.22, metalness: 0, side: THREE.DoubleSide,
       }),
       // A smashed lens: dark, with the crack texture picking out the broken
       // edges. Handing this to a lamp also takes it off the per-car lamp
@@ -669,8 +676,15 @@ export function createCarDamage(carModel, spec = {}, opts = {}) {
   // most cars in the city are never touched and this is the only part of the
   // module with real cost.
   let body = null;
-  const dentMax = wr * 0.62 * (opts.dentScale ?? 1);
-  const maxTotal = wr * 0.95;
+  // Dent depth, in wheel radii.
+  //
+  // At 0.62/0.95 a front-quarter impact folded the nose into flat planes that
+  // read as geometry coming apart rather than as metal crumpling — the failure
+  // mode is that a low-poly shell has too few vertices to fold gracefully, so
+  // past a point every extra centimetre buys shards instead of damage. Pulled
+  // back to where the car is plainly stoved in and still plainly a car.
+  const dentMax = wr * 0.40 * (opts.dentScale ?? 1);
+  const maxTotal = wr * 0.62;
 
   function ensureBody() {
     if (body) return body;

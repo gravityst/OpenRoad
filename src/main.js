@@ -925,7 +925,24 @@ async function boot() {
     },
     /** Drive one real frame. Everything a rAF tick does, at a dt you choose. */
     frame: (dt = 1 / 60) => stepFrame(dt),
-    setMode: (m) => { if (m === 'driving') startDriving(); else { mode = m; menus.show(m); } },
+    setMode: (m) => {
+      if (m === 'driving') { startDriving(); return; }
+      if (m === 'inspect') {
+        // Not a menu screen — a game state with its own camera. Showing a
+        // screen called 'inspect' just hid the car behind nothing.
+        mode = 'inspect';
+        orbit.yaw = car.yaw + 0.7; orbit.pitch = 0.28; orbit.dist = 7.5;
+        controls.reset();
+        return;
+      }
+      mode = m; menus.show(m);
+    },
+    /** Aim the inspection camera from code. */
+    setOrbit: (yaw, pitch, dist) => {
+      if (yaw != null) orbit.yaw = yaw;
+      if (pitch != null) orbit.pitch = clampNum(pitch, -0.25, 1.15);
+      if (dist != null) orbit.dist = clampNum(dist, 3.0, 22);
+    },
     /** Drive the car from code through the real frame. null hands it back. */
     setInput: (v) => { inputOverride = v; },
     /** Set the clock. Goes through clockHours, which the frame loop owns —

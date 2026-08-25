@@ -134,7 +134,8 @@ async function boot() {
   const settingsEarly = loadSettings();
 
   // ---- layers -------------------------------------------------------------
-  const [mTerrain, mRoads, mCity, mProps, mCar, mSky, mFx, mParticles, mTraffic, mHud, mMenus, mAudio, mTouch] =
+  const [mTerrain, mRoads, mCity, mProps, mCar, mSky, mFx, mParticles, mTraffic, mHud, mMenus, mAudio, mTouch,
+         mCarDamage, mDebris, mDamageFx, mDrift, mModels] =
     await stage(0.50, 'loading modules', () => Promise.all([
       layer('./render/terrain.js', 'terrain'),
       layer('./render/roads.js', 'roads'),
@@ -149,6 +150,11 @@ async function boot() {
       layer('./game/menus.js', 'menus'),
       layer('./game/audio.js', 'audio'),
       layer('./input/touch.js', 'touch controls'),
+      layer('./render/carDamage.js', 'car damage'),
+      layer('./physics/debris.js', 'debris'),
+      layer('./render/damageFx.js', 'damage effects'),
+      layer('./game/drift.js', 'drift scoring'),
+      layer('./render/models.js', 'model library'),
     ])) || [];
 
   const sky = await stage(0.56, 'raising the sky', () =>
@@ -205,6 +211,21 @@ async function boot() {
       render: () => renderer.render(scene, camera),
     });
 
+  const debris = (mDebris && safe(() => mDebris.createDebris(ground))) ||
+    stub(['spawn', 'spawnPart', 'update', 'clear', 'dispose'], { group: new THREE.Group(), count: 0 });
+  scene.add(debris.group);
+
+  const damageFx = (mDamageFx && safe(() => mDamageFx.createDamageFx(scene))) ||
+    stub(['update', 'applyEvents', 'reset', 'dispose']);
+
+  const drift = (mDrift && safe(() => mDrift.createDrift())) ||
+    stub(['update', 'reset', 'dispose', 'onCollision'],
+      { state: { active: false, score: 0, angle: 0, multiplier: 1, banked: 0, best: 0 } });
+
+  const models = (mModels && safe(() => mModels.createModelLibrary())) ||
+    stub(['preload', 'dispose'],
+      { load: async () => null, loadCar: async () => null, has: () => false, get: () => null });
+
   const traffic = await stage(0.95, 'putting traffic on the road', () =>
     mTraffic ? mTraffic.createTraffic(world, ground,
       { density: Math.round((settingsEarly.traffic != null ? settingsEarly.traffic : 0.55) * 80) }) : null) ||
@@ -222,14 +243,25 @@ async function boot() {
   scene.add(carRoot);
   let carModel = null;
 
+  let carDamage = null;
   function fitCarModel(id, colourIndex) {
+    if (carDamage) { carDamage.dispose && carDamage.dispose(); carDamage = null; }
     if (carModel) { carRoot.remove(carModel.group); carModel.dispose && carModel.dispose(); carModel = null; }
     if (!mCar) return;
+    const spec = specFor(id, colourIndex);
     try {
-      carModel = mCar.createCarModel(specFor(id, colourIndex));
+      carModel = mCar.createCarModel(spec);
       carRoot.add(carModel.group);
     } catch (err) {
       console.error('[open road] car model failed:', err);
+      return;
+    }
+    // The damage rig binds to whatever model it was given, procedural or
+    // imported — models.js wires an imported car to the same interface, so
+    // nothing downstream can tell the difference.
+    if (mCarDamage) {
+      try { carDamage = mCarDamage.createCarDamage(carModel, spec); }
+      catch (err) { console.error('[open road] damage rig failed:', err); }
     }
   }
   fitCarModel(chosenCar, chosenColour);
@@ -398,6 +430,10 @@ async function boot() {
   const camVel = new THREE.Vector3();
   const tmp = new THREE.Vector3();
   const suspension = [0, 0, 0, 0];
+  const damageEvents = [];
+  const fxCars = [null];
+  let driftState = drift.state;
+  let inputOverride = null;
   const touchState = { throttle: 0, brake: 0, steer: 0, handbrake: 0, camera: false, horn: false };
   const hudState = {
     speed: 0, gear: 1, rpm: 0, redline: 7000, surface: 'asphalt', throttle: 0, brake: 0,
@@ -445,7 +481,16 @@ async function boot() {
     }
     if (input.map && mode === 'driving') { mode = 'paused'; menus.show('map'); controls.reset(); }
     if (input.camera) cameraMode = (cameraMode + 1) % MODES.length;
-    if (input.reset && mode === 'driving') spawnOnRoad(car.x, car.z);
+    if (input.reset && mode === 'driving') {
+      spawnOnRoad(car.x, car.z);
+      // Respawning repairs. Leaving a wreck wrecked after a reset strands the
+      // player with no route back to a working car.
+      if (car.damage) car.damage.reset();
+      if (carDamage) carDamage.reset();
+      damageFx.reset();
+      drift.reset();
+      hud.toast('Repaired', 1.6);
+    }
     if (input.lights) headlights = !headlights;
     if (input.indLeft) indicator = indicator === -1 ? 0 : -1;
     if (input.indRight) indicator = indicator === 1 ? 0 : 1;
@@ -454,10 +499,15 @@ async function boot() {
     // ---- physics ----
     const driving = mode === 'driving';
     if (driving) {
-      car.input.throttle = input.throttle;
-      car.input.brake = input.brake;
-      car.input.steer = input.steer;
-      car.input.handbrake = input.handbrake;
+      // An override lets a harness or a demo drive the car through the REAL
+      // frame — physics, streaming, camera, effects and all. Setting car.input
+      // directly does not work, because this line runs every frame and would
+      // stamp the live controls straight back over it.
+      const src = inputOverride || input;
+      car.input.throttle = src.throttle || 0;
+      car.input.brake = src.brake || 0;
+      car.input.steer = src.steer || 0;
+      car.input.handbrake = src.handbrake || 0;
     } else {
       car.input.throttle = 0; car.input.brake = 1; car.input.steer = 0; car.input.handbrake = 1;
     }
@@ -473,6 +523,7 @@ async function boot() {
           particles.emitSparks(hit.x, car.y + 0.4, hit.z, hit.severity * 14, hit.nx, hit.nz);
         }
         if (hit.recovered) hud.toast('Recovered to the road', 2.5);
+        if (hit.severity > 0.05 && drift.onCollision) drift.onCollision(hit.severity);
       }
       accumulator -= PHYS_DT;
       steps++;
@@ -487,6 +538,31 @@ async function boot() {
     const night = sky.state ? sky.state.nightFactor : 0;
     city.setNight(night);
     props.setNight(night);
+
+    // ---- damage ----
+    // drainEvents() EMPTIES the queue, so exactly one caller may use it. That
+    // caller is here and everything else is handed the array. A second consumer
+    // would silently starve the first, and the bug would present as "sometimes
+    // the glass does not shatter".
+    if (car.damage) {
+      car.damage.drainEvents(damageEvents);
+      if (damageEvents.length) {
+        if (carDamage) carDamage.applyEvents(damageEvents);
+        damageFx.applyEvents(damageEvents, car);
+        if (audio.applyDamageEvents) audio.applyDamageEvents(damageEvents);
+        for (let i = 0; i < damageEvents.length; i++) {
+          const ev = damageEvents[i];
+          if (ev.type === 'detach' && carModel) {
+            // Thrown with the car's own velocity, so a bumper torn off at speed
+            // cartwheels down the road instead of dropping straight down.
+            debris.spawnPart(ev.part, carModel.group, car.vx, car.vy || 0, car.vz);
+          }
+        }
+      }
+      if (carDamage) carDamage.update(car.damage.state, dt);
+    }
+
+    driftState = drift.update(dt, car) || drift.state;
 
     // ---- car visuals ----
     carRoot.position.set(car.x, car.y, car.z);
@@ -513,6 +589,9 @@ async function boot() {
     // ---- traffic ----
     traffic.update(dt, car.x, car.z, car.speed, car.yaw);
     syncTrafficModels(night, dt);
+    debris.update(dt, camera.position);
+    fxCars[0] = car;
+    damageFx.update(dt, fxCars, camera.position);
 
     // ---- camera ----
     updateCamera(dt, driving);
@@ -543,6 +622,9 @@ async function boot() {
       hudState.airborne = car.airborne;
       hudState.slipping = car.slipping;
       hudState.odometer = car.odometer;
+      hudState.damage = car.damage ? car.damage.state : null;
+      hudState.damageEffects = car.damage ? car.damage.effects : null;
+      hudState.drift = driftState;
       const road = ground.roadAt(car.x, car.z);
       hudState.speedLimit = road.onRoad ? road.speedLimit : 0;
       hud.update(hudState);
@@ -563,6 +645,8 @@ async function boot() {
     audioState.slipping = car.slipping;
     audioState.airborne = car.airborne;
     audioState.rainIntensity = sky.state ? sky.state.rainIntensity || 0 : 0;
+    audioState.damage = car.damage ? car.damage.state : null;
+    audioState.damageEffects = car.damage ? car.damage.effects : null;
     audio.update(audioState, dt);
 
     // ---- render ----
@@ -591,8 +675,22 @@ async function boot() {
 
       const working = car.slipping > 0.12 || car.input.handbrake > 0.5;
       if (surf.dust > 0.1 && car.speed > 3) {
-        particles.emitDust(wx, car.y - car.spec.rideHeight + 0.05, wz,
-          surf.dust * (0.35 + car.speed * 0.05) * (working ? 2.2 : 1), surf.colour);
+        // Dust is emitted from four wheels every frame, so the per-call amount
+        // has to be small. At the first tuning it scaled with speed AND with
+        // sliding AND ran at 240 emissions a second, which put the car inside
+        // an opaque cloud the moment it reached a gravel road — you could not
+        // see the thing you were steering. It should trail, not blind.
+        //
+        // Rear wheels throw far more than fronts, which is most of what makes
+        // a dust plume read as a car rather than as fog.
+        const rear = i >= 2 ? 1 : 0.35;
+        skidCooldown[i] -= dt;
+        if (skidCooldown[i] <= 0) {
+          particles.emitDust(wx, car.y - car.spec.rideHeight + 0.05, wz,
+            surf.dust * rear * (0.20 + Math.min(car.speed, 34) * 0.012) * (working ? 1.9 : 1),
+            surf.colour);
+          skidCooldown[i] = 0.045;
+        }
       } else if (working && car.speed > 4) {
         particles.emitSmoke(wx, car.y - car.spec.rideHeight + 0.05, wz, car.slipping * 2.4);
         skidCooldown[i] -= dt;
@@ -719,10 +817,23 @@ async function boot() {
   window.__OPENROAD = {
     build: BUILD, world, ground, car, controls, scene, renderer, camera,
     traffic, settings, failures,
-    layers: { terrain, roads, city, props, particles, effects, sky, traffic, hud, menus, audio, touch, collision },
+    layers: { terrain, roads, city, props, particles, effects, sky, traffic, hud, menus, audio, touch,
+              collision, debris, damageFx, drift, models, get carDamage() { return carDamage; } },
+    /** Wreck the car on demand, for looking at damage without crashing first. */
+    wreck: (n = 6, severity = 0.7) => {
+      for (let i = 0; i < n; i++) {
+        car.damage.impact(severity * (0.5 + Math.random() * 0.5),
+          (Math.random() * 2 - 1) * car.spec.track * 0.5,
+          (Math.random() * 2 - 1) * car.spec.wheelbase * 0.6,
+          car.spec.track * 0.5, car.spec.wheelbase * 0.6, 20);
+      }
+      return car.damage.state;
+    },
     /** Drive one real frame. Everything a rAF tick does, at a dt you choose. */
     frame: (dt = 1 / 60) => stepFrame(dt),
     setMode: (m) => { if (m === 'driving') startDriving(); else { mode = m; menus.show(m); } },
+    /** Drive the car from code through the real frame. null hands it back. */
+    setInput: (v) => { inputOverride = v; },
     /** Set the clock. Goes through clockHours, which the frame loop owns —
      *  calling sky.setTime() alone is overwritten on the very next frame. */
     setTime: (h) => { clockHours = h % 24; settings.time = clockHours; sky.setTime(clockHours); },

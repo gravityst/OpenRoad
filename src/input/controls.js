@@ -29,6 +29,7 @@ const KEYMAP = {
   indLeft:   ['Comma'],
   indRight:  ['Period'],
   map:       ['KeyM'],
+  inspect:   ['KeyV'],
   reset:     ['KeyR'],
   pause:     ['Escape'],
 };
@@ -41,7 +42,7 @@ export function createControls(opts = {}) {
     shiftUp: false, shiftDown: false,
     camera: false, lookBack: 0, horn: false, lights: false,
     indLeft: false, indRight: false,
-    map: false, reset: false, pause: false,
+    map: false, inspect: false, reset: false, pause: false,
     usingGamepad: false,
   };
 
@@ -168,6 +169,7 @@ export function createControls(opts = {}) {
     state.shiftDown = anyPressed(KEYMAP.shiftDown) || pressed.has('__shiftDown') || !!(touch && touch.shiftDown);
     state.camera = anyPressed(KEYMAP.camera) || pressed.has('__camera') || !!(touch && touch.camera);
     state.map = anyPressed(KEYMAP.map) || pressed.has('__map');
+    state.inspect = anyPressed(KEYMAP.inspect);
     state.pause = anyPressed(KEYMAP.pause);
     state.reset = anyPressed(KEYMAP.reset);
     state.lights = anyPressed(KEYMAP.lights);
@@ -191,7 +193,7 @@ export function createControls(opts = {}) {
     padSteer = padThrottle = padBrake = padHandbrake = 0;
     state.throttle = state.brake = state.steer = state.handbrake = 0;
     state.shiftUp = state.shiftDown = state.camera = false;
-    state.map = state.pause = state.reset = state.lights = false;
+    state.map = state.inspect = state.pause = state.reset = state.lights = false;
     state.indLeft = state.indRight = state.horn = false;
     state.lookBack = 0;
   }

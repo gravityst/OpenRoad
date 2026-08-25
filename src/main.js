@@ -78,6 +78,8 @@ async function layer(path, name) {
   }
 }
 
+const clampNum = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
+
 const NOOP = () => {};
 /** Fills in the methods a missing layer would have provided. */
 function stub(methods, extra) {
@@ -425,6 +427,31 @@ async function boot() {
     renderer.setSize(w, h, false);
     effects.setSize(w, h);
   };
+  // Dragging orbits the car while inspecting, and does nothing otherwise —
+  // a driving game that grabs the pointer during play is a driving game you
+  // cannot alt-tab out of.
+  const onDown = (e) => {
+    if (mode !== 'inspect') return;
+    orbit.dragging = true; orbit.px = e.clientX; orbit.py = e.clientY;
+    canvas.setPointerCapture && canvas.setPointerCapture(e.pointerId);
+  };
+  const onMove = (e) => {
+    if (!orbit.dragging || mode !== 'inspect') return;
+    orbit.yaw -= (e.clientX - orbit.px) * 0.008;
+    orbit.pitch = clampNum(orbit.pitch + (e.clientY - orbit.py) * 0.006, -0.25, 1.15);
+    orbit.px = e.clientX; orbit.py = e.clientY;
+  };
+  const onUp = () => { orbit.dragging = false; };
+  const onWheel = (e) => {
+    if (mode !== 'inspect') return;
+    e.preventDefault();
+    orbit.dist = clampNum(orbit.dist * (1 + Math.sign(e.deltaY) * 0.12), 3.0, 22);
+  };
+  canvas.addEventListener('pointerdown', onDown);
+  window.addEventListener('pointermove', onMove);
+  window.addEventListener('pointerup', onUp);
+  canvas.addEventListener('wheel', onWheel, { passive: false });
+
   window.addEventListener('resize', onResize);
   onResize();
 
@@ -437,6 +464,9 @@ async function boot() {
   const camVel = new THREE.Vector3();
   const tmp = new THREE.Vector3();
   const suspension = [0, 0, 0, 0];
+  // Inspection orbit. Kept out of the camera-mode list because it is a game
+  // STATE, not a view: the car is parked and the physics is idle while it runs.
+  const orbit = { yaw: 0.7, pitch: 0.28, dist: 7.5, dragging: false, px: 0, py: 0 };
   const damageEvents = [];
   const fxCars = [null];
   let driftState = drift.state;
@@ -482,11 +512,23 @@ async function boot() {
     touch.read(touchState);
     const input = controls.update(dt, touch.isTouch ? touchState : null);
 
-    if (input.pause) {
+    if (input.pause && mode !== 'inspect') {
       if (mode === 'driving') { mode = 'paused'; menus.show('pause'); hud.setVisible(false); controls.reset(); }
       else if (mode === 'paused') startDriving();
     }
     if (input.map && mode === 'driving') { mode = 'paused'; menus.show('map'); controls.reset(); }
+    if (input.inspect) {
+      if (mode === 'driving') {
+        mode = 'inspect';
+        orbit.yaw = car.yaw + 0.7; orbit.pitch = 0.28; orbit.dist = 7.5;
+        controls.reset();
+        hud.toast(damageSummary(), 6);
+      } else if (mode === 'inspect') {
+        startDriving();
+      }
+    }
+    // Escape leaves inspection too, rather than opening the pause menu behind it.
+    if (input.pause && mode === 'inspect') startDriving();
     if (input.camera) cameraMode = (cameraMode + 1) % MODES.length;
     if (input.reset && mode === 'driving') {
       spawnOnRoad(car.x, car.z);
@@ -710,6 +752,27 @@ async function boot() {
     if (car.slipping > 0.3) audio.playSkid(car.slipping);
   }
 
+  /** What is actually wrong with the car, in words. */
+  function damageSummary() {
+    if (!car.damage) return 'Inspecting — drag to orbit, scroll to zoom';
+    const d = car.damage.state;
+    const bits = [];
+    const lost = [];
+    for (const k in d.attached) if (!d.attached[k]) lost.push(k);
+    if (lost.length) bits.push(`lost ${lost.join(', ')}`);
+    const gone = [];
+    for (const k in d.glass) if (d.glass[k] >= 1) gone.push(k);
+    if (gone.length) bits.push(`${gone.length} pane${gone.length > 1 ? 's' : ''} out`);
+    const blown = d.blown.filter(Boolean).length;
+    if (blown) bits.push(`${blown} tyre${blown > 1 ? 's' : ''} blown`);
+    if (d.radiator < 0.7) bits.push('radiator holed');
+    if (d.onFire > 0) bits.push('ON FIRE');
+    else if (d.temp > 0.85) bits.push('overheating');
+    if (d.engine < 0.6) bits.push(`engine ${Math.round(d.engine * 100)}%`);
+    const head = `${Math.round(car.damage.integrity * 100)}% intact`;
+    return bits.length ? `${head} — ${bits.join(', ')}` : `${head} — no damage`;
+  }
+
   function districtAt(x, z) {
     let best = '', bd = Infinity;
     for (const d of world.districts) {
@@ -728,6 +791,30 @@ async function boot() {
     const m = MODES[cameraMode];
     const fx = -Math.sin(car.yaw), fz = -Math.cos(car.yaw);
     const speedT = Math.min(1, car.speed / 62);
+
+    if (mode === 'inspect') {
+      // Orbit the car itself. Arrow keys work as well as the pointer, because
+      // a laptop trackpad is a miserable way to study a dented wing.
+      if (controls.state.steer) orbit.yaw -= controls.state.steer * dt * 1.6;
+      if (controls.state.throttle) orbit.pitch = clampNum(orbit.pitch + dt * 0.9, -0.25, 1.15);
+      if (controls.state.brake) orbit.pitch = clampNum(orbit.pitch - dt * 0.9, -0.25, 1.15);
+      const cp = Math.cos(orbit.pitch), sp = Math.sin(orbit.pitch);
+      camWanted.set(
+        car.x + Math.sin(orbit.yaw) * orbit.dist * cp,
+        car.y + 0.55 + orbit.dist * sp,
+        car.z + Math.cos(orbit.yaw) * orbit.dist * cp,
+      );
+      // Never underground, however far the player drags the camera down.
+      const gy = ground.heightAt(camWanted.x, camWanted.z) + 0.45;
+      if (camWanted.y < gy) camWanted.y = gy;
+      camera.position.lerp(camWanted, 1 - Math.exp(-14 * dt));
+      camLook.lerp(camTarget.set(car.x, car.y + 0.45, car.z), 1 - Math.exp(-14 * dt));
+      camera.up.set(0, 1, 0);
+      camera.lookAt(camLook);
+      camera.fov += (38 - camera.fov) * Math.min(1, dt * 5);
+      camera.updateProjectionMatrix();
+      return;
+    }
 
     if (mode === 'title' || mode === 'garage' || !driving) {
       // A slow orbit of the car for the menus, so the front end is never a

@@ -334,13 +334,22 @@ const dt = 1 / 120;
 
   // Allocation proxy. A single object literal per piece per frame would be
   // 40 x 20000 = 800k objects and would show up here as tens of megabytes.
-  relaunch();
-  for (let k = 0; k < 4000; k++) d.update(dt, cam);      // settle the heap
-  const h0 = process.memoryUsage().heapUsed;
-  for (let k = 0; k < 20000; k++) d.update(dt, cam);
-  const grew = (process.memoryUsage().heapUsed - h0) / 1048576;
+  // Best of three, because heapUsed is a live number: an unrelated collection
+  // landing inside the window moves it either way, and this check failed once
+  // in four runs under the load of the full suite while passing every time on
+  // its own. Code that really allocates fails all three; code that does not
+  // passes at least one, so the retry costs nothing in sensitivity.
+  let grew = Infinity;
+  for (let attempt = 0; attempt < 3 && grew >= 8; attempt++) {
+    relaunch();
+    for (let k = 0; k < 4000; k++) d.update(dt, cam);    // settle the heap
+    if (global.gc) global.gc();
+    const h0 = process.memoryUsage().heapUsed;
+    for (let k = 0; k < 20000; k++) d.update(dt, cam);
+    grew = Math.min(grew, (process.memoryUsage().heapUsed - h0) / 1048576);
+  }
   check('update() allocates nothing per frame', grew < 8,
-    `heap moved ${grew >= 0 ? '+' : ''}${grew.toFixed(2)} MB over 20k updates`);
+    `heap moved ${grew >= 0 ? '+' : ''}${grew.toFixed(2)} MB over 20k updates (best of 3)`);
   d.dispose();
 }
 

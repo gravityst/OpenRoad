@@ -527,13 +527,17 @@ export function createHUD(root, opts = {}) {
     hs.height = 0;
 
     // A wash over the built-up area, so the city reads as city before a single
-    // road is drawn.
+    // road is drawn. Skipped entirely when there is no city: a zero-radius
+    // radial gradient is degenerate, and drawing a grey blob over open
+    // countryside would be a lie either way.
     const cityR = world.terrain.cityRadius * S;
+    if (cityR > 1) {
     const wash = g.createRadialGradient(mapRes / 2, mapRes / 2, cityR * 0.15, mapRes / 2, mapRes / 2, cityR * 1.3);
     wash.addColorStop(0, 'rgba(104,112,124,0.30)');
     wash.addColorStop(1, 'rgba(104,112,124,0)');
     g.fillStyle = wash;
     g.fillRect(0, 0, mapRes, mapRes);
+    }
 
     for (let i = 0; i < world.blocks.length; i++) {
       const b = world.blocks[i];

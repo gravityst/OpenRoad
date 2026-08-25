@@ -28,6 +28,10 @@ export const ROAD = {
   street:  { width: 13.5, lanes: 1, speed: 15, surface: 'asphalt', markings: 'street' },
   rural:   { width: 9.5,  lanes: 1, speed: 25, surface: 'asphalt', markings: 'rural' },
   gravel:  { width: 7.5,  lanes: 1, speed: 18, surface: 'gravel',  markings: 'none' },
+  // Circuits. A race track has no centre line, and the speed figure here is
+  // only what a traffic car would obey — traffic never routes onto one.
+  circuit: { width: 12.0, lanes: 1, speed: 60, surface: 'asphalt', markings: 'none' },
+  rallyx:  { width: 9.5,  lanes: 1, speed: 40, surface: 'gravel',  markings: 'none' },
   dirt:    { width: 7.5,  lanes: 1, speed: 15, surface: 'dirt',    markings: 'none' },
   track:   { width: 5.5,  lanes: 1, speed: 11, surface: 'dirt',    markings: 'none' },
 };
@@ -61,29 +65,41 @@ const LOOSE = { gravel: 1, dirt: 1, track: 1 };
 // At this character the check admits about 2.4 km of gravel; the brief asked
 // for twenty. Passing it needs a loose-surface kink threshold in the harness,
 // which is a call for whoever owns the physics, not for this file.
-export const GRADE_CAP = { gravel: 0.26, dirt: 0.26, track: 0.26 };
+export const GRADE_CAP = { gravel: 0.26, dirt: 0.26, track: 0.26, rallyx: 0.22, circuit: 0.12 };
 /** The steepest gradient a road of this kind is shaped to. Exported so the
  *  harness measures against the same table the solver enforces — when the two
  *  drifted apart, 21.5 km of legitimately steep gravel read as a violation. */
 export const gradeCap = (kind) => GRADE_CAP[kind] ?? 0.13;
 /** True for loose surfaces, which are allowed a rougher centreline. */
-export const isLoose = (kind) => kind === 'gravel' || kind === 'dirt' || kind === 'track';
+export const isLoose = (kind) => kind === 'gravel' || kind === 'dirt' || kind === 'track' || kind === 'rallyx';
 
 // The junction-to-junction cap, which must sit BELOW the polyline cap rather
 // than merely near it. capGrade leaves both ends of a polyline pinned, so
 // whatever gradient the two end nodes imply is the one gradient it is not
 // allowed to redistribute — set the two equal and the polyline cap silently
 // stops meaning anything.
-const NODE_CAP = { gravel: 0.24, dirt: 0.24, track: 0.24 };
+const NODE_CAP = { gravel: 0.24, dirt: 0.24, track: 0.24, rallyx: 0.20, circuit: 0.105 };
 const nodeCap = (kind) => NODE_CAP[kind] ?? 0.115;
 
 // How closely a road's surface chases the bare terrain between its junctions.
 // City roads are graded onto a shelf; country roads keep hugging the ground,
 // which is what keeps the cut-and-fill small enough to blend away later.
-const FOLLOW = { rural: 0.92, dirt: 0.92, track: 0.92, gravel: 0.92 };
+// How closely each kind chases the bare terrain between its junctions.
+//
+// A circuit is BUILT, not draped. Grading it onto the landscape rather than
+// letting it hug every fold is what makes a track read as engineered — and it
+// is why a circuit can carry gentle, deliberate elevation change instead of
+// the constant chatter a country lane picks up.
+const FOLLOW = {
+  rural: 0.92, dirt: 0.92, track: 0.92, gravel: 0.92,
+  rallyx: 0.72, circuit: 0.66,
+};
 
 const HALF = 2048;
-const CITY_R = 1180;
+// There is no city. The field is kept because the HUD reads it, and zero is
+// the honest value — anything else would carve a dead zone out of the middle
+// of the map where nothing is allowed to grow.
+const CITY_R = 0;
 
 // ---------------------------------------------------------------------------
 // Terrain
@@ -98,28 +114,37 @@ export function makeTerrain(seed) {
 
   function height(x, z) {
     const d = Math.hypot(x, z);
-    // 0 deep in the city, 1 out in open country.
-    const out = smoothstep(CITY_R * 0.55, CITY_R + 620, d);
 
-    // The city sits on a gently tilted shelf, kept deliberately shallow: a flat
-    // street grid laid over big relief ends up metres in the air, and the
-    // embankment needed to hide that is worse than the hill it replaced.
-    const shelf = fbm(x / 1900, z / 1900, s + 3, 2) * 2.0 - 0.5;
+    // There is no city any more, and that changes the terrain more than
+    // anything else here.
+    //
+    // The old shelf existed to keep a flat street grid from ending up metres in
+    // the air, and it cost the whole middle of the map its relief. With nothing
+    // but open roads, gravel stages and circuits to carry, the ground is free
+    // to actually move — and the elevation solver grades the roads onto it
+    // rather than the other way round.
 
-    // Open country: broad rolling farmland...
-    const rolling = fbm(x / 780, z / 780, s + 17, 4) * 30;
-    // ...with ridged spines growing into hills toward the map edge.
-    const far = smoothstep(0.25, 1.0, out) * smoothstep(900, 2000, d);
-    const spines = ridged(x / 1500, z / 1500, s + 91, 3) * 62 * far;
+    // Broad rolling country, everywhere, at real amplitude.
+    const rolling = fbm(x / 760, z / 760, s + 17, 4) * 36;
 
-    // Fine relief, heavily damped inside the city so streets stay drivable.
-    const detail = fbm(x / 145, z / 145, s + 5, 3) * 2.2 * (0.10 + 0.90 * out);
+    // Ridged spines rising into proper hills away from the middle. The basin in
+    // the centre is shallow rather than flat: somewhere to put a circuit that
+    // is not a hillclimb.
+    const far = smoothstep(420, 1750, d);
+    const spines = ridged(x / 1450, z / 1450, s + 91, 3) * 54 * far;
+
+    // A second, tighter ridge set gives the gravel stages their crests.
+    const ridges = ridged(x / 560, z / 560, s + 233, 2) * 12 * smoothstep(300, 1200, d);
+
+    // Fine relief. No longer damped anywhere, because nothing needs a flat
+    // shelf to stand on.
+    const detail = fbm(x / 145, z / 145, s + 5, 3) * 3.1;
 
     // A river valley carves a low corridor through the countryside.
     const rv = valueNoise(x / 2600, z / 2600, s + 404);
-    const valley = -18 * Math.exp(-Math.pow((z * 0.6 + x * 0.32) / 520 - rv * 1.6 - 1.35, 2)) * out;
+    const valley = -22 * Math.exp(-Math.pow((z * 0.6 + x * 0.32) / 520 - rv * 1.6 - 1.35, 2));
 
-    return lerp(shelf, shelf * 0.35 + rolling + spines, out) + detail + valley;
+    return rolling + spines + ridges + detail + valley;
   }
 
   // Central-difference normal. 1.5 m is small enough to catch real slope, large
@@ -144,15 +169,21 @@ export function makeTerrain(seed) {
     // costs four extra height evaluations, and this runs per wheel per step.
     const sl = ny === undefined ? slope(x, z) : Math.acos(clamp(ny, -1, 1));
     if (sl > 0.62) return 'rock';
-    const d = Math.hypot(x, z);
-    if (d < CITY_R * 0.9) return 'grass';
     const h = height(x, z);
     const n = fbm(x / 320, z / 320, s + 77, 3);
     // Sand belongs to the river valley, not to the farmland. The old threshold
     // (h < -9) caught more than a quarter of the map, because the valley cuts
     // to -18 over a wide corridor — the countryside read as desert rather than
     // as country.
-    if (h < -12.5 && n < 0.10) return 'sand';
+    // Sand belongs to the river bed, and the test has to say so directly.
+    // Keying it off absolute height worked only while the map sat near zero;
+    // once the terrain was freed of the city shelf the mean dropped to -24 m
+    // and over a third of the world went sandy. This recomputes the same
+    // valley term height() uses, so sand follows the river wherever the river
+    // happens to be.
+    const rv2 = valueNoise(x / 2600, z / 2600, s + 404);
+    const inValley = Math.exp(-Math.pow((z * 0.6 + x * 0.32) / 520 - rv2 * 1.6 - 1.35, 2));
+    if (inValley > 0.62 && n < 0.34) return 'sand';
     if (n > 0.40 && h > 16) return 'dirt';
     return 'grass';
   }
@@ -861,89 +892,50 @@ function lotsOverlap(a, b, shrink) {
 }
 
 function buildLots(world, rnd, ground) {
-  for (const block of world.blocks) {
-    const fromCore = Math.hypot(block.cx, block.cz);
-    const cos = Math.cos(block.rot), sin = Math.sin(block.rot);
+  // Rural structures, scattered along the roads.
+  //
+  // There is no city any more, so there are no blocks to fill — but the world
+  // still needs solid things in it. Buildings are what give the collision and
+  // damage systems something to hit, and a farm every so often is what stops a
+  // 4 km valley reading as a golf course.
+  const KINDS = [
+    { kind: 'house',     w: [9, 16],  d: [8, 13],  h: [5.5, 8.5],  weight: 0.34 },
+    { kind: 'house',     w: [7, 11],  d: [6, 9],   h: [3.0, 4.2],  weight: 0.16 },  // sheds
+    { kind: 'warehouse', w: [16, 30], d: [11, 20], h: [6.5, 11],   weight: 0.34 },  // barns
+    { kind: 'warehouse', w: [24, 44], d: [14, 26], h: [8, 14],     weight: 0.16 },  // big sheds
+  ];
+  const totalWeight = KINDS.reduce((t, k) => t + k.weight, 0);
+  const pick = () => {
+    let r = rnd() * totalWeight;
+    for (const k of KINDS) { r -= k.weight; if (r <= 0) return k; }
+    return KINDS[0];
+  };
+  const between = (r) => r[0] + rnd() * (r[1] - r[0]);
 
-    if (block.kind === 'park') {
-      const n = 8 + Math.floor(rnd() * 10);
-      for (let i = 0; i < n; i++) {
-        const lx = (rnd() - 0.5) * block.hx * 1.6, lz = (rnd() - 0.5) * block.hz * 1.6;
-        world.props.push({
-          type: 'tree',
-          x: block.cx + lx * cos - lz * sin,
-          z: block.cz + lx * sin + lz * cos,
-          rot: rnd() * 6.283, scale: 0.8 + rnd() * 0.9, variant: (rnd() * 3) | 0,
-        });
-      }
-      continue;
-    }
+  const TARGET = 420;
+  for (let attempt = 0; attempt < TARGET * 14 && world.lots.length < TARGET; attempt++) {
+    const x = (rnd() * 2 - 1) * (world.half - 140);
+    const z = (rnd() * 2 - 1) * (world.half - 140);
 
-    // Reserve for the WIDEST road that could bound this block, plus the node
-    // jitter that moves it. Sizing off ROAD.street means every block bounded by
-    // an avenue (21 m against a street's 13.5 m) puts its buildings 3.75 m into
-    // the carriageway before the lattice has even been jittered — which is how
-    // half the city ended up standing in the road.
-    const reserve = ROAD.avenue.width / 2 + SIDEWALK + 8;
-    const iw = block.hx - reserve;
-    const id = block.hz - reserve;
-    if (iw < 8 || id < 8) continue;
+    // Farms sit BESIDE a road, not in open country — a building nobody could
+    // drive to looks like it was dropped there, because it was.
+    const near = ground.nearestRoad(x, z, 150, (e) => e.kind !== 'circuit' && e.kind !== 'rallyx');
+    if (!near) continue;
+    if (near.dist < 26 || near.dist > 130) continue;
+    if (world.terrain.slope(x, z) > 0.30) continue;      // not on a cliff
 
-    const coreT = 1 - smoothstep(120, 900, fromCore);
-    const place = (lx, lz, w, d, rot2, kind, height) => {
-      world.lots.push({
-        x: block.cx + lx * cos - lz * sin,
-        z: block.cz + lx * sin + lz * cos,
-        w, d, rot: block.rot + rot2, kind, height,
-        district: block.district, seed: (rnd() * 1e9) | 0,
-      });
+    const spec = pick();
+    const lot = {
+      x, z, y: 0,
+      w: between(spec.w), d: between(spec.d),
+      // Square to the road it serves, with a little slop.
+      rot: Math.atan2(near.tx, near.tz) + (rnd() - 0.5) * 0.5,
+      kind: spec.kind, height: between(spec.h),
+      district: 'country', seed: (rnd() * 1e9) | 0,
     };
-
-    if (block.kind === 'downtown') {
-      const towers = rnd() < 0.55 ? 1 : 2;
-      for (let t = 0; t < towers; t++) {
-        const w = iw * (towers === 1 ? 1.55 : 0.7);
-        const lx = towers === 1 ? 0 : (t === 0 ? -iw * 0.44 : iw * 0.44);
-        place(lx, 0, w, id * 1.55, 0, 'tower', (34 + coreT * 145) * (0.45 + rnd() * 1.15));
-      }
-    } else if (block.kind === 'industrial') {
-      const sheds = 1 + ((rnd() * 2) | 0);
-      for (let t = 0; t < sheds; t++) {
-        const span = iw * 1.7 / sheds;
-        place((t - (sheds - 1) / 2) * span, 0, span * 0.86, id * 1.4, 0, 'warehouse', 9 + rnd() * 12);
-      }
-    } else {
-      // Perimeter buildings around a courtyard, one row per block edge.
-      for (const row of [{ ax: 1, sign: -1 }, { ax: 1, sign: 1 }, { ax: 0, sign: -1 }, { ax: 0, sign: 1 }]) {
-        const along = row.ax === 1 ? iw : id;
-        const depth = 11 + rnd() * 7;
-        const off = (row.ax === 1 ? id : iw) - depth / 2;
-        // The rows running along Z stop short of the corners, because the rows
-        // running along X already occupy them. Without this every block corner
-        // has two buildings inside each other, and an intersecting pair makes a
-        // wedge the collision solver cannot push a car out of.
-        const inset = row.ax === 1 ? 0 : 19;
-        let cursor = -along + inset;
-        while (cursor < along - inset - 8) {
-          const useW = Math.min(9 + rnd() * 16, along - inset - cursor);
-          if (useW < 7) break;
-          const mid = cursor + useW / 2;
-          const h = block.kind === 'midtown' ? 12 + rnd() * (18 + coreT * 34) : 6 + rnd() * 5.5;
-          if (rnd() > 0.08) {
-            place(
-              row.ax === 1 ? mid : row.sign * off,
-              row.ax === 1 ? row.sign * off : mid,
-              row.ax === 1 ? useW : depth,
-              row.ax === 1 ? depth : useW,
-              row.ax === 1 ? 0 : Math.PI / 2,
-              block.kind === 'suburb' ? 'house' : 'block', h,
-            );
-          }
-          cursor += useW + 1.2 + rnd() * 3;
-        }
-      }
-    }
+    world.lots.push(lot);
   }
+
   // Cull anything standing in the road.
   //
   // Blocks are sized from the district lattice, but the nodes are jittered and
@@ -1046,9 +1038,8 @@ function buildProps(world, rnd, ground) {
 
   // Trees: clumped by a density mask, hugging the lanes as hedgerows, never on
   // the carriageway.
-  for (let i = 0; i < 26000; i++) {
+  for (let i = 0; i < 46000; i++) {
     const x = (rnd() * 2 - 1) * world.half, z = (rnd() * 2 - 1) * world.half;
-    if (Math.hypot(x, z) < terrain.cityRadius * 0.92) continue;
     const road = ground.roadAt(x, z);
     if (road.onRoad || road.dist < 9) continue;
     const g = ground.sample(x, z);
@@ -1064,9 +1055,8 @@ function buildProps(world, rnd, ground) {
   }
 
   // Rocks on the high ground.
-  for (let i = 0; i < 2200; i++) {
+  for (let i = 0; i < 5200; i++) {
     const x = (rnd() * 2 - 1) * world.half, z = (rnd() * 2 - 1) * world.half;
-    if (Math.hypot(x, z) < terrain.cityRadius) continue;
     const road = ground.roadAt(x, z);
     if (road.onRoad || road.dist < 7) continue;
     if (terrain.slope(x, z) < 0.28 && rnd() < 0.7) continue;
@@ -1087,35 +1077,28 @@ export function buildWorld(seed = 20260820) {
   const world = {
     seed, half: HALF, terrain,
     nodes: [], edges: [], blocks: [], lots: [], props: [], districts: [], villages: [],
+    circuits: [],
   };
 
-  // --- City districts -----------------------------------------------------
-  buildDistrict(world, rnd, { id: 'downtown', name: 'Kestrel Downtown', cx: 0, cz: 0, rot: 0, cols: 8, rows: 8, cell: 118, kind: 'downtown', holes: 3 });
-  buildDistrict(world, rnd, { id: 'oldquarter', name: 'Verrand Old Quarter', cx: -760, cz: 610, rot: 0.54, cols: 6, rows: 6, cell: 96, kind: 'midtown', holes: 2, jitter: 5 });
-  buildDistrict(world, rnd, { id: 'harbourside', name: 'Harbourside Works', cx: 830, cz: -690, rot: -0.22, cols: 5, rows: 5, cell: 168, kind: 'industrial', holes: 1, jitter: 9 });
-  buildDistrict(world, rnd, { id: 'westmere', name: 'Westmere', cx: -820, cz: -640, rot: 0.11, cols: 6, rows: 5, cell: 132, kind: 'suburb', holes: 2 });
-  buildDistrict(world, rnd, { id: 'eastgate', name: 'Eastgate', cx: 880, cz: 700, rot: -0.38, cols: 5, rows: 6, cell: 140, kind: 'suburb', holes: 2 });
-
-  // --- Ring highway: superellipse, straights on the flanks ----------------
-  const RX = 1340, RZ = 1250;
-  const ringCtrl = [];
-  for (let i = 0; i < 48; i++) {
-    const a = (i / 48) * Math.PI * 2;
-    const ca = Math.cos(a), sa = Math.sin(a), k = 4.0;
-    const denom = Math.pow(Math.pow(Math.abs(ca), k) + Math.pow(Math.abs(sa), k), 1 / k);
-    ringCtrl.push({ x: (RX * ca) / denom, z: (RZ * sa) / denom });
+  // --- The open road ------------------------------------------------------
+  // One long irregular loop around the map, and the spine everything else
+  // hangs off. Irregular rather than circular: a constant-radius ring is the
+  // single most obvious tell that a road was generated.
+  const loopCtrl = [];
+  for (let i = 0; i < 44; i++) {
+    const a = (i / 44) * Math.PI * 2;
+    const r = 1490 * (1 + 0.135 * Math.sin(2 * a + 0.7) + 0.085 * Math.sin(3 * a + 2.1)
+                        + 0.045 * Math.sin(5 * a + 4.4));
+    loopCtrl.push({ x: Math.cos(a) * r, z: Math.sin(a) * r });
   }
-  ringCtrl.push({ x: ringCtrl[0].x, z: ringCtrl[0].z });
-  const ringStart = addNode(world, ringCtrl[0].x, ringCtrl[0].z, 'ring');
-  // `to` is the node we started from, so the final edge closes the loop. Adding
-  // a separate closing edge would join two coincident nodes and produce a
-  // zero-length segment with a vertical gradient.
-  layRoad(world, ringCtrl, 'highway', {
-    step: 11, nodeEvery: 165, kindNode: 'ring', from: ringStart, to: ringStart,
+  loopCtrl.push({ x: loopCtrl[0].x, z: loopCtrl[0].z });
+  const loopStart = addNode(world, loopCtrl[0].x, loopCtrl[0].z, 'rural');
+  layRoad(world, loopCtrl, 'rural', {
+    step: 10, nodeEvery: 150, kindNode: 'rural', from: loopStart, to: loopStart,
   });
-  world.ringNodes = world.nodes.filter((n) => n.kind === 'ring').map((n) => n.i);
+  world.ringNodes = world.nodes.filter((n) => n.kind === 'rural').map((n) => n.i);
 
-  const ringAt = (angle) => {
+  const loopAt = (angle) => {
     let best = null, bd = Infinity;
     for (const i of world.ringNodes) {
       const n = world.nodes[i];
@@ -1125,194 +1108,127 @@ export function buildWorld(seed = 20260820) {
     return best;
   };
 
-  // --- Links from the ring into each district ------------------------------
-  for (const t of [
-    { x: 0, z: -430 }, { x: 0, z: 430 }, { x: -450, z: 0 }, { x: 450, z: 0 },
-    { x: -760, z: 610 }, { x: 830, z: -690 }, { x: -820, z: -640 }, { x: 880, z: 700 },
-  ]) {
-    const city = nearestNode(world, t.x, t.z, (n) => n.kind === 'city');
-    if (!city) continue;
-    const from = ringAt(Math.atan2(city.z, city.x));
-    if (!from) continue;
-    layRoad(world, wander(from.x, from.z, city.x, city.z, 55, seed + city.i * 31, 4),
-      'link', { step: 10, nodeEvery: 150, from, to: city, kindNode: 'link' });
+  // --- Cross-country roads ------------------------------------------------
+  // Chords across the middle, so the map is not one loop with nothing inside.
+  for (let i = 0; i < 5; i++) {
+    const a = (i / 5) * Math.PI + 0.31;
+    const from = loopAt(a), to = loopAt(a + Math.PI);
+    if (!from || !to) continue;
+    layRoad(world, wander(from.x, from.z, to.x, to.z, 260, seed + 700 + i * 131, 9),
+      'rural', { step: 10, nodeEvery: 150, from, to });
   }
 
-  // --- Villages out in the country ----------------------------------------
-  const villageSpecs = [
-    { name: 'Marrowfield', x: -1620, z: 1560, cols: 4, rows: 3, cell: 92, rot: 0.28 },
-    { name: 'Culver Bend', x: 1700, z: 1480, cols: 3, rows: 3, cell: 88, rot: -0.42 },
-    { name: 'Ashcombe', x: -1580, z: -1590, cols: 3, rows: 4, cell: 86, rot: 0.62 },
-    { name: 'Thornhollow', x: 1560, z: -1600, cols: 3, rows: 3, cell: 90, rot: -0.15 },
+  // --- Circuits -----------------------------------------------------------
+  // Each is a closed loop with genuinely varied corners, built from a radial
+  // function with a few harmonics. A radial curve cannot self-intersect, which
+  // is the one failure a generated track absolutely must not have — and the
+  // harmonics are what turn a circle into a lap with a character.
+  const CIRCUITS = [
+    { name: 'Harrowgate Circuit',  x: -880, z: -760, r: 430, kind: 'circuit', h: [0.10, 0.070, 0.040, 0.022] },
+    { name: 'Vale Park',           x:  960, z:  690, r: 490, kind: 'circuit', h: [0.12, 0.055, 0.050, 0.018] },
+    { name: 'Ashcombe Rise',       x: -980, z:  980, r: 360, kind: 'circuit', h: [0.09, 0.085, 0.035, 0.028] },
+    { name: 'Culver Pit',          x: 1080, z: -1010, r: 340, kind: 'rallyx',  h: [0.13, 0.090, 0.055, 0.030] },
   ];
-  for (const v of villageSpecs) {
-    buildDistrict(world, rnd, {
-      id: 'v_' + v.name, name: v.name, cx: v.x, cz: v.z, rot: v.rot,
-      cols: v.cols, rows: v.rows, cell: v.cell, kind: 'suburb', holes: 1, jitter: 10,
+  /**
+   * Nudge a circuit onto the flattest ground near where it was asked for.
+   *
+   * This is simply what happens in reality: you build a track where the land
+   * suits it. Dropped blind, one of these landed on a ring of ground that
+   * varied 123 m over a lap — and a track held to a sane gradient across that
+   * needs a 55 m embankment, which no amount of blending hides. Searching a
+   * few hundred metres either way costs nothing and finds ground that varies
+   * by a fraction of it.
+   */
+  function siteCircuit(spec) {
+    let best = { x: spec.x, z: spec.z, score: Infinity };
+    for (let i = 0; i < 260; i++) {
+      const a = (i / 260) * Math.PI * 2 * 7;
+      const rad = (i / 260) * 620;
+      const cx = clamp(spec.x + Math.cos(a) * rad, -HALF + spec.r + 130, HALF - spec.r - 130);
+      const cz = clamp(spec.z + Math.sin(a) * rad, -HALF + spec.r + 130, HALF - spec.r - 130);
+      let lo = Infinity, hi = -Infinity;
+      for (let k = 0; k < 40; k++) {
+        const t = (k / 40) * Math.PI * 2;
+        const h = terrain.height(cx + Math.cos(t) * spec.r, cz + Math.sin(t) * spec.r);
+        if (h < lo) lo = h;
+        if (h > hi) hi = h;
+      }
+      // Prefer flat, and prefer staying near where the circuit was placed.
+      const score = (hi - lo) + rad * 0.02;
+      if (score < best.score) best = { x: cx, z: cz, score };
+    }
+    return best;
+  }
+
+  for (let c = 0; c < CIRCUITS.length; c++) {
+    const spec = CIRCUITS[c];
+    const site = siteCircuit(spec);
+    spec.x = site.x; spec.z = site.z;
+    const cr = mulberry(seed + 9100 + c * 37);
+    const phase = [cr() * 6.283, cr() * 6.283, cr() * 6.283, cr() * 6.283];
+    const ctrl = [];
+    const N = 76;
+    for (let i = 0; i < N; i++) {
+      const a = (i / N) * Math.PI * 2;
+      const m = 1
+        + spec.h[0] * Math.sin(2 * a + phase[0])
+        + spec.h[1] * Math.sin(3 * a + phase[1])
+        + spec.h[2] * Math.sin(5 * a + phase[2])
+        + spec.h[3] * Math.sin(7 * a + phase[3]);
+      ctrl.push({ x: spec.x + Math.cos(a) * spec.r * m, z: spec.z + Math.sin(a) * spec.r * m });
+    }
+    ctrl.push({ x: ctrl[0].x, z: ctrl[0].z });
+    const start = addNode(world, ctrl[0].x, ctrl[0].z, 'circuit');
+    const laid = layRoad(world, ctrl, spec.kind, {
+      step: 8, nodeEvery: 260, kindNode: 'circuit', from: start, to: start,
     });
-    world.villages.push({ name: v.name, x: v.x, z: v.z });
-  }
-  const villNode = (v) => nearestNode(world, v.x, v.z, (n) => n.district === 'v_' + v.name);
+    const length = laid.edges.reduce((a, e) => a + (e.length || 0), 0);
+    world.circuits.push({ name: spec.name, x: spec.x, z: spec.z, r: spec.r, kind: spec.kind, start });
+    // Circuits double as the map's landmarks now that there are no districts.
+    world.villages.push({ name: spec.name, x: spec.x, z: spec.z });
 
-  // --- Country lanes: ring -> village, and village -> village --------------
-  for (const v of villageSpecs) {
-    const from = ringAt(Math.atan2(v.z, v.x)), to = villNode(v);
-    if (!from || !to) continue;
-    layRoad(world, wander(from.x, from.z, to.x, to.z, 150, seed + v.x, 8),
-      'rural', { step: 9, nodeEvery: 130, from, to });
-  }
-  for (let i = 0; i < villageSpecs.length; i++) {
-    const from = villNode(villageSpecs[i]);
-    const to = villNode(villageSpecs[(i + 1) % villageSpecs.length]);
-    if (!from || !to) continue;
-    layRoad(world, wander(from.x, from.z, to.x, to.z, 170, seed + i * 977, 9),
-      'rural', { step: 9, nodeEvery: 140, from, to });
+    // An access road, so a circuit is somewhere you can drive TO.
+    const from = loopAt(Math.atan2(spec.z, spec.x));
+    if (from) {
+      layRoad(world, wander(from.x, from.z, ctrl[0].x, ctrl[0].z, 90, seed + 4200 + c * 53, 5),
+        'rural', { step: 10, nodeEvery: 140, from, to: start });
+    }
   }
 
-  // --- Gravel rally stages -------------------------------------------------
-  //
-  // An unpaved outer perimeter, laid out where the ridged spines are: four long
-  // stages joining the villages the long way round, loops up over the high
-  // ground hanging off them, and ties back into the lanes. It is a network
-  // rather than the handful of spurs the dirt tracks amount to, so it is
-  // somewhere to go, and every leg is routed through a high point rather than
-  // between them, so it climbs on the way.
-  //
-  // Polylines must exist before the overlap test can see the lattice roads.
+  // --- Gravel stages ------------------------------------------------------
+  // The point of the map. Long, connected, climbing into the hills.
   ensurePolylines(world);
-
-  // A private stream, so that laying gravel consumes no draw from the shared
-  // `rnd` and the dirt tracks, building lots and tree scatter keep their own
-  // sequence.
-  //
-  // That is not the same as leaving them untouched, and the difference was
-  // measured. The dirt-track loop below retries until pathOverlapFraction()
-  // accepts a route, and that test now sees 21.5 km of gravel it did not see
-  // before: more attempts are refused, each refusal costs three more draws from
-  // `rnd`, and the tracks that survive are laid somewhere else. Dirt falls from
-  // 7.23 km to 5.70 km, and everything drawn from `rnd` afterwards shifts with
-  // it. Deterministic for a given seed either way — just not the same world.
-  const grnd = mulberry((seed ^ 0x6a71e5) >>> 0);
-  let stageSeed = seed + 7700;
-
-  // Villages sorted by bearing, so consecutive pairs are neighbours round the
-  // perimeter rather than opposite corners. The paved village-to-village lanes
-  // already take the two diagonals straight through the middle of the map; a
-  // gravel stage laid along one of those is not a stage, it is a duplicate.
-  const rally = villageSpecs.slice().sort((p, q) => Math.atan2(p.z, p.x) - Math.atan2(q.z, q.x));
-  const EDGE_KEEP = world.half - 180;
-
-  for (let i = 0; i < rally.length; i++) {
-    const A = rally[i], B = rally[(i + 1) % rally.length];
-
-    // Waypoints are pushed radially outward FIRST and snapped to the local high
-    // ground SECOND. Snapping a point that still sits on the straight line only
-    // finds the highest bump on that line, which yields a straight road with a
-    // hill on it rather than a route that goes somewhere.
-    const chain = [];
-    for (let k = 1; k <= 4; k++) {
-      const t = k / 5;
-      const mx = lerp(A.x, B.x, t), mz = lerp(A.z, B.z, t);
-      const rad = Math.hypot(mx, mz) || 1;
-      const push = 250 + grnd() * 200;
-      chain.push(highPoint(terrain,
-        clamp(mx + (mx / rad) * push, -EDGE_KEEP, EDGE_KEEP),
-        clamp(mz + (mz / rad) * push, -EDGE_KEEP, EDGE_KEEP),
-        210, world.half, terrain.cityRadius + 320));
-    }
-
-    // Join each village on the side the stage actually arrives from, rather
-    // than at the node nearest its centre the way the paved lanes do. Driving a
-    // rally stage through the middle of a village means gravel meeting 21 m
-    // avenues at right angles, which is both wrong to look at and the source of
-    // half the junctions that fail to sit at their designed height.
-    const first = chain[0], final = chain[chain.length - 1];
-    const aNode = nearestNode(world, first.x, first.z, (n) => n.district === 'v_' + A.name);
-    const bNode = nearestNode(world, final.x, final.z, (n) => n.district === 'v_' + B.name);
-    if (!aNode || !bNode) continue;
-    chain.push(bNode);
-
-    let prev = aNode;
-    for (let k = 0; k < chain.length; k++) {
-      const last = k === chain.length - 1;
-      const laid = layGravel(world, prev.x, prev.z, chain[k].x, chain[k].z,
-        stageSeed += 977, { from: prev, to: last ? bNode : undefined });
-      // A waypoint that cannot be reached without paving over a lane is simply
-      // dropped and the stage carries on to the next one. Breaking the chain
-      // there instead would leave the far half of the perimeter unreachable.
-      if (laid) prev = laid.to;
-    }
-  }
-
-  // Summit loops. The perimeter is the connective tissue; these are the reason
-  // to leave it — up over a high point and back down to the perimeter somewhere
-  // else, so the detour laps rather than dead-ends.
-  const gravelNodes = world.nodes.filter((n) => n.kind === 'gravel');
-  for (let i = 0; i < 9 && gravelNodes.length; i++) {
-    const from = gravelNodes[Math.floor(grnd() * gravelNodes.length)];
-    const a = grnd() * Math.PI * 2;
-    const len = 300 + grnd() * 280;
-    const tx = clamp(from.x + Math.cos(a) * len, -EDGE_KEEP, EDGE_KEEP);
-    const tz = clamp(from.z + Math.sin(a) * len, -EDGE_KEEP, EDGE_KEEP);
-    if (Math.hypot(tx, tz) < terrain.cityRadius + 340) continue;
-    const top = highPoint(terrain, tx, tz, 230, world.half, terrain.cityRadius + 340);
-    const climb = layGravel(world, from.x, from.z, top.x, top.z, stageSeed += 613,
-      { from, nodeEvery: 100 });
-    if (!climb) continue;
-    // MEASURED: a road that simply stops is a road the height field struggles
-    // to hold. A degree-1 node has carriageway on one side and open ground on
-    // the other, so the membrane pulls it down — both of the gravel junctions
-    // that missed their designed height by over 25 cm were dead ends.
-    const back = nearestNode(world, climb.to.x, climb.to.z, (n) =>
-      n !== climb.to && n !== from && n.kind === 'gravel' &&
-      Math.hypot(n.x - climb.to.x, n.z - climb.to.z) > 260);
-    if (back) {
-      layGravel(world, climb.to.x, climb.to.z, back.x, back.z, stageSeed += 191,
-        { from: climb.to, to: back, nodeEvery: 100 });
-    }
-  }
-
-  // Ties back into the lanes. Four villages is not enough ways on: without
-  // these the perimeter is a ring road for a place nobody drives to.
-  for (let i = 0; i < 9 && gravelNodes.length; i++) {
-    const from = gravelNodes[Math.floor(grnd() * gravelNodes.length)];
-    const to = nearestNode(world, from.x, from.z, (n) =>
-      n.kind === 'rural' && Math.hypot(n.x - from.x, n.z - from.z) > 300);
-    if (!to) continue;
-    layGravel(world, from.x, from.z, to.x, to.z, stageSeed += 421, { from, to });
-  }
-
-  // --- Dirt tracks up into the hills ---------------------------------------
-  const ruralNodes = world.nodes.filter((n) => n.kind === 'rural');
-  for (let i = 0; i < 9 && ruralNodes.length; i++) {
-    const kind = i % 3 === 0 ? 'track' : 'dirt';
-    // Try a few headings before giving up, so a blocked direction costs a track
-    // rather than putting one on top of a lane.
+  const anchors = world.nodes.filter((n) => n.kind === 'rural');
+  let laidGravel = 0;
+  for (let i = 0; i < 26 && anchors.length; i++) {
+    const kind = i % 5 === 0 ? 'dirt' : 'gravel';
     let ctrl = null, from = null;
-    for (let attempt = 0; attempt < 6 && !ctrl; attempt++) {
-      from = ruralNodes[Math.floor(rnd() * ruralNodes.length)];
+    for (let attempt = 0; attempt < 8 && !ctrl; attempt++) {
+      from = anchors[Math.floor(rnd() * anchors.length)];
       const a = rnd() * Math.PI * 2;
-      const len = 320 + rnd() * 620;
-      const tx = clamp(from.x + Math.cos(a) * len, -world.half + 90, world.half - 90);
-      const tz = clamp(from.z + Math.sin(a) * len, -world.half + 90, world.half - 90);
-      if (Math.hypot(tx, tz) < terrain.cityRadius + 260) continue;
-      const c = wander(from.x, from.z, tx, tz, 190, seed + 3300 + i * 71 + attempt * 17, 7);
+      const len = 480 + rnd() * 900;
+      const tx = clamp(from.x + Math.cos(a) * len, -world.half + 110, world.half - 110);
+      const tz = clamp(from.z + Math.sin(a) * len, -world.half + 110, world.half - 110);
+      if (Math.hypot(tx - from.x, tz - from.z) < 320) continue;
+      const c = wander(from.x, from.z, tx, tz, 230, seed + 3300 + i * 71 + attempt * 17, 8);
       if (pathOverlapFraction(world, c, ROAD[kind].width) < 0.12) ctrl = c;
     }
     if (!ctrl) continue;
-    const laid = layRoad(world, ctrl, kind, { step: 8, nodeEvery: 110, from });
-    // Half loop back to the network instead of dead-ending.
-    if (rnd() < 0.55 && laid.to) {
+    const laid = layRoad(world, ctrl, kind, { step: 8, nodeEvery: 130, from });
+    laidGravel++;
+    // Two thirds loop back, so a stage is a route rather than a dead end.
+    if (rnd() < 0.66 && laid.to) {
       const back = nearestNode(world, laid.to.x, laid.to.z, (n) =>
-        (n.kind === 'rural' || n.kind === 'city') && Math.hypot(n.x - laid.to.x, n.z - laid.to.z) > 220);
+        n.kind === 'rural' && Math.hypot(n.x - laid.to.x, n.z - laid.to.z) > 300);
       if (back) {
-        const c2 = wander(laid.to.x, laid.to.z, back.x, back.z, 150, seed + 4400 + i * 53, 6);
-        if (pathOverlapFraction(world, c2, ROAD.dirt.width) < 0.15) {
-          layRoad(world, c2, 'dirt', { step: 8, nodeEvery: 110, from: laid.to, to: back });
+        const c2 = wander(laid.to.x, laid.to.z, back.x, back.z, 200, seed + 4400 + i * 53, 7);
+        if (pathOverlapFraction(world, c2, ROAD.gravel.width) < 0.15) {
+          layRoad(world, c2, 'gravel', { step: 8, nodeEvery: 130, from: laid.to, to: back });
         }
       }
     }
   }
+  world.gravelStages = laidGravel;
 
   ensurePolylines(world);
   world.crossingsResolved = resolveCrossings(world);

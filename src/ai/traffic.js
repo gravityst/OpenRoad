@@ -41,7 +41,13 @@ const TAU = Math.PI * 2;
 // what keeps the ring highway busy and the dirt tracks empty without having to
 // model destinations.
 const RANK = {
-  highway: 3.4, avenue: 2.2, link: 2.0, street: 1.0, rural: 1.5, dirt: 0.35, track: 0.2,
+  highway: 3.4, avenue: 2.2, link: 2.0, street: 1.0, rural: 1.5,
+  gravel: 0.45, dirt: 0.35, track: 0.2,
+  // Zero, not missing. Race circuits are closed roads: nothing spawns on one
+  // and nothing turns onto one, because a rank of zero makes both the spawn
+  // roll and the turn weight zero. Leaving them out instead fell through to
+  // the `?? 1` default and put commuter traffic on the racing line.
+  circuit: 0, rallyx: 0,
 };
 
 // Which classes turn up on the road, and how often. A city where every third

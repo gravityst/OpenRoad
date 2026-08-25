@@ -95,6 +95,27 @@ const check = (name, ok, detail) => {
     `worst single-impact power change ${(biggestJump * 100).toFixed(2)}% ${jumpAt}`);
 }
 
+// ---- 3b. An undamaged car can never overheat ------------------------------
+// The governing rule of the thermal model, and the one it broke: cooling used
+// to scale with airflow, so a healthy car held on the handbrake at full
+// throttle caught fire in 4.2 seconds with power collapsing to 2% on the way.
+// That is what "the engine is burning on startup" and "acceleration is so
+// slow" both were.
+{
+  let worstTemp = 0, lit = 0, cases = 0;
+  for (const speed of [0, 0.5, 3, 12, 30, 60]) {
+    for (const load of [0, 0.3, 0.7, 1.0, 1.4]) {
+      const d = createDamage({});
+      cases++;
+      for (let i = 0; i < 60 * 600; i++) d.step(1 / 60, load, speed);   // ten minutes
+      worstTemp = Math.max(worstTemp, d.state.temp);
+      if (d.state.onFire > 0) lit++;
+    }
+  }
+  check('an undamaged car never overheats', lit === 0 && worstTemp < 0.86,
+    `${cases} load/speed combinations for 10 minutes each: hottest ${worstTemp.toFixed(2)}, ${lit} caught fire`);
+}
+
 // ---- 4. Fire behaves ------------------------------------------------------
 {
   // A holed radiator driven hard must eventually cook and light; airflow must

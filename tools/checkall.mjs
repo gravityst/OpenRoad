@@ -15,6 +15,7 @@ const CHECKS = [
   ['catalog', 'every car matches the figures the garage quotes'],
   ['collision', 'buildings are solid and can never add energy'],
   ['damage', 'damage only ever takes capability away'],
+  ['carcrash', 'cars are solid against each other and both take the damage'],
   ['debris', 'parts that fall off tumble, land, and never gain energy'],
   ['model', 'imported cars match the rig, and a missing one is harmless'],
   ['traffic', 'the other cars behave like traffic'],

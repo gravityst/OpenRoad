@@ -273,12 +273,23 @@ export function createDamage(spec = {}) {
     if (d.radiator < 1) {
       d.coolant = clamp(d.coolant - (1 - d.radiator) * 0.055 * dt, 0, 1);
     }
-    // Cooling scales with airflow and with how much coolant is left; heating
-    // with engine load. A holed radiator at a standstill is the worst case,
-    // which is exactly right.
-    const cooling = (0.12 + speed * 0.010) * (0.18 + 0.82 * d.coolant);
-    const heating = 0.14 + load * 0.42 * (2 - d.engine);
-    d.temp = clamp(d.temp + (heating - cooling * d.temp * 2.6) * dt * 0.5, 0, 1.4);
+    // THERMAL. The governing rule: an undamaged car can never overheat.
+    //
+    // Cooling used to scale with airflow, so at a standstill it was tiny while
+    // heating was full — and a perfectly healthy car held on the handbrake at
+    // full throttle caught fire in 4.2 seconds, with power collapsing to 2%
+    // first. That is what "the engine is burning on startup" and "acceleration
+    // is so slow" both were: one bug wearing two hats.
+    //
+    // So the fan alone out-cools the maximum the engine can put in. Ram air on
+    // top of it is a bonus, not the mechanism. Overheating is now strictly a
+    // CONSEQUENCE of losing coolant, which is the only thing that can take the
+    // cooling capacity below what the engine produces.
+    const heatIn = 0.10 + load * 0.30;                 // max 0.40 at full load
+    const fan = 0.62;                                  // alone, already beats it
+    const ram = Math.min(speed, 60) * 0.016;
+    const heatOut = (fan + ram) * (0.10 + 0.90 * d.coolant) * (0.35 + 0.65 * d.temp);
+    d.temp = clamp(d.temp + (heatIn - heatOut) * dt * 0.6, 0.18, 1.4);
 
     if (d.temp > 0.86 && d.onFire <= 0) {
       // Cooking, not yet alight: this is the smoke stage.

@@ -268,3 +268,187 @@ export function createCollision(world, opts = {}) {
 
   return { resolve: resolveAll, resolveOnce: resolve, insideBuilding, count: boxes.length };
 }
+
+// ---------------------------------------------------------------------------
+// Car against car
+// ---------------------------------------------------------------------------
+
+/**
+ * Traffic you can actually hit.
+ *
+ * Buildings were solid from the start but other cars were not, so you drove
+ * straight through them — which undoes the world more thoroughly than any
+ * missing texture, because the one thing sharing a road with you is the one
+ * thing that turned out not to be there.
+ *
+ * Traffic is kinematic, so this is not a symmetric rigid-body solve. The player
+ * is the dynamic body; a traffic car is given a velocity it then carries under
+ * its own steam, which is enough for it to be shoved aside, spun, and knocked
+ * off its line. What it is NOT allowed to do is give energy back: the same rule
+ * that governs the walls governs this, and tools/carcrashcheck.mjs asserts it.
+ */
+export function createCarCollision(opts = {}) {
+  const result = {
+    hit: false, severity: 0, other: null,
+    nx: 0, nz: 0, x: 0, z: 0, closing: 0, headOn: false,
+  };
+  // Scratch. resolve() runs every physics step against every nearby car.
+  const axes = new Float64Array(8);
+  const half = new Float64Array(4);
+
+  /**
+   * Separating-axis overlap of two oriented boxes, returning the minimum
+   * translation axis and depth, or 0 if they are apart.
+   */
+  function overlap(ax, az, ac, as, ahw, ahl, bx, bz, bc, bs, bhw, bhl, out) {
+    // Four candidate axes: each box's own right and forward.
+    axes[0] = ac;  axes[1] = -as;      // A right
+    axes[2] = -as; axes[3] = -ac;      // A forward
+    axes[4] = bc;  axes[5] = -bs;      // B right
+    axes[6] = -bs; axes[7] = -bc;      // B forward
+    half[0] = ahw; half[1] = ahl; half[2] = bhw; half[3] = bhl;
+
+    const dx = bx - ax, dz = bz - az;
+    let best = Infinity, bnx = 0, bnz = 0;
+    for (let i = 0; i < 8; i += 2) {
+      const nx = axes[i], nz = axes[i + 1];
+      const dist = Math.abs(dx * nx + dz * nz);
+      const ra = ahw * Math.abs(ac * nx - as * nz) + ahl * Math.abs(-as * nx - ac * nz);
+      const rb = bhw * Math.abs(bc * nx - bs * nz) + bhl * Math.abs(-bs * nx - bc * nz);
+      const gap = ra + rb - dist;
+      if (gap <= 0) return 0;                       // separated on this axis
+      if (gap < best) {
+        best = gap;
+        // Point the normal from A toward B, so the sign is unambiguous later.
+        const s = (dx * nx + dz * nz) < 0 ? -1 : 1;
+        bnx = nx * s; bnz = nz * s;
+      }
+    }
+    out.nx = bnx; out.nz = bnz;
+    return best;
+  }
+
+  const mtv = { nx: 0, nz: 0 };
+
+  /**
+   * @param car   the player's vehicle
+   * @param cars  the traffic pool; inactive slots are skipped
+   * @param dt    seconds
+   * @param onHit optional (trafficCar, severity, lx, lz, closing) for damage
+   */
+  function resolve(car, cars, dt, onHit) {
+    result.hit = false;
+    result.severity = 0;
+    result.other = null;
+    if (!cars || !cars.length) return result;
+
+    const ahw = car.spec.track * 0.5 + 0.16;
+    const ahl = car.spec.wheelbase * 0.5 + 0.52;
+    const ac = Math.cos(car.yaw), as = Math.sin(car.yaw);
+    const reach = ahl + 3.6;
+
+    for (let i = 0; i < cars.length; i++) {
+      const o = cars[i];
+      if (!o || o.active === false) continue;
+      const dx = o.x - car.x, dz = o.z - car.z;
+      const d2 = dx * dx + dz * dz;
+      if (d2 > reach * reach * 2.6) continue;                 // broad phase
+
+      const bhw = (o.spec ? o.spec.track : 1.6) * 0.5 + 0.16;
+      const bhl = (o.halfLen != null ? o.halfLen : (o.spec ? o.spec.wheelbase * 0.5 + 0.5 : 2.2));
+      const bc = Math.cos(o.yaw), bs = Math.sin(o.yaw);
+
+      const depth = overlap(car.x, car.z, ac, as, ahw, ahl, o.x, o.z, bc, bs, bhw, bhl, mtv);
+      if (depth <= 0) continue;
+
+      // --- separate. The player yields a third, traffic two thirds: shoving a
+      //     hatchback aside should move the hatchback, not the player. ---
+      car.x -= mtv.nx * depth * 0.34;
+      car.z -= mtv.nz * depth * 0.34;
+      o.x += mtv.nx * depth * 0.66;
+      o.z += mtv.nz * depth * 0.66;
+
+      // --- velocity. Only the closing component is touched, and it can only
+      //     be reduced. Traffic carries no velocity vector of its own, so it
+      //     is given one along its heading plus the shove it just took. ---
+      // The traffic car's velocity is its own heading speed PLUS whatever shove
+      // it is still carrying. Leaving the shove out was the bug: it made the
+      // closing speed look undiminished on the next frame, so sustained contact
+      // re-applied a full impulse every step and the pair gained energy without
+      // limit — 37 m/s of it in the worst case. Including it is what lets the
+      // contact actually resolve.
+      const ovx = -Math.sin(o.yaw) * (o.speed || 0) + (o.kvx || 0);
+      const ovz = -Math.cos(o.yaw) * (o.speed || 0) + (o.kvz || 0);
+      const rvx = car.vx - ovx, rvz = car.vz - ovz;
+      const closing = rvx * mtv.nx + rvz * mtv.nz;
+      if (closing > 0) {
+        const mA = car.spec.mass || 1400;
+        const mB = (o.spec && o.spec.mass) || 1400;
+        const share = mB / (mA + mB);
+        const RESTITUTION = 0.16;
+        const j = closing * (1 + RESTITUTION);
+        car.vx -= mtv.nx * j * share;
+        car.vz -= mtv.nz * j * share;
+        // Push the traffic car along its own frame: it steers itself, so what
+        // it needs is a shove and a spin, not a full velocity it cannot use.
+        // Apply the impulse to the traffic car's TOTAL velocity, then put that
+        // total back into the two parts it is stored as.
+        //
+        // A traffic car's motion lives in two places — the speed it is driving
+        // at along its heading, and the shove it is carrying. Adding the
+        // impulse to the shove alone leaves the heading component untouched, so
+        // the car ends up with more total velocity than the impulse granted and
+        // the pair gains energy. Decomposing puts exactly the post-impulse
+        // velocity back, and nothing is invented on the way through.
+        const push = j * (1 - share);
+        const nvx = ovx + mtv.nx * push;
+        const nvz = ovz + mtv.nz * push;
+
+        // Spin the struck car FIRST, then decompose against its new heading.
+        //
+        // Order matters here and it is not obvious. Its velocity is stored as
+        // heading x speed plus a shove, so turning the heading afterwards
+        // rotates the speed component without touching the shove — which
+        // changes the magnitude of the total and quietly adds energy. Rotating
+        // before the split means the decomposition describes the velocity the
+        // impulse actually produced.
+        const lxHit = (o.x - car.x) * ac - (o.z - car.z) * as;
+        const spin = Math.max(-1.8, Math.min(1.8, (lxHit > 0 ? -1 : 1) * Math.min(1, closing / 16) * 1.2));
+        o.yaw += spin * 0.06;
+
+        const hx = -Math.sin(o.yaw), hz = -Math.cos(o.yaw);
+        const along = nvx * hx + nvz * hz;
+        o.speed = Math.max(0, along);                 // it cannot be driven backwards
+        o.kvx = nvx - hx * o.speed;
+        o.kvz = nvz - hz * o.speed;
+
+        const sev = Math.min(1, closing / 16);
+        result.severity = Math.max(result.severity, sev);
+        // Where it landed on the PLAYER, in the player's own frame.
+        const px = o.x - car.x, pz = o.z - car.z;
+        const lx = px * ac - pz * as;
+        const lz = -px * as - pz * ac;
+        if (car.damage && sev > 0) car.damage.impact(sev, lx, lz, ahw, ahl, closing);
+        if (onHit) {
+          // And on the OTHER car, in its frame — a car you rear-end takes it
+          // in the back, not wherever your bumper happens to be.
+          const qx = car.x - o.x, qz = car.z - o.z;
+          onHit(o, sev, qx * bc - qz * bs, -qx * bs - qz * bc, closing);
+        }
+        // A glancing blow spins the player too; bounded, because a car that
+        // helicopters off a wing mirror is worse than one that ignores you.
+        car.yawRate = Math.max(-3.2, Math.min(3.2, car.yawRate + spin * 0.5));
+
+        result.hit = true;
+        result.other = o;
+        result.nx = mtv.nx; result.nz = mtv.nz;
+        result.x = (car.x + o.x) * 0.5; result.z = (car.z + o.z) * 0.5;
+        result.closing = closing;
+        result.headOn = (ac * bc + as * bs) < -0.45;
+      }
+    }
+    return result;
+  }
+
+  return { resolve };
+}

@@ -14,7 +14,8 @@ import * as THREE from 'three';
 import { buildWorld } from './world/layout.js';
 import { createGround } from './world/ground.js';
 import { createVehicle } from './physics/vehicle.js';
-import { createCollision } from './physics/collision.js';
+import { createCollision, createCarCollision } from './physics/collision.js';
+import { createDamage } from './physics/damage.js';
 import { createControls } from './input/controls.js';
 import { CARS, CAR_BY_ID, STARTER, specFor } from './vehicles/catalog.js';
 
@@ -129,7 +130,8 @@ async function boot() {
   await stage(0.30, 'zoning the city', () => world.buildLots(ground));
   await stage(0.38, 'planting', () => world.buildProps(ground));
 
-  const collision = await stage(0.44, 'making the city solid', () => createCollision(world, { ground }));
+  const collision = await stage(0.44, 'making the world solid', () => createCollision(world, { ground }));
+  const carHits = createCarCollision();
 
   // Settings are needed before the layers, because traffic density and draw
   // distance are constructor arguments, not things you can set afterwards.
@@ -573,6 +575,22 @@ async function boot() {
         }
         if (hit.recovered) hud.toast('Recovered to the road', 2.5);
         if (hit.severity > 0.05 && drift.onCollision) drift.onCollision(hit.severity);
+        if (hit.severity > 0.55) explode(hit.x, car.y + 0.5, hit.z, hit.severity);
+      }
+
+      // Traffic is solid too. Without this you drive straight through the one
+      // thing sharing the road with you, which undoes the world faster than any
+      // missing texture.
+      const bump = carHits.resolve(car, traffic.cars, PHYS_DT, onTrafficHit);
+      if (bump.hit) {
+        if (drift.onCollision) drift.onCollision(bump.severity);
+        if (bump.severity > 0.05) {
+          particles.emitSparks(bump.x, car.y + 0.45, bump.z, bump.severity * 16, bump.nx, bump.nz);
+        }
+        // A head-on at speed, or anything hard enough, goes up.
+        if (bump.closing > 21 || (bump.headOn && bump.closing > 15)) {
+          explode(bump.x, car.y + 0.6, bump.z, Math.min(1, bump.closing / 30));
+        }
       }
       accumulator -= PHYS_DT;
       steps++;
@@ -636,6 +654,21 @@ async function boot() {
     if (driving) emitTyreEffects(dt);
 
     // ---- traffic ----
+    // Consume the shove a collision gave each traffic car. traffic.js steers
+    // itself and knows nothing about being hit, so the knock is applied here
+    // and decays — which is what lets a car be shoved bodily out of its lane
+    // and then find its way back.
+    const tl = traffic.cars || [];
+    for (let i = 0; i < tl.length; i++) {
+      const o = tl[i];
+      if (!o || !o.kvx) continue;
+      o.x += o.kvx * dt;
+      o.z += o.kvz * dt;
+      const decay = Math.exp(-2.6 * dt);
+      o.kvx *= decay; o.kvz *= decay;
+      if (Math.abs(o.kvx) + Math.abs(o.kvz) < 0.02) { o.kvx = 0; o.kvz = 0; }
+    }
+
     traffic.update(dt, car.x, car.z, car.speed, car.yaw);
     syncTrafficModels(night, dt);
     debris.update(dt, camera.position);
@@ -732,13 +765,23 @@ async function boot() {
         //
         // Rear wheels throw far more than fronts, which is most of what makes
         // a dust plume read as a car rather than as fog.
-        const rear = i >= 2 ? 1 : 0.35;
+        // Dust is the best thing about a gravel road, so it wants to be BIG —
+        // it just must not sit on top of the car. The first version emitted
+        // from four wheels every frame and scaled with speed and slide at once,
+        // which put the player inside an opaque cloud; the correction went too
+        // far the other way and there was barely a plume at all.
+        //
+        // What makes it read is a rooster tail from the REAR wheels that grows
+        // hard when the car is sideways, thrown often enough to be continuous
+        // but not so often it fills the frame.
+        const rear = i >= 2 ? 1 : 0.30;
         skidCooldown[i] -= dt;
         if (skidCooldown[i] <= 0) {
+          const slide = working ? 3.4 : 1;
           particles.emitDust(wx, car.y - car.spec.rideHeight + 0.05, wz,
-            surf.dust * rear * (0.20 + Math.min(car.speed, 34) * 0.012) * (working ? 1.9 : 1),
+            surf.dust * rear * (0.42 + Math.min(car.speed, 38) * 0.030) * slide,
             surf.colour);
-          skidCooldown[i] = 0.045;
+          skidCooldown[i] = 0.022;
         }
       } else if (working && car.speed > 4) {
         particles.emitSmoke(wx, car.y - car.spec.rideHeight + 0.05, wz, car.slipping * 2.4);
@@ -771,6 +814,53 @@ async function boot() {
     if (d.engine < 0.6) bits.push(`engine ${Math.round(d.engine * 100)}%`);
     const head = `${Math.round(car.damage.integrity * 100)}% intact`;
     return bits.length ? `${head} — ${bits.join(', ')}` : `${head} — no damage`;
+  }
+
+  /**
+   * Damage on the OTHER car.
+   *
+   * Traffic gets its own damage model, built on first contact rather than at
+   * spawn: most traffic is never touched, and sixty unused models is sixty
+   * models nobody looks at.
+   */
+  const npcEvents = [];
+  function onTrafficHit(other, severity, lx, lz, closing) {
+    if (!other.damage) other.damage = createDamage(other.spec || {});
+    const hw = (other.spec ? other.spec.track : 1.6) * 0.5;
+    const hl = other.halfLen != null ? other.halfLen : 2.2;
+    other.damage.impact(severity, lx, lz, hw, hl, closing);
+    // Drained and discarded: spawnPart() builds its geometry from the source
+    // car's own mesh, and traffic models are pooled per slot rather than owned
+    // here. Parts coming off a traffic car are worth doing, but not by passing
+    // a signature that does not exist.
+    other.damage.drainEvents(npcEvents);
+    // A badly hurt traffic car stops being traffic and starts being an
+    // obstacle: it slows, limps, and if it is wrecked it stays where it is.
+    const integ = other.damage.integrity;
+    if (integ < 0.35) { other.wrecked = true; other.speed = Math.min(other.speed, 2); }
+    else if (integ < 0.7) other.speed = Math.min(other.speed, 8);
+    if (other.damage.state.onFire > 0 || integ < 0.22) {
+      explode(other.x, other.y + 0.6, other.z, 0.8);
+      other.damage.state.onFire = Math.max(other.damage.state.onFire, 0.5);
+    }
+  }
+
+  /**
+   * An explosion. Composed from the effects that already exist rather than a
+   * new system: a flash of sparks thrown outward, a swelling ball of smoke,
+   * and debris. Deliberately brief — a fireball that lingers reads as a bug.
+   */
+  function explode(x, y, z, power) {
+    const p = Math.max(0.2, Math.min(1, power));
+    particles.emitSparks(x, y, z, 90 * p, 0, 0);
+    particles.emitSmoke(x, y + 0.3, z, 26 * p);
+    particles.emitSmoke(x, y + 1.1, z, 18 * p);
+    for (let i = 0; i < 6 * p; i++) {
+      const a = (i / (6 * p)) * Math.PI * 2;
+      particles.emitSparks(x + Math.cos(a) * 1.2, y + 0.4, z + Math.sin(a) * 1.2,
+        18 * p, Math.cos(a), Math.sin(a));
+    }
+    hud.toast('Impact', 1.2);
   }
 
   function districtAt(x, z) {

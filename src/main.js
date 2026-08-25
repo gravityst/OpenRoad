@@ -148,7 +148,14 @@ async function boot() {
       layer('./ai/traffic.js', 'traffic'),
       layer('./game/hud.js', 'HUD'),
       layer('./game/menus.js', 'menus'),
-      layer('./game/audio.js', 'audio'),
+      // SOUND IS OFF. Not muted — not loaded.
+      //
+      // The engine synthesiser runs oscillators straight into the destination
+      // and start() fires on the first user gesture, so it came up at whatever
+      // the system volume happened to be and stayed there. Muting by default
+      // leaves that one toggle away, so the module is disconnected entirely.
+      // Re-enable by restoring this line; src/game/audio.js is untouched.
+      Promise.resolve(null),
       layer('./input/touch.js', 'touch controls'),
       layer('./render/carDamage.js', 'car damage'),
       layer('./physics/debris.js', 'debris'),
@@ -319,7 +326,7 @@ async function boot() {
 
   const audio = (mAudio && safe(() => mAudio.createAudio())) ||
     stub(['start', 'update', 'playCollision', 'playSkid', 'playHorn', 'playIndicator',
-      'setMuted', 'setVolume', 'setEngineProfile', 'dispose']);
+      'setMuted', 'setVolume', 'setEngineProfile', 'applyDamageEvents', 'dispose']);
 
   const touch = (mTouch && safe(() => mTouch.createTouchControls(document.getElementById('touch')))) ||
     stub(['read', 'setVisible', 'setLayout', 'dispose'], { isTouch: false });

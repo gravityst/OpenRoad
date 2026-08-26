@@ -62,9 +62,9 @@ export const DEFAULT_SPEC = {
   handbrakeTorque: 2600,    // N·m, rear only
 
   maxSteer: 0.62,           // rad at the road wheel, full lock at a standstill
-  steerMargin: 1.35,        // how far past the tyre's peak the driver may steer
+  steerMargin: 1.15,        // how far past the tyre's peak the driver may steer
   escSlipGain: 6.0,         // how hard the stability aid fights body slip
-  steerRate: 5.2,           // rad/s of steering-wheel movement
+  steerRate: 3.4,           // rad/s of steering-wheel movement
   dragArea: 0.68,           // Cd * A, m^2
   downforce: 0.22,          // N per (m/s)^2, mild road-car lift compensation
 
@@ -129,6 +129,11 @@ export function createVehicle(opts = {}) {
     // Defaults match what main.js applies for a new player, so the headless
     // harnesses measure the car people actually drive.
     aids: { abs: 0.95, tc: 0.55, stability: 0.62, autoGear: true },
+
+    // Live steering dial, 0.5..2.5, 1 = stock. Scales how fast the wheel moves
+    // and how far past the tyre's peak the driver may steer, which between them
+    // are what "sensitivity" actually means from the seat.
+    feel: { steer: 1 },
 
     // readouts
     speed: 0,                // m/s along the ground
@@ -264,9 +269,11 @@ export function createVehicle(opts = {}) {
     // every case, ESC included, went to 90 degrees of slip and stopped. This
     // margin IS the steering feel, and it is per-car: a rally car wants more of
     // it than a limousine.
-    const maxSteerNow = clamp(PEAK_SLIP * (spec.steerMargin ?? 1.35) + ackermann, 0.12, spec.maxSteer);
+    const feel = clamp(car.feel?.steer ?? 1, 0.5, 2.5);
+    const margin = (spec.steerMargin ?? 1.15) * feel;
+    const maxSteerNow = clamp(PEAK_SLIP * margin + ackermann, 0.09, spec.maxSteer);
     const wanted = clamp(car.input.steer, -1, 1) * maxSteerNow;
-    const rate = spec.steerRate * (car.input.steer === 0 ? 1.8 : 1) * dt;
+    const rate = spec.steerRate * feel * (car.input.steer === 0 ? 1.8 : 1) * dt;
     car.steerAngle += clamp(wanted - car.steerAngle, -rate, rate);
     car.steerAngle = clamp(car.steerAngle, -maxSteerNow, maxSteerNow);
     // A blown tyre or bent steering pulls the ROAD WHEELS, not the input. The
@@ -425,16 +432,17 @@ export function createVehicle(opts = {}) {
     // makes it pull and understeer instead of simply going slower.
     const dmgF = dmg ? (dmg.gripScale[0] + dmg.gripScale[1]) * 0.5 : 1;
     const dmgR = dmg ? (dmg.gripScale[2] + dmg.gripScale[3]) * 0.5 : 1;
-    // Trail-braking: brake and steer together, which loads the front, unloads
-    // the rear and rotates the car. Computed here because the stability aid
-    // below needs to know the driver is asking for it.
-    const steerAmount = Math.min(1, Math.abs(car.input.steer || 0));
-    const trailBrake = brakePedal * steerAmount * smoothstep(6, 16, planarSpeed);
-
     const muF = surfGrip * spec.gripFront * dmgF * loadSens(frontLoad, weight * spec.cgBias);
     let muR = surfGrip * spec.gripRear * dmgR * loadSens(rearLoad, weight * (1 - spec.cgBias));
     // Handbrake breaks the rear away on purpose.
+    // Brake and steer together loads the front, unloads the rear and rotates
+    // the car. Computed before the aid below, which has to stand down while the
+    // driver is deliberately asking for it.
+    const steerAmount = Math.min(1, Math.abs(car.input.steer || 0));
+    const trailBrake = brakePedal * steerAmount * smoothstep(6, 16, planarSpeed);
+
     if (handbrake > 0) muR *= lerp(1, 0.42, handbrake);
+    if (trailBrake > 0) muR *= lerp(1, 0.66, trailBrake);
 
     // Brake AND steer together rotates the car.
     //
@@ -445,7 +453,6 @@ export function createVehicle(opts = {}) {
     // round. It scales with BOTH inputs, so it never fires when you are simply
     // braking in a straight line, and it fades out below walking pace where it
     // would only make the car feel broken at a junction.
-    if (trailBrake > 0) muR *= lerp(1, 0.66, trailBrake);
 
     let Fy_front = tyreCurve(-frontSlip, 9.2, 1.45, muF * frontLoad);
     let Fy_rear = tyreCurve(-rearSlip, 9.6, 1.42, muR * rearLoad);
@@ -496,10 +503,6 @@ export function createVehicle(opts = {}) {
       if (overSlip > 0) {
         stabilityMoment -= Math.sign(slipAng) * overSlip * Izz * (spec.escSlipGain ?? 7.5) * car.aids.stability;
       }
-      // Trail-braking is a deliberate request for the back end, so the aid
-      // stands down while the driver is asking for it. Without this the ESC
-      // fights the one manoeuvre it is most obvious the player wants, and the
-      // car simply refuses to rotate however it is driven.
       stabilityMoment *= 1 - 0.85 * clamp(trailBrake * 1.6, 0, 1);
     }
 
@@ -533,14 +536,11 @@ export function createVehicle(opts = {}) {
     // made full right lock steer the car left.
     const yawMoment = -(Fy_front * hb - Fy_rear * hb) + stabilityMoment;
     car.yawRate += (yawMoment / Izz) * dt;
-    // Yaw damping rises with how hard the tyres are scrubbing.
-    //
-    // A tyre dragged sideways does not just make a lateral force, it soaks up
-    // rotational energy — which is most of why a real car that steps out
-    // settles instead of carrying on round. With a flat 0.35 there was nothing
-    // arresting a slide once it started, and with the stability aid switched
-    // off the car went to 180 degrees from ordinary steering input and stayed
-    // there. It is still edgy without the aid; it is no longer a coin flip.
+    // Yaw damping rises with how hard the tyres are scrubbing. A tyre dragged
+    // sideways soaks up rotational energy, which is most of why a real car that
+    // steps out settles instead of carrying on round. With a flat 0.35 nothing
+    // arrests a slide: brake and steer together at 100 km/h and the car goes to
+    // 179 degrees and stays there. This is a stability fix, not a feel knob.
     const scrub = 1 + Math.min(3.4, Math.max(Math.abs(frontSlip), Math.abs(rearSlip)) * 4.2);
     car.yawRate *= Math.exp(-0.35 * scrub * dt);
     car.yawRate = clamp(car.yawRate, -3.2, 3.2);

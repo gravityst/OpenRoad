@@ -30,6 +30,8 @@ const KEYMAP = {
   indRight:  ['Period'],
   map:       ['KeyM'],
   inspect:   ['KeyV'],
+  steerDown: ['Minus'],
+  steerUp:   ['Equal'],
   reset:     ['KeyR'],
   pause:     ['Escape'],
 };
@@ -43,13 +45,14 @@ export function createControls(opts = {}) {
     camera: false, lookBack: 0, horn: false, lights: false,
     indLeft: false, indRight: false,
     map: false, inspect: false, reset: false, pause: false,
+    steerDown: false, steerUp: false,
     usingGamepad: false,
   };
 
   const settings = {
     sensitivity: 1.0,
-    steerSpeed: 9.5,       // rad/s of virtual wheel travel for digital input
-    steerReturn: 12.0,
+    steerSpeed: 5.6,       // rad/s of virtual wheel travel for digital input
+    steerReturn: 9.0,
     deadzone: 0.10,
     triggerDeadzone: 0.18,
   };
@@ -170,6 +173,8 @@ export function createControls(opts = {}) {
     state.camera = anyPressed(KEYMAP.camera) || pressed.has('__camera') || !!(touch && touch.camera);
     state.map = anyPressed(KEYMAP.map) || pressed.has('__map');
     state.inspect = anyPressed(KEYMAP.inspect);
+    state.steerDown = anyPressed(KEYMAP.steerDown);
+    state.steerUp = anyPressed(KEYMAP.steerUp);
     state.pause = anyPressed(KEYMAP.pause);
     state.reset = anyPressed(KEYMAP.reset);
     state.lights = anyPressed(KEYMAP.lights);
@@ -194,6 +199,7 @@ export function createControls(opts = {}) {
     state.throttle = state.brake = state.steer = state.handbrake = 0;
     state.shiftUp = state.shiftDown = state.camera = false;
     state.map = state.inspect = state.pause = state.reset = state.lights = false;
+    state.steerDown = state.steerUp = false;
     state.indLeft = state.indRight = state.horn = false;
     state.lookBack = 0;
   }

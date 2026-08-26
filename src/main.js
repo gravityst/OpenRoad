@@ -523,6 +523,16 @@ async function boot() {
       else if (mode === 'paused') startDriving();
     }
     if (input.map && mode === 'driving') { mode = 'paused'; menus.show('map'); controls.reset(); }
+    // Steering feel, dialled from the seat. Guessing at this from a harness has
+    // cost two rounds already; a key that changes it mid-corner settles it in
+    // one. Persisted, so it survives a reload.
+    if (input.steerDown || input.steerUp) {
+      const step = input.steerUp ? 0.1 : -0.1;
+      car.feel.steer = Math.max(0.5, Math.min(2.5, +(car.feel.steer + step).toFixed(2)));
+      settings.steerFeel = car.feel.steer;
+      saveSettings(settings);
+      hud.toast(`Steering ${car.feel.steer.toFixed(1)}x  ( - / = to adjust )`, 1.6);
+    }
     if (input.inspect) {
       if (mode === 'driving') {
         mode = 'inspect';
@@ -618,6 +628,24 @@ async function boot() {
     if (car.damage) {
       car.damage.drainEvents(damageEvents);
       if (damageEvents.length) {
+        // Tell the player what just broke and what to do about it.
+        //
+        // Everything needed to deal with damage already existed — an
+        // inspection camera on V, six repair shops, and the fact that speed
+        // blows a small fire out — and none of it was discoverable. Asked
+        // outright how to inspect the damage, the honest answer was that
+        // nothing in the game says so. It says so now, once each, at the moment
+        // it becomes relevant.
+        for (let i = 0; i < damageEvents.length; i++) {
+          const t = damageEvents[i].type;
+          if (t === 'fire-start') {
+            tutorial('fire', 'ENGINE FIRE — get your speed up to blow it out, or reach a garage', 6);
+          } else if (t === 'coolant-leak') {
+            tutorial('coolant', 'Coolant leaking. It will overheat and catch — ease off, or find a garage', 5);
+          } else if (t === 'tyre-burst') {
+            tutorial('tyre', 'Tyre blown. It will pull to that side until you get it repaired', 4);
+          }
+        }
         if (carDamage) carDamage.applyEvents(damageEvents);
         damageFx.applyEvents(damageEvents, car);
         if (audio.applyDamageEvents) audio.applyDamageEvents(damageEvents);
@@ -631,7 +659,19 @@ async function boot() {
         }
       }
       if (carDamage) carDamage.update(car.damage.state, dt);
+
+      // The first time the car is properly hurt, say how to look at it and
+      // where to get it fixed.
+      if (car.damage.integrity < 0.92) {
+        tutorial('inspect', 'Press V to walk around the car and see the damage', 5);
+        const ng = nearestGarage(car.x, car.z);
+        if (ng) {
+          tutorial('garage',
+            `Repairs: ${ng.g.name}, ${(ng.dist / 1000).toFixed(1)} km away — it is marked on the map (M)`, 6);
+        }
+      }
     }
+    pumpHints(dt);
 
     driftState = drift.update(dt, car) || drift.state;
 
@@ -711,6 +751,10 @@ async function boot() {
       hudState.damage = car.damage ? car.damage.state : null;
       hudState.damageEffects = car.damage ? car.damage.effects : null;
       hudState.drift = driftState;
+      const ng2 = car.damage && car.damage.integrity < 0.97 ? nearestGarage(car.x, car.z) : null;
+      hudState.garageName = ng2 ? ng2.g.name : '';
+      hudState.garageDist = ng2 ? ng2.dist : 0;
+      hudState.repairing = repairIn ? Math.min(1, repairT / 4) : 0;
       const road = ground.roadAt(car.x, car.z);
       hudState.speedLimit = road.onRoad ? road.speedLimit : 0;
       hud.update(hudState);
@@ -883,6 +927,42 @@ async function boot() {
     hud.toast('Impact', 1.2);
   }
 
+  /**
+   * One-shot hints, queued so two never land on top of each other.
+   *
+   * A toast that replaces the previous toast half a second later is not a
+   * tutorial, it is a flicker — and these fire in bursts, because a single
+   * crash emits a coolant leak, a burst tyre and a detached bumper in the same
+   * frame.
+   */
+  const hintsShown = new Set();
+  const hintQueue = [];
+  let hintTimer = 0;
+  function tutorial(key, text, seconds) {
+    if (hintsShown.has(key)) return;
+    hintsShown.add(key);
+    hintQueue.push({ text, seconds });
+  }
+  function pumpHints(dt) {
+    hintTimer -= dt;
+    if (hintTimer > 0 || !hintQueue.length) return;
+    const h = hintQueue.shift();
+    hud.toast(h.text, h.seconds);
+    hintTimer = Math.min(h.seconds, 4.5);
+  }
+
+  /** Nearest repair shop, for the damage prompt and the HUD. */
+  function nearestGarage(x, z) {
+    let best = null, bd = Infinity;
+    const list = world.garages || [];
+    for (let i = 0; i < list.length; i++) {
+      const g2 = list[i];
+      const d = Math.hypot(g2.x - x, g2.z - z);
+      if (d < bd) { bd = d; best = g2; }
+    }
+    return best ? { g: best, dist: bd } : null;
+  }
+
   function districtAt(x, z) {
     let best = '', bd = Infinity;
     for (const d of world.districts) {
@@ -1034,6 +1114,11 @@ async function boot() {
       }
       return car.damage.state;
     },
+    /** Steering feel, 0.5..2.5. Same dial the - and = keys drive. */
+    steerFeel: (v) => {
+      if (v !== undefined) { car.feel.steer = Math.max(0.5, Math.min(2.5, v)); settings.steerFeel = car.feel.steer; saveSettings(settings); }
+      return car.feel.steer;
+    },
     /** Drive one real frame. Everything a rAF tick does, at a dt you choose. */
     frame: (dt = 1 / 60) => stepFrame(dt),
     setMode: (m) => {
@@ -1098,7 +1183,7 @@ function loadSettings() {
   return {
     quality: 'medium', post: 'medium', shadows: true,
     volume: 0.8, sensitivity: 1, weather: 'clear', time: 9.5, timeScale: 0.02,
-    abs: true, tc: true, esc: true,
+    abs: true, tc: true, esc: true, steerFeel: 1,
   };
 }
 
@@ -1107,6 +1192,7 @@ function saveSettings(s) {
 }
 
 function applyAssists(car, s) {
+  car.feel.steer = Math.max(0.5, Math.min(2.5, s.steerFeel ?? 1));
   car.aids.abs = s.abs === false ? 0 : 0.95;
   car.aids.tc = s.tc === false ? 0 : 0.55;
   car.aids.stability = s.esc === false ? 0 : 0.62;

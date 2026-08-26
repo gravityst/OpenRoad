@@ -39,10 +39,7 @@ export const CARS = [
       brakeTorque: 3600, brakeBias: 0.58, handbrakeTorque: 3600,
       dragArea: 0.94, downforce: 0.20,
       gripFront: 1.10, gripRear: 1.14,
-      springRate: 25000, damping: 3700, maxSteer: 0.68, steerRate: 4.2,
-      // A rally car is meant to be steered on the throttle, so it gets more
-      // lock past the tyre's peak than anything else here.
-      steerMargin: 1.85, escSlipGain: 3.2,
+      springRate: 25000, damping: 3700, maxSteer: 0.68,
     },
   },
   {
@@ -59,7 +56,6 @@ export const CARS = [
       dragArea: 1.45, downforce: 0.02,
       gripFront: 0.98, gripRear: 1.02,
       springRate: 24000, damping: 3600, maxSteer: 0.66,
-      steerMargin: 1.25,
     },
   },
   {
@@ -76,7 +72,6 @@ export const CARS = [
       dragArea: 1.72, downforce: 0.02,
       gripFront: 1.00, gripRear: 1.04,
       springRate: 26000, damping: 3900, maxSteer: 0.62,
-      steerMargin: 1.35,
     },
   },
   {
@@ -92,8 +87,7 @@ export const CARS = [
       brakeTorque: 4400, brakeBias: 0.60, handbrakeTorque: 2800,
       dragArea: 0.72, downforce: 0.42,
       gripFront: 1.18, gripRear: 1.22,
-      springRate: 44000, damping: 5400, maxSteer: 0.60, steerRate: 4.2,
-      steerMargin: 1.55,
+      springRate: 44000, damping: 5400, maxSteer: 0.60,
     },
   },
   {
@@ -109,8 +103,7 @@ export const CARS = [
       brakeTorque: 4000, brakeBias: 0.61, handbrakeTorque: 2600,
       dragArea: 0.66, downforce: 0.34,
       gripFront: 1.14, gripRear: 1.12,
-      springRate: 40000, damping: 5000, maxSteer: 0.62, steerRate: 4.0,
-      steerMargin: 1.60,
+      springRate: 40000, damping: 5000, maxSteer: 0.62,
     },
   },
   {

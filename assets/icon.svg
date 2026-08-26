@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Open Road">
+  <title>Open Road</title>
+
+  <!--
+    The mark is the game in one frame: a road running out to a vanishing point
+    under a low sun. It has to survive being 16 px in a browser tab, so it is
+    built from four bold masses — sky, land, road, sun — and nothing finer.
+    The road bends right as it recedes rather than running dead straight, which
+    is the difference between "a road" and "somewhere worth driving".
+
+    The horizon sits at y=262, so every warm stop in the sky gradient has to
+    land above 0.512 or it is painted and then covered by the land, which is
+    how the first version ended up an all-navy sky with a sunset nobody saw.
+  -->
+
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0"     stop-color="#101733"/>
+      <stop offset="0.20"  stop-color="#2b2b58"/>
+      <stop offset="0.34"  stop-color="#6d4468"/>
+      <stop offset="0.43"  stop-color="#bd5c47"/>
+      <stop offset="0.49"  stop-color="#ec9440"/>
+      <stop offset="0.512" stop-color="#fbd07a"/>
+    </linearGradient>
+
+    <linearGradient id="tarmac" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0"    stop-color="#1e2127"/>
+      <stop offset="0.55" stop-color="#2b2f37"/>
+      <stop offset="1"    stop-color="#413d4a"/>
+    </linearGradient>
+
+    <linearGradient id="land" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0"   stop-color="#8a7a4e"/>
+      <stop offset="0.5" stop-color="#5d5334"/>
+      <stop offset="1"   stop-color="#3b3522"/>
+    </linearGradient>
+
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0"   stop-color="#ffe0ab" stop-opacity="0.95"/>
+      <stop offset="0.45" stop-color="#f7a951" stop-opacity="0.45"/>
+      <stop offset="1"   stop-color="#f0912e" stop-opacity="0"/>
+    </radialGradient>
+
+    <clipPath id="badge">
+      <rect x="0" y="0" width="512" height="512" rx="112" ry="112"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#badge)">
+    <rect width="512" height="512" fill="url(#sky)"/>
+
+    <!-- Low sun, sitting on the horizon so the road runs straight out of it. -->
+    <circle cx="300" cy="262" r="168" fill="url(#glow)"/>
+    <circle cx="300" cy="254" r="44" fill="#ffe3a4"/>
+
+    <!-- Land. Flat behind the vanishing point, lumpy at the edges, so the eye
+         is pulled down the road rather than out to the sides. -->
+    <path fill="url(#land)" d="
+      M0,272 C42,252 80,248 118,256 C152,263 180,260 208,262
+      L512,262 L512,512 L0,512 Z"/>
+
+    <!-- A brighter strip right along the horizon: the last of the light on the
+         top of the fields, which is what separates land from sky at 16 px. -->
+    <path fill="#a8945c" opacity="0.6" d="
+      M0,272 C42,252 80,248 118,256 C152,263 180,260 208,262
+      L512,262 L512,271 L0,283 Z"/>
+
+    <!-- Verge, hugging the road rather than fanning across the whole frame. -->
+    <path fill="#7a6c42" opacity="0.55" d="
+      M288,262 L312,262 L500,512 L2,512 Z"/>
+
+    <!-- The road itself. Straight segments between measured perspective points;
+         a hand-fitted curve reads as a wobble at small sizes. -->
+    <path fill="url(#tarmac)" d="
+      M292,262 L277,280 L258,305 L233,336 L202,372 L161,415 L113,460 L50,512
+      L450,512 L403,460 L371,415 L350,372 L335,336 L324,305 L315,280 L308,262 Z"/>
+
+    <!-- Centre line, tapering into the distance. -->
+    <g fill="#f7dda6">
+      <path d="M242,512 L258,512 L263,468 L249,468 Z"/>
+      <path d="M255,440 L266,440 L270,404 L259,404 Z"/>
+      <path d="M270,382 L277,382 L281,352 L274,352 Z"/>
+      <path d="M282,334 L287,334 L290,310 L285,310 Z"/>
+      <path d="M290,296 L294,296 L296,278 L292,278 Z"/>
+    </g>
+
+    <!-- Dust off the right-hand verge: the one nod to how it is actually driven. -->
+    <g fill="#edd3a4" opacity="0.17">
+      <ellipse cx="408" cy="446" rx="54" ry="28"/>
+      <ellipse cx="452" cy="480" rx="44" ry="24"/>
+      <ellipse cx="378" cy="414" rx="30" ry="17"/>
+    </g>
+
+    <!-- Inner hairline, so the badge keeps an edge on a light background. -->
+    <rect x="3" y="3" width="506" height="506" rx="109" ry="109"
+          fill="none" stroke="#000" stroke-opacity="0.3" stroke-width="6"/>
+  </g>
+</svg>

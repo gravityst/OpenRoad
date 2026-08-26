@@ -1,10 +1,18 @@
-# Open Road
+<p align="center">
+  <img src="assets/icon-192.png" width="120" alt="">
+</p>
+
+<h1 align="center">Open Road</h1>
+
+<p align="center">
+  <a href="https://gravityst.github.io/OpenRoad/"><b>Play it in your browser →</b></a>
+</p>
 
 An open-world driving game that runs in a browser. Four kilometres square of
-procedurally generated city and countryside — five districts, a ring highway,
-four villages, dirt tracks into the hills — with traffic, weather and a
-day/night cycle. No build step, no network at runtime, no assets on disk that
-were not generated in code.
+procedurally generated open country — tarmac lanes, gravel stages into the
+hills, four race circuits and scattered villages — with traffic, weather,
+damage and a day/night cycle. No build step, no network at runtime, no assets
+on disk that were not generated in code.
 
 ```bash
 node tools/checkall.mjs      # run every harness
@@ -20,6 +28,10 @@ real server only because ES modules will not load from `file://`.
 | `W` `S` / arrows | throttle, brake |
 | `A` `D` / arrows | steer |
 | `Space` | handbrake |
+| hold **steer + brake** | drift — builds a slide that recovers on its own |
+| `Q` `E` | shift down / up |
+| `V` | inspect the damage — orbit the car and see what you broke |
+| `-` `=` | steering feel, 0.5x to 2.5x |
 | `C` | cycle camera |
 | `B` | look back |
 | `M` | map |
@@ -95,7 +107,17 @@ same code the browser runs.
 | `catalogcheck` | every car delivers the numbers the garage quotes |
 | `collisioncheck` | buildings are solid and can never add energy |
 | `trafficcheck` | traffic stays on its own side and out of itself |
+| `carcrashcheck` | car-to-car impacts never manufacture energy either |
+| `damagecheck` | damage accumulates, and an undamaged car never cooks itself |
+| `debrischeck` | shed parts fall, settle and get cleaned up |
+| `driftcheck` | the drift scoring pays for angle and punishes a spin |
+| `modelcheck` | imported car models are rigged the way the game assumes |
 | `brandcheck` | every name in the game is invented |
+
+They are not a substitute for looking at the screen. They passed happily while
+roads rendered from the wrong rows of the texture atlas, and again while traffic
+damage was computed every frame and then thrown away without ever being drawn.
+A headless check cannot see a dent.
 
 They exist because these are the failures that are invisible until someone
 plays for an hour: a 4 cm step in the road that only bites at 140 km/h,

@@ -23,8 +23,11 @@
 import { CARS, CAR_BY_ID, CLASSES, STARTER, specFor } from '../vehicles/catalog.js';
 import { DEFAULT_SPEC } from '../physics/vehicle.js';
 
-/** Everything the player has chosen lives under this one key. */
-export const SETTINGS_KEY = 'openroad.settings.v1';
+// The key, the defaults and the load/save pair now live in one module that
+// main.js imports too — they used to be duplicated here with a different set of
+// keys, which is a bug waiting for the next setting anyone adds.
+export { SETTINGS_KEY, DEFAULT_SETTINGS, loadSettings, saveSettings } from './settings.js';
+import { SETTINGS_KEY, DEFAULT_SETTINGS, loadSettings, saveSettings } from './settings.js';
 
 // KEY NAMES ARE A CONTRACT. main.js reads settings.post, settings.time,
 // settings.quality and the rest straight off the object this file emits, and
@@ -32,21 +35,6 @@ export const SETTINGS_KEY = 'openroad.settings.v1';
 // silently disconnects a control from the thing it is supposed to drive, so the
 // names match main.js and the value sets match the modules that consume them:
 // `quality` is a tier in render/terrain.js, `post` a tier in render/effects.js.
-export const DEFAULT_SETTINGS = {
-  quality: 'medium',
-  post: 'medium',
-  shadows: true,
-  drawDistance: 3200,
-  traffic: 0.55,
-  time: 9.5,
-  weather: 'clear',
-  esc: true,
-  tc: true,
-  abs: true,
-  invertLook: false,
-  sensitivity: 1.0,
-  volume: 0.8,
-};
 
 // Picking a quality tier snaps the three settings that hurt most, then leaves
 // them individually overridable — which is what every game does, and what
@@ -140,32 +128,9 @@ const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
  * dropped and missing ones filled, so a build that adds a setting still reads
  * an old save instead of throwing it away.
  */
-export function loadSettings() {
-  const out = { ...DEFAULT_SETTINGS };
-  let raw = null;
-  try { raw = localStorage.getItem(SETTINGS_KEY); } catch { return out; }
-  if (!raw) return out;
-  try {
-    const saved = JSON.parse(raw);
-    for (const k of Object.keys(out)) {
-      if (saved[k] !== undefined && typeof saved[k] === typeof out[k]) out[k] = saved[k];
-    }
-  } catch { /* corrupt entry: the defaults are a perfectly good answer */ }
-  return out;
-}
 
-/**
- * Written as a merge, not a replace. main.js keeps its own keys in this same
- * entry (timeScale, for one) and the menu has no control for them; overwriting
- * wholesale would quietly delete every setting the menu does not know about.
- */
-function persist(settings) {
-  try {
-    let stored = {};
-    try { stored = JSON.parse(localStorage.getItem(SETTINGS_KEY)) || {}; } catch { stored = {}; }
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify({ ...stored, ...settings }));
-  } catch { /* private mode */ }
-}
+// A merge, not a replace — see saveSettings in ./settings.js for why.
+const persist = saveSettings;
 
 // ---------------------------------------------------------------------------
 // Derived car figures

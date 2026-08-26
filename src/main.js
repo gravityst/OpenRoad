@@ -18,6 +18,10 @@ import { createCollision, createCarCollision } from './physics/collision.js';
 import { createDamage } from './physics/damage.js';
 import { createControls } from './input/controls.js';
 import { CARS, CAR_BY_ID, STARTER, specFor } from './vehicles/catalog.js';
+// Pure, dependency-free and tiny, so it is imported directly rather than through
+// layer(): there is nothing in it that can fail at load time.
+import { roomUrl } from './net/config.js';
+import { loadSettings, saveSettings, suggestName } from './game/settings.js';
 
 const BUILD = '2026-08-22';
 const PHYS_HZ = 120;
@@ -138,8 +142,11 @@ async function boot() {
   const settingsEarly = loadSettings();
 
   // ---- layers -------------------------------------------------------------
+  // APPEND ONLY. This destructures positionally, so inserting a layer into the
+  // middle of the array below silently shifts every module after it onto the
+  // wrong variable — the kind of bug that looks like six unrelated bugs.
   const [mTerrain, mRoads, mCity, mProps, mCar, mSky, mFx, mParticles, mTraffic, mHud, mMenus, mAudio, mTouch,
-         mCarDamage, mDebris, mDamageFx, mDrift, mModels] =
+         mCarDamage, mDebris, mDamageFx, mDrift, mModels, mNet, mTags] =
     await stage(0.50, 'loading modules', () => Promise.all([
       layer('./render/terrain.js', 'terrain'),
       layer('./render/roads.js', 'roads'),
@@ -166,6 +173,8 @@ async function boot() {
       layer('./render/damageFx.js', 'damage effects'),
       layer('./game/drift.js', 'drift scoring'),
       layer('./render/models.js', 'model library'),
+      layer('./net/net.js', 'multiplayer'),
+      layer('./render/nameTags.js', 'name tags'),
     ])) || [];
 
   const sky = await stage(0.56, 'raising the sky', () =>
@@ -291,6 +300,79 @@ async function boot() {
   // the full cavity treatment.
   const trafficDamage = [];
   const trafficRespawn = [];
+  // ---- other drivers ------------------------------------------------------
+  //
+  // Remote cars are GHOSTS: drawn, named, findable, but not in the collision
+  // set. That is what lets the whole thing work at any ping — nothing another
+  // player does can alter your physics, so nothing has to agree. Add collision
+  // here and every number in the netcode has to be re-derived.
+  let net = null;
+  if (mNet) {
+    try {
+      const url = roomUrl();
+      if (url) {
+        net = mNet.createNet({
+          url, name: settings.name || '', seed: world.seed,
+          carId: settings.car || '', maxPlayers: 16,
+        });
+      }
+    } catch (err) {
+      console.error('[open road] multiplayer unavailable:', err);
+      net = null;
+    }
+  }
+
+  const tags = mTags
+    ? mTags.createNameTags(document.body, { showTags: settings.nameTags !== false })
+    : null;
+  if (tags) tags.setSize(renderer.domElement.clientWidth, renderer.domElement.clientHeight);
+
+  // One model per remote SLOT, built lazily and kept — same reasoning as the
+  // traffic pool above. A slot that goes quiet hides its mesh rather than
+  // disposing it, because the same slot is usually reused within seconds.
+  const remoteModels = [];
+  function syncRemoteModels(night) {
+    if (!net || !mCar) return;
+    const list = net.room.cars;
+    for (let i = 0; i < list.length; i++) {
+      const c = list[i];
+      let m = remoteModels[i];
+      if (m === undefined) {
+        if (!c.active) continue;
+        try {
+          m = mCar.createCarModel({ ...(specFor(STARTER) || {}), colour: remoteColour(c.id) });
+          scene.add(m.group);
+        } catch (err) {
+          console.error('[open road] remote car model failed:', err);
+          m = null;
+        }
+        remoteModels[i] = m;
+      }
+      if (!m) continue;
+      if (!c.active || c.fade <= 0) { m.group.visible = false; continue; }
+      m.group.visible = true;
+      m.group.position.set(c.x, c.y, c.z);
+      m.group.rotation.set(0, c.yaw, 0);
+      if (c.pitch) m.group.rotateX(c.pitch);
+      if (c.roll) m.group.rotateZ(c.roll);
+      // Same calls the traffic pool makes — createCarModel has no setWheels or
+      // setLights, so guessing those names would have failed silently behind an
+      // `if`, which is exactly how a car ends up sliding on frozen wheels.
+      m.setSteer(c.steer * 0.6);
+      m.setWheelSpin(c.wheelSpin);
+      m.setBrakeLights(c.brake ? 1 : 0);
+      m.setHeadlights(night > 0.35);
+      const ind = c.indL ? -1 : c.indR ? 1 : 0;
+      m.setIndicator(ind === 0 ? 0 : (indicatorPhase % 0.9 < 0.45 ? ind : 0));
+    }
+  }
+
+  /** A stable colour per player id, so the same person looks the same all session. */
+  function remoteColour(id) {
+    const h = (id * 47) % 360;
+    return new THREE.Color().setHSL(h / 360, 0.62, 0.48).getHex();
+  }
+
   function syncTrafficModels(night, dt) {
     const list = traffic.cars || [];
     if (!mCar) return;
@@ -361,6 +443,15 @@ async function boot() {
   const controls = createControls({ settings: { sensitivity: settings.sensitivity || 1 } });
 
   // ---- place the car ------------------------------------------------------
+  // Declared before the first spawnOnRoad() below, which runs during boot and
+  // writes them — a `let` read above its declaration is a dead-zone throw, not
+  // an undefined, so this ordering is load-bearing.
+  //
+  // A respawn is a cut, not a move: the other clients snap rather than
+  // interpolating, or your car streaks the width of the map at 400 m/s.
+  let respawnSeq = 0;
+  let teleported = false;
+
   spawnOnRoad(0, -260);
 
   function spawnOnRoad(x, z) {
@@ -374,6 +465,10 @@ async function boot() {
     } else {
       car.reset(x, z, 0);
     }
+    // Tell the other clients this was a cut, not a drive. They snap instead of
+    // interpolating; without it your car streaks across the map at 400 m/s.
+    respawnSeq = (respawnSeq + 1) & 0xff;
+    teleported = true;
   }
 
   // ---- state --------------------------------------------------------------
@@ -383,6 +478,12 @@ async function boot() {
   let clockHours = settings.time != null ? settings.time : 9.5;
   let indicator = 0;             // -1 left, 0 off, 1 right
   let indicatorPhase = 0;
+  // One reused object for the outgoing record — allocating this every frame
+  // would produce garbage 20 times a second for the whole session.
+  const wire = {
+    id: 0, x: 0, y: 0, z: 0, yaw: 0, pitch: 0, roll: 0, vx: 0, vz: 0,
+    yawRate: 0, steer: 0, wheelSpin: 0, integrity: 1, flags: 0, respawnSeq: 0,
+  };
   let headlights = false;
 
   sky.setTime(clockHours);
@@ -445,6 +546,7 @@ async function boot() {
 
   // ---- resize -------------------------------------------------------------
   const onResize = () => {
+    if (tags) tags.setSize(window.innerWidth, window.innerHeight);
     const w = window.innerWidth, h = window.innerHeight;
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
@@ -742,6 +844,32 @@ async function boot() {
 
     traffic.update(dt, car.x, car.z, car.speed, car.yaw);
     syncTrafficModels(night, dt);
+
+    // ---- other drivers ----
+    // The record is built here rather than handing `car` straight to the net
+    // layer, because the wire format is a contract and the vehicle is not: the
+    // day someone renames car.steerAngle, this line should break loudly rather
+    // than start shipping undefined.
+    if (net) {
+      wire.x = car.x; wire.y = car.y; wire.z = car.z;
+      wire.yaw = car.yaw; wire.pitch = car.pitch; wire.roll = car.roll;
+      wire.vx = car.vx; wire.vz = car.vz; wire.yawRate = car.yawRate;
+      wire.steer = car.spec.maxSteer ? car.steerAngle / car.spec.maxSteer : 0;
+      wire.wheelSpin = car.wheels && car.wheels[0] ? car.wheels[0].spin : 0;
+      wire.integrity = car.damage ? car.damage.integrity : 1;
+      wire.flags =
+        (input.brake > 0.02 || input.handbrake > 0.02 ? 1 : 0) |
+        (indicator < 0 ? 2 : 0) | (indicator > 0 ? 4 : 0) |
+        (input.handbrake > 0.02 ? 8 : 0) |
+        (headlights || night > 0.35 ? 16 : 0) |
+        (car.airborne ? 32 : 0) |
+        (teleported ? 64 : 0);
+      wire.respawnSeq = respawnSeq & 0xff;
+      teleported = false;
+      net.update(dt, wire);
+      syncRemoteModels(night);
+      if (tags) tags.update(camera, net.room.cars);
+    }
     debris.update(dt, camera.position);
     fxCars[0] = car;
     damageFx.update(dt, fxCars, camera.position);
@@ -784,6 +912,7 @@ async function boot() {
       hudState.repairing = repairIn ? Math.min(1, repairT / 4) : 0;
       const road = ground.roadAt(car.x, car.z);
       hudState.speedLimit = road.onRoad ? road.speedLimit : 0;
+      hudState.players = net ? net.room.cars : null;
       hud.update(hudState);
     }
 
@@ -1252,23 +1381,6 @@ function fallbackSun(scene) {
   return sun;
 }
 
-const SETTINGS_KEY = 'openroad.settings.v1';
-
-function loadSettings() {
-  try {
-    const raw = localStorage.getItem(SETTINGS_KEY);
-    if (raw) return JSON.parse(raw);
-  } catch { /* private browsing, or a corrupt value — defaults are fine */ }
-  return {
-    quality: 'medium', post: 'medium', shadows: true,
-    volume: 0.8, sensitivity: 1, weather: 'clear', time: 9.5, timeScale: 0.02,
-    abs: true, tc: true, esc: true, steerFeel: 1,
-  };
-}
-
-function saveSettings(s) {
-  try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); } catch { /* nothing to do */ }
-}
 
 function applyAssists(car, s) {
   car.feel.steer = Math.max(0.5, Math.min(2.5, s.steerFeel ?? 1));

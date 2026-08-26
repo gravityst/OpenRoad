@@ -75,6 +75,10 @@ const FONT_MONO = 'ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, mo
 const COL_ACCENT = '#ffb648';
 const COL_WARN = '#ff5a48';
 const COL_COOL = '#5fd0e6';
+// Other drivers. Deliberately not the amber your own car and the towns use, and
+// not the cyan of villages — at a glance on a busy map the only question that
+// matters is "is that a person?", so it gets a hue nothing else owns.
+const COL_PLAYER = '#7ef29a';
 const COL_GO = '#4ad295';
 const COL_NEEDLE = '#ffe7bd';
 const COL_NEEDLE_SOFT = 'rgba(255,231,189,0.22)';
@@ -856,7 +860,7 @@ export function createHUD(root, opts = {}) {
 
   let zoom = clamp(opts.minimapZoom || 1, ZOOM_MIN, ZOOM_MAX);
 
-  function drawMap(px, pz, heading) {
+  function drawMap(px, pz, heading, players) {
     const w = mapCanvas.width;
     if (!worldMap || w < 16) return;
     const g = mapCtx;
@@ -917,6 +921,52 @@ export function createHUD(root, opts = {}) {
       g.strokeText(p.name, r + sx, ly);
       g.fillStyle = onRim ? COL_LABEL_DIM : COL_LABEL;
       g.fillText(p.name, r + sx, ly);
+    }
+
+    // Other drivers. Same rim-clamping the place labels use: a blip that would
+    // fall outside the disc is pulled to the edge and hollowed out, so "north
+    // of here, a long way" and "north of here, close" never look the same.
+    if (players && players.length) {
+      g.lineWidth = w * 0.011;
+      for (let i = 0; i < players.length; i++) {
+        const q = players[i];
+        if (!q || !q.active || q.fade <= 0) continue;
+        const dx = q.x - px, dz = q.z - pz;
+        let sx = (dx * ch - dz * sh) / mpp;
+        let sy = (dx * sh + dz * ch) / mpp;
+        const sd = Math.sqrt(sx * sx + sy * sy);
+        const off = sd > edge;
+        if (off) { const f = edge / sd; sx *= f; sy *= f; }
+        g.globalAlpha = q.fade;
+        // A wedge, not a dot: it carries their heading, so you can see which
+        // way someone is pointing before you can see their car.
+        const hd = q.yaw - heading;
+        const bs = w * (off ? 0.019 : 0.026);
+        g.save();
+        g.translate(r + sx, r + sy);
+        g.rotate(-hd);
+        g.beginPath();
+        g.moveTo(0, -bs);
+        g.lineTo(bs * 0.66, bs * 0.72);
+        g.lineTo(0, bs * 0.3);
+        g.lineTo(-bs * 0.66, bs * 0.72);
+        g.closePath();
+        g.fillStyle = off ? 'transparent' : COL_PLAYER;
+        g.strokeStyle = COL_PLAYER;
+        if (!off) g.fill();
+        g.stroke();
+        g.restore();
+        if (!off && q.name) {
+          g.strokeStyle = COL_HALO;
+          g.lineWidth = w * 0.013;
+          const ly = r + sy - w * 0.038;
+          g.strokeText(q.name, r + sx, ly);
+          g.fillStyle = COL_PLAYER;
+          g.fillText(q.name, r + sx, ly);
+          g.lineWidth = w * 0.011;
+        }
+      }
+      g.globalAlpha = 1;
     }
 
     // North, so the rotation is always legible at a glance.
@@ -1551,7 +1601,7 @@ export function createHUD(root, opts = {}) {
 
     drawDial(rpm, redline, kmhF, s.throttle || 0, s.brake || 0, shift);
     drawCompass(bearing);
-    drawMap(s.x || 0, s.z || 0, yaw);
+    drawMap(s.x || 0, s.z || 0, yaw, s.players);
   }
 
   // ---- the rest of the surface -------------------------------------------

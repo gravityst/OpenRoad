@@ -1,0 +1,13 @@
+name = "openroad-room"
+main = "worker.js"
+compatibility_date = "2026-08-01"
+
+# SQLite-backed classes are mandatory on the free plan, and since mid-2026 all
+# new namespaces must be SQLite regardless of plan.
+[[durable_objects.bindings]]
+name = "ROOM"
+class_name = "Room"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Room"]

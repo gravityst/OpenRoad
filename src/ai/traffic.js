@@ -815,8 +815,16 @@ export function createTraffic(world, ground, opts = {}) {
 
       // Speed: free road, then whatever is in the way, then the junction.
       const v0 = planSpeed(car);
-      const vr = car.speed / v0;
-      let a = car.accel * (1 - vr * vr * vr * vr);
+      // v0 is legitimately 0 for a car that has been written off, and 0/0 is
+      // NaN — which then flows into car.speed, car.x, the collision grid and
+      // the renderer, and never washes out. A stopped car just brakes.
+      let a;
+      if (v0 <= 0.01) {
+        a = -B_MAX;
+      } else {
+        const vr = car.speed / v0;
+        a = car.accel * (1 - vr * vr * vr * vr);
+      }
       a = obstacles(car, a, playerX, playerZ, playerSpeed, phx, phz);
 
       const node = nodes[slot.endNode];
@@ -859,7 +867,7 @@ export function createTraffic(world, ground, opts = {}) {
       if (a < -B_MAX) a = -B_MAX;
       car.braking = a < -1.3;
       car.speed += a * dt;
-      if (car.speed < 0) car.speed = 0;
+      if (!(car.speed > 0)) car.speed = 0;   // also catches NaN, which `< 0` does not
 
       // Steering: pure pursuit onto a point ahead on the lane.
       routeAt(car, clamp(4.5 + car.speed * 0.8, 6.5, 26), _tgt);

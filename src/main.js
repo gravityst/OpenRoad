@@ -422,9 +422,29 @@ async function boot() {
         if (t.damage) t.damage.reset();
         t.wrecked = false;
         t.exploded = false;
+        t.written = false;
+        t.burning = 0;
         t.speedCap = undefined;
       }
       if (trafficDamage[i] && t.damage) trafficDamage[i].update(t.damage.state, dt);
+
+      // A written-off car burns where it stands. Keeps its own fire alive too:
+      // traffic damage is never stepped, so nothing else would sustain it.
+      if (t.burning > 0 && t.active) {
+        t.burning -= dt;
+        if (t.damage) {
+          t.damage.state.onFire = t.burning > 3 ? 0.85 : Math.max(0, t.burning / 3.5);
+          t.damage.state.temp = 1;
+        }
+        const k = Math.min(1, t.burning / 3);
+        if (Math.random() < dt * 42 * k) {
+          particles.emitSparks(t.x + (Math.random() * 2 - 1) * 0.6,
+            t.y + 0.7 + Math.random() * 0.7, t.z + (Math.random() * 2 - 1) * 0.6, 5, 0, 0);
+        }
+        if (Math.random() < dt * 34 * k) particles.emitSmoke(t.x, t.y + 1.3, t.z, 3);
+        if (Math.random() < dt * 22 * k) particles.emitSmoke(t.x, t.y + 3.2, t.z, 2);
+        if (t.burning <= 0 && t.damage) t.damage.state.onFire = 0;
+      }
 
       if (!t.active) { m.group.visible = false; continue; }
       m.group.visible = true;
@@ -1151,16 +1171,35 @@ async function boot() {
     // undoes the separation that lets the contact resolve — the closing speed
     // never goes negative, so the next substep fires a second full impulse and
     // a second impact. A 30 m/s rear-end became six impulses in one frame.
+    // A genuinely violent crash writes the car off, full stop. One impact()
+    // call could only ever take a pristine car to about 0.75 no matter how fast
+    // you hit it, so a head-on at 70 m/s closing left traffic driving away
+    // FASTER than before, with a cap that never applied because 0.75 > 0.7.
+    // Catastrophic means catastrophic: the structure is gone, not dented.
+    if (closing > 24 && !other.written) {
+      other.written = true;
+      for (let k = 0; k < 5; k++) {
+        other.damage.impact(1, lx * 0.6, lz * (k % 2 ? 0.8 : -0.8), hw, hl, closing);
+      }
+      other.damage.state.onFire = Math.max(other.damage.state.onFire, 0.7);
+      other.damage.state.temp = 1;
+      other.damage.drainEvents(npcEvents);
+      if (trafficDamage[mi] && npcEvents.length) trafficDamage[mi].applyEvents(npcEvents);
+    }
+
     const integ = other.damage.integrity;
-    if (integ < 0.35) { other.wrecked = true; other.speedCap = 2; }
-    else if (integ < 0.7) other.speedCap = Math.min(other.speedCap ?? Infinity, 8);
+    // A wreck STOPS. It does not limp away at walking pace with its roof off.
+    if (other.written || integ < 0.3) { other.wrecked = true; other.speedCap = 0; }
+    else if (integ < 0.55) { other.wrecked = true; other.speedCap = 2; }
+    else if (integ < 0.75) other.speedCap = Math.min(other.speedCap ?? Infinity, 8);
 
     // Rising edge. This used to be a level test, so once a car was under the
     // threshold every subsequent substep of every subsequent contact detonated
     // it again — 135 explosions in 90 frames, measured.
-    if (integ < 0.22 && !other.exploded) {
+    if ((other.written || integ < 0.3) && !other.exploded) {
       other.exploded = true;
-      explode(other.x, other.y + 0.6, other.z, 0.8);
+      other.burning = 14 + Math.random() * 10;   // seconds it stays alight
+      explode(other.x, other.y + 0.6, other.z, 0.9);
     }
   }
 
@@ -1202,9 +1241,13 @@ async function boot() {
     // Dust kicked off the ground, which is what gives the blast a floor.
     if (particles.emitDust) particles.emitDust(x, y - 0.2, z, 30 * p, 0xb9a582);
 
-    // Past this the crash is terminal, and the aftermath takes over: the car
-    // comes apart, burns down and someone gets called out to it.
-    if (p > 0.7 && wreck) wreck.ignite(car, carDamage, p);
+    // Past this the crash is terminal and the aftermath takes over. The bar was
+    // p > 0.7, but explode() itself only fires above 0.55, so there was a band
+    // where the car detonated and then drove away undamaged — which is exactly
+    // the "it blew up but nothing happened" case. An already-battered car goes
+    // up on a smaller hit, because it should.
+    const spent = car.damage ? car.damage.integrity : 1;
+    if (wreck && (p > 0.6 || spent < 0.45)) wreck.ignite(car, carDamage, p);
     else hud.toast('Impact', 1.4);
   }
 

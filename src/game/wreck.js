@@ -19,9 +19,9 @@
 
 import * as THREE from 'three';
 
-const BURN_MIN = 9;             // never douse before the fire has been a fire
-const BURN_MAX = 26;            // and never let it outstay its welcome
-const RESPOND_SPEED = 22;       // m/s the engine travels while off-screen
+const BURN_MIN = 3.5;           // never douse before the fire has been a fire
+const BURN_MAX = 17;            // and never let it outstay its welcome
+const RESPOND_SPEED = 34;       // m/s the engine travels while off-screen
 const DOUSE_TIME = 7.5;
 const PARK_DIST = 9.5;          // how close the engine stops
 
@@ -139,9 +139,9 @@ export function createWreck(opts = {}) {
     if (truck || !makeCar) return;
     // An engine is a big red van. Spawned back down the road so it arrives
     // rather than appearing, which is the whole point of the delay.
-    let sx = wx + 140, sz = wz + 140;
+    let sx = wx + 85, sz = wz + 85;
     const near = ground && ground.nearestRoad ? ground.nearestRoad(wx, wz, 900) : null;
-    if (near) { sx = near.x + 150; sz = near.z + 150; }
+    if (near) { sx = near.x + 92; sz = near.z + 92; }
     let g = null;
     try {
       g = makeCar({ body: 'van', colour: 0xc8102e, wheelbase: 3.1, track: 1.8 });

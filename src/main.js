@@ -146,7 +146,7 @@ async function boot() {
   // middle of the array below silently shifts every module after it onto the
   // wrong variable — the kind of bug that looks like six unrelated bugs.
   const [mTerrain, mRoads, mCity, mProps, mCar, mSky, mFx, mParticles, mTraffic, mHud, mMenus, mAudio, mTouch,
-         mCarDamage, mDebris, mDamageFx, mDrift, mModels, mNet, mTags] =
+         mCarDamage, mDebris, mDamageFx, mDrift, mModels, mNet, mTags, mBoom, mWreck] =
     await stage(0.50, 'loading modules', () => Promise.all([
       layer('./render/terrain.js', 'terrain'),
       layer('./render/roads.js', 'roads'),
@@ -175,6 +175,8 @@ async function boot() {
       layer('./render/models.js', 'model library'),
       layer('./net/net.js', 'multiplayer'),
       layer('./render/nameTags.js', 'name tags'),
+      layer('./render/explosion.js', 'explosions'),
+      layer('./game/wreck.js', 'wreck sequence'),
     ])) || [];
 
   const sky = await stage(0.56, 'raising the sky', () =>
@@ -253,6 +255,9 @@ async function boot() {
 
   // ---- player -------------------------------------------------------------
   const settings = settingsEarly;
+  // Everyone has a name from the first frame. A player who never opens settings
+  // still shows up as somebody rather than as a blank plate.
+  if (!settings.name) { settings.name = suggestName(); saveSettings(settings); }
   let chosenCar = settings.car && CAR_BY_ID[settings.car] ? settings.car : STARTER;
   let chosenColour = settings.colour | 0;
 
@@ -330,6 +335,20 @@ async function boot() {
   // One model per remote SLOT, built lazily and kept — same reasoning as the
   // traffic pool above. A slot that goes quiet hides its mesh rather than
   // disposing it, because the same slot is usually reused within seconds.
+  const boom = mBoom
+    ? mBoom.createExplosions(scene, { quality: settings.quality || 'medium' })
+    : null;
+
+  // The aftermath director. Given the wreck it sheds panels, keeps the fire
+  // alive, and calls someone to come and put it out.
+  const wreck = mWreck ? mWreck.createWreck({
+    scene, ground, particles,
+    debris: mDebris ? debris : null,
+    createCarModel: mCar ? mCar.createCarModel : null,
+    carGroup: () => (carModel ? carModel.group : null),
+    onToast: (msg, secs) => hud.toast(msg, secs),
+  }) : null;
+
   const remoteModels = [];
   function syncRemoteModels(night) {
     if (!net || !mCar) return;
@@ -449,6 +468,8 @@ async function boot() {
   //
   // A respawn is a cut, not a move: the other clients snap rather than
   // interpolating, or your car streaks the width of the map at 400 m/s.
+  // True while a menu text field has focus; see menus.onTyping below.
+  let typing = false;
   let respawnSeq = 0;
   let teleported = false;
 
@@ -469,6 +490,7 @@ async function boot() {
     // interpolating; without it your car streaks across the map at 400 m/s.
     respawnSeq = (respawnSeq + 1) & 0xff;
     teleported = true;
+    if (wreck) wreck.reset();
   }
 
   // ---- state --------------------------------------------------------------
@@ -510,10 +532,28 @@ async function boot() {
     if (payload && payload.id) fitCarModel(payload.id, payload.colour | 0);
   });
   menus.on('settings-change', (s) => {
+    const hadName = settings.name;
     Object.assign(settings, s);
     saveSettings(settings);
     applySettings();
+    if (net) {
+      if (settings.name !== hadName) net.rename(settings.name || suggestName());
+      if (settings.multiplayer === false) net.disable();
+      else net.enable();
+    }
+    if (tags) {
+      tags.setShowTags(settings.nameTags !== false);
+      tags.setShowArrows(settings.nameTags !== false);
+    }
   });
+
+  // While a menu text field has focus the keyboard belongs to it, not the car.
+  // controls.js reads key state directly, so typing "Wade" would otherwise
+  // steer and accelerate.
+  menus.onTyping = (on) => {
+    typing = on;
+    if (on && controls.reset) controls.reset();
+  };
   menus.on('resume', () => startDriving());
   menus.on('quit-to-title', () => { mode = 'title'; hud.setVisible(false); touch.setVisible(false); menus.show('title'); });
   menus.on('teleport', (p) => { if (p) { spawnOnRoad(p.x, p.z); startDriving(); } });
@@ -642,6 +682,9 @@ async function boot() {
     // ---- input ----
     touch.read(touchState);
     const input = controls.update(dt, touch.isTouch ? touchState : null);
+    // A focused text field owns the keyboard. Zeroing here rather than skipping
+    // the physics keeps the car settling naturally instead of freezing mid-slide.
+    if (typing) { input.throttle = 0; input.brake = 0; input.steer = 0; input.handbrake = 0; }
 
     if (input.pause && mode !== 'inspect') {
       if (mode === 'driving') { mode = 'paused'; menus.show('pause'); hud.setVisible(false); controls.reset(); }
@@ -843,6 +886,10 @@ async function boot() {
     }
 
     traffic.update(dt, car.x, car.z, car.speed, car.yaw);
+    if (boomCooldown > 0) boomCooldown -= dt;
+    if (boom) boom.update(dt);
+    if (wreck) wreck.update(dt, car, carDamage);
+
     syncTrafficModels(night, dt);
 
     // ---- other drivers ----
@@ -868,7 +915,7 @@ async function boot() {
       teleported = false;
       net.update(dt, wire);
       syncRemoteModels(night);
-      if (tags) tags.update(camera, net.room.cars);
+      if (tags) tags.update(camera, net.room.cars, car);
     }
     debris.update(dt, camera.position);
     fxCars[0] = car;
@@ -1122,17 +1169,43 @@ async function boot() {
    * new system: a flash of sparks thrown outward, a swelling ball of smoke,
    * and debris. Deliberately brief — a fireball that lingers reads as a bug.
    */
+  // Collision resolution runs up to MAX_SUBSTEPS times per frame and every one
+  // of those substeps can report a hit, so without a cooldown a single crash
+  // detonates six times — which was survivable when this was a spark shower and
+  // is not now that it is a fireball with a light on it.
+  let boomCooldown = 0;
   function explode(x, y, z, power) {
+    if (boomCooldown > 0) return;
+    boomCooldown = 0.35;
     const p = Math.max(0.2, Math.min(1, power));
-    particles.emitSparks(x, y, z, 90 * p, 0, 0);
-    particles.emitSmoke(x, y + 0.3, z, 26 * p);
-    particles.emitSmoke(x, y + 1.1, z, 18 * p);
-    for (let i = 0; i < 6 * p; i++) {
-      const a = (i / (6 * p)) * Math.PI * 2;
-      particles.emitSparks(x + Math.cos(a) * 1.2, y + 0.4, z + Math.sin(a) * 1.2,
-        18 * p, Math.cos(a), Math.sin(a));
+    // The fireball, the flash and the shockwave. Everything below is the
+    // dressing around it — on its own the particle work reads as a scrape.
+    if (boom) boom.fire(x, y + 0.35, z, p);
+
+    particles.emitSparks(x, y, z, 150 * p, 0, 0);
+    particles.emitSmoke(x, y + 0.3, z, 40 * p);
+    particles.emitSmoke(x, y + 1.4, z, 34 * p);
+    // A column, not a puff. Smoke that only ever appears at wheel height reads
+    // as tyre smoke; a plume that climbs reads as something burning.
+    particles.emitSmoke(x, y + 2.8, z, 22 * p);
+    particles.emitSmoke(x, y + 4.4, z, 14 * p);
+
+    // Sparks thrown outward in a full ring rather than a single puff, so the
+    // blast has a direction wherever you happen to be standing.
+    const arms = Math.max(6, Math.round(14 * p));
+    for (let i = 0; i < arms; i++) {
+      const a = (i / arms) * Math.PI * 2 + Math.random() * 0.4;
+      const r = 1.1 + Math.random() * 1.6;
+      particles.emitSparks(x + Math.cos(a) * r, y + 0.3 + Math.random() * 1.2, z + Math.sin(a) * r,
+        30 * p, Math.cos(a), Math.sin(a));
     }
-    hud.toast('Impact', 1.2);
+    // Dust kicked off the ground, which is what gives the blast a floor.
+    if (particles.emitDust) particles.emitDust(x, y - 0.2, z, 30 * p, 0xb9a582);
+
+    // Past this the crash is terminal, and the aftermath takes over: the car
+    // comes apart, burns down and someone gets called out to it.
+    if (p > 0.7 && wreck) wreck.ignite(car, carDamage, p);
+    else hud.toast('Impact', 1.4);
   }
 
   /**
@@ -1278,6 +1351,15 @@ async function boot() {
     camera.up.set(0, 1, 0);
     camera.lookAt(camLook);
     camera.rotateZ(-car.roll * 0.28);
+    // Blast shake. Applied after lookAt, which would otherwise overwrite it,
+    // and as rotation rather than position so it never shoves the camera
+    // through the road or the car.
+    if (boom && boom.shake > 0.001) {
+      const k = boom.shake * boom.shake * 0.05;
+      camera.rotateX((Math.random() * 2 - 1) * k);
+      camera.rotateY((Math.random() * 2 - 1) * k);
+      camera.rotateZ((Math.random() * 2 - 1) * k * 1.4);
+    }
     camera.fov += ((60 + speedT * 16) - camera.fov) * Math.min(1, dt * 3);
     camera.updateProjectionMatrix();
   }
@@ -1310,6 +1392,19 @@ async function boot() {
     build: BUILD, world, ground, car, controls, scene, renderer, camera,
     traffic, settings, failures,
     garages: world.garages,
+    // Exposed so multiplayer can be inspected without a second machine: check
+    // net.status, net.players and net.rtt from the console.
+    get net() { return net; },
+    get tags() { return tags; },
+    get boom() { return boom; },
+    /** The aftermath director. Named to avoid colliding with wreck() below. */
+    get aftermath() { return wreck; },
+    /** Set off a blast at the car, for looking at one without crashing. */
+    detonate: (power = 1) => {
+      boomCooldown = 0;
+      explode(car.x, car.y + 0.4, car.z, power);
+      return 'boom';
+    },
     layers: { terrain, roads, city, props, particles, effects, sky, traffic, hud, menus, audio, touch,
               collision, debris, damageFx, drift, models, get carDamage() { return carDamage; } },
     /** Wreck the car on demand, for looking at damage without crashing first. */

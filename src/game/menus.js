@@ -28,6 +28,7 @@ import { DEFAULT_SPEC } from '../physics/vehicle.js';
 // keys, which is a bug waiting for the next setting anyone adds.
 export { SETTINGS_KEY, DEFAULT_SETTINGS, loadSettings, saveSettings } from './settings.js';
 import { SETTINGS_KEY, DEFAULT_SETTINGS, loadSettings, saveSettings } from './settings.js';
+import { NAME_RE } from '../net/protocol.js';
 
 // KEY NAMES ARE A CONTRACT. main.js reads settings.post, settings.time,
 // settings.quality and the rest straight off the object this file emits, and
@@ -55,6 +56,20 @@ const fmtClock = (v) => {
 };
 
 const SETTINGS_SCHEMA = [
+  {
+    group: 'Multiplayer',
+    items: [
+      { key: 'name', label: 'Driver name', type: 'text', maxLength: 16,
+        placeholder: 'Driver-1234',
+        hint: 'Shown above your car to everyone else. 2-16 characters, letters, digits, space, - and _.',
+        error: 'Letters, digits, space, - and _ only. 2-16 characters.',
+        validate: (v) => NAME_RE.test(v) && !/\s{2,}/.test(v) && v.trim() === v },
+      { key: 'nameTags', label: 'Show name tags', type: 'toggle',
+        hint: 'Names and distances over other drivers, and arrows to the ones off-screen.' },
+      { key: 'multiplayer', label: 'Connect to other drivers', type: 'toggle',
+        hint: 'Off means you drive alone. The game works either way.' },
+    ],
+  },
   {
     group: 'Display',
     items: [
@@ -286,6 +301,9 @@ const FOCUSABLE = 'button:not([disabled]), input:not([disabled]), select:not([di
 export function createMenus(root, opts = {}) {
   const host = root || document.body;
   let world = opts.world || null;
+  // Raised while a text field has focus. controls.js reads the keyboard
+  // directly, so without this, typing "Wade" steers and accelerates the car.
+  let onTyping = opts.onTyping || null;
 
   // ---- stylesheet ---------------------------------------------------------
   // index.html normally links styles/ui.css itself; this is the fallback for a
@@ -679,6 +697,38 @@ export function createMenus(root, opts = {}) {
       input.addEventListener('change', () => change(item.key, input.checked));
       control.appendChild(input);
       controls.set(item.key, () => { input.checked = !!settings[item.key]; });
+
+    } else if (item.type === 'text') {
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.className = 'or-text';
+      input.id = `or-set-${item.key}`;
+      input.maxLength = item.maxLength || 16;
+      input.placeholder = item.placeholder || '';
+      input.autocomplete = 'off';
+      input.spellcheck = false;
+      label.htmlFor = input.id;
+      const note = el('p', 'or-row-note');
+      // The page sets touch-action and user-select none globally for driving,
+      // so a text field has to opt back in or it cannot be focused or edited.
+      input.style.pointerEvents = 'auto';
+      input.style.userSelect = 'text';
+      input.style.webkitUserSelect = 'text';
+      const validate = () => {
+        const v = input.value;
+        const ok = !v || (item.validate ? item.validate(v) : true);
+        input.classList.toggle('or-text--bad', !ok);
+        note.textContent = ok ? '' : (item.error || 'Not allowed');
+        return ok;
+      };
+      input.addEventListener('input', () => { if (validate()) change(item.key, input.value); });
+      // WASD would otherwise drive the car while you are typing your name.
+      input.addEventListener('focus', () => { if (onTyping) onTyping(true); });
+      input.addEventListener('blur', () => { if (onTyping) onTyping(false); });
+      input.addEventListener('keydown', (e) => { e.stopPropagation(); });
+      control.appendChild(input);
+      control.appendChild(note);
+      controls.set(item.key, () => { input.value = settings[item.key] || ''; validate(); });
 
     } else if (item.type === 'range') {
       const input = document.createElement('input');
@@ -1205,5 +1255,6 @@ export function createMenus(root, opts = {}) {
     /** Where the garage expects the 3D car, in CSS pixels. */
     stageRect: () => stageEl.getBoundingClientRect(),
     show, hide, on, off, setCars, setPlayer, setWorld, dispose,
+    set onTyping(fn) { onTyping = fn; },
   };
 }

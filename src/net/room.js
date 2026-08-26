@@ -47,6 +47,10 @@ export function createRoom(opts = {}) {
   let head = -1;
   const cars = [];              // stable slots, reused; index != player id
   const byId = new Map();
+  // Names arrive in the `welcome`/`joined` control messages, which land BEFORE
+  // the first snapshot that creates the car. Holding them here and applying on
+  // slot creation is what stops every driver being called "Driver-<id>".
+  const names = new Map();
   let selfId = -1;
 
   // Clock sync. The median, never the mean — network delay is heavy-tailed and
@@ -72,6 +76,7 @@ export function createRoom(opts = {}) {
     }
     c.id = id;
     c.active = true;
+    c.name = names.get(id) || '';
     byId.set(id, c);
     return c;
   }
@@ -231,7 +236,12 @@ export function createRoom(opts = {}) {
     get rtt() { return rttMs; },
     get interp() { return interpMs; },
     setSelf(id) { selfId = id; },
-    setName(id, name) { const c = byId.get(id); if (c) c.name = name; },
+    setName(id, name) {
+      names.set(id, name);
+      const c = byId.get(id);
+      if (c) c.name = name;
+    },
+    dropName(id) { names.delete(id); },
     /** Derived from the live send rate, so smoothness degrades gracefully as
      *  the server throttles a filling room rather than falling off a cliff. */
     setSendHz(hz) { interpMs = Math.max(80, Math.min(250, 2000 / Math.max(4, hz))); },
@@ -239,8 +249,9 @@ export function createRoom(opts = {}) {
     reset() {
       head = -1; snaps.length = 0; offsets.length = 0;
       clockOffset = null; rttMs = 0;
-      for (const c of cars) { c.active = false; c.fade = 0; }
+      for (const c of cars) { c.active = false; c.fade = 0; c.name = ''; }
       byId.clear();
+      names.clear();
     },
   };
 }

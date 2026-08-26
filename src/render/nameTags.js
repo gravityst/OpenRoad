@@ -102,7 +102,7 @@ export function createNameTags(root, opts = {}) {
   /**
    * `cars` is the remote pool from net/room.js. Nothing here writes to it.
    */
-  function update(camera, cars) {
+  function update(camera, cars, self) {
     if (!cars || !cars.length || (!showTags && !showArrows)) {
       for (const t of tags) show(t, false);
       for (const a of arrows) show(a, false);
@@ -110,12 +110,14 @@ export function createNameTags(root, opts = {}) {
     }
     camera.getWorldPosition(camPos);
     camera.getWorldDirection(camDir);
+    const ox = self ? self.x : camPos.x;
+    const oz = self ? self.z : camPos.z;
 
     // Nearest first, so the cap keeps the people who matter.
     const live = [];
     for (const c of cars) {
       if (!c.active || c.fade <= 0) continue;
-      const dx = c.x - camPos.x, dz = c.z - camPos.z;
+      const dx = c.x - ox, dz = c.z - oz;
       c.dist = Math.sqrt(dx * dx + dz * dz);
       live.push(c);
     }

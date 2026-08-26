@@ -80,6 +80,7 @@ export function createNet(opts = {}) {
       roster();
     } else if (m.t === 'left') {
       names.delete(m.id);
+      if (room.dropName) room.dropName(m.id);
       roster();
     } else if (m.t === 'rate' && m.sendHz) {
       sendHz = m.sendHz;

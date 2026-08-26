@@ -285,6 +285,12 @@ async function boot() {
   // toggled. Keying models by car object instead (and pruning with `includes`)
   // never prunes anything, because the objects are never replaced.
   const trafficModels = [];
+  // Visual damage for traffic, one per slot, built on first contact like the
+  // damage state itself. Low detail: a traffic car is seen from further away
+  // and more briefly than the player's, so it gets dents and scuffs but not
+  // the full cavity treatment.
+  const trafficDamage = [];
+  const trafficRespawn = [];
   function syncTrafficModels(night, dt) {
     const list = traffic.cars || [];
     if (!mCar) return;
@@ -302,6 +308,16 @@ async function boot() {
         trafficModels[i] = m;
       }
       if (!m) continue;
+
+      // A recycled slot is a different car. Without this it drives away wearing
+      // the last one's dents.
+      if (trafficRespawn[i] !== undefined && trafficRespawn[i] !== t.respawnId) {
+        trafficRespawn[i] = t.respawnId;
+        if (trafficDamage[i]) trafficDamage[i].reset();
+        if (t.damage) { t.damage.reset(); t.wrecked = false; }
+      }
+      if (trafficDamage[i] && t.damage) trafficDamage[i].update(t.damage.state, dt);
+
       if (!t.active) { m.group.visible = false; continue; }
       m.group.visible = true;
       m.group.position.set(t.x, t.y, t.z);
@@ -893,11 +909,27 @@ async function boot() {
     const hw = (other.spec ? other.spec.track : 1.6) * 0.5;
     const hl = other.halfLen != null ? other.halfLen : 2.2;
     other.damage.impact(severity, lx, lz, hw, hl, closing);
-    // Drained and discarded: spawnPart() builds its geometry from the source
-    // car's own mesh, and traffic models are pooled per slot rather than owned
-    // here. Parts coming off a traffic car are worth doing, but not by passing
-    // a signature that does not exist.
+    // Show it. The damage state was already tracked here and then thrown away,
+    // so traffic took damage nobody could see.
+    npcEvents.length = 0;
     other.damage.drainEvents(npcEvents);
+    const mi = other.id;
+    if (mi != null && trafficModels[mi] && trafficDamage[mi] === undefined && mCarDamage) {
+      try {
+        // detail:'low' alone would switch dents and scuffs OFF, which is the
+        // whole point of building this. Ask for them explicitly and drop only
+        // the cavities, which are the expensive part nobody sees on a car that
+        // is not the player's.
+        trafficDamage[mi] = mCarDamage.createCarDamage(
+          trafficModels[mi], other.spec || {},
+          { detail: 'low', dents: true, scuffs: true, cavities: false });
+        trafficRespawn[mi] = other.respawnId;
+      } catch (err) {
+        console.error('[open road] traffic damage failed:', err);
+        trafficDamage[mi] = null;
+      }
+    }
+    if (trafficDamage[mi] && npcEvents.length) trafficDamage[mi].applyEvents(npcEvents);
     // A badly hurt traffic car stops being traffic and starts being an
     // obstacle: it slows, limps, and if it is wrecked it stays where it is.
     const integ = other.damage.integrity;

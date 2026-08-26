@@ -62,7 +62,9 @@ export const DEFAULT_SPEC = {
   handbrakeTorque: 2600,    // N·m, rear only
 
   maxSteer: 0.62,           // rad at the road wheel, full lock at a standstill
-  steerRate: 3.4,           // rad/s of steering-wheel movement
+  steerMargin: 1.35,        // how far past the tyre's peak the driver may steer
+  escSlipGain: 6.0,         // how hard the stability aid fights body slip
+  steerRate: 5.2,           // rad/s of steering-wheel movement
   dragArea: 0.68,           // Cd * A, m^2
   downforce: 0.22,          // N per (m/s)^2, mild road-car lift compensation
 
@@ -254,7 +256,15 @@ export function createVehicle(opts = {}) {
     // does. Measured at 0.63 g where the tyres were good for over 1.0.
     const PEAK_SLIP = 0.20;                      // rad, where the curve peaks
     const ackermann = spec.wheelbase * spec.gripFront * G / Math.max(25, planarSpeed * planarSpeed);
-    const maxSteerNow = clamp(PEAK_SLIP * 1.15 + ackermann, 0.09, spec.maxSteer);
+    // How far past the tyre's peak the driver is allowed to steer.
+    //
+    // At 1.15 there is exactly enough lock to reach the grip peak and none left
+    // over, which is correct on paper and feels dead: the car understeers into
+    // everything and will not rotate. Too much and it simply spins — at 1.75
+    // every case, ESC included, went to 90 degrees of slip and stopped. This
+    // margin IS the steering feel, and it is per-car: a rally car wants more of
+    // it than a limousine.
+    const maxSteerNow = clamp(PEAK_SLIP * (spec.steerMargin ?? 1.35) + ackermann, 0.12, spec.maxSteer);
     const wanted = clamp(car.input.steer, -1, 1) * maxSteerNow;
     const rate = spec.steerRate * (car.input.steer === 0 ? 1.8 : 1) * dt;
     car.steerAngle += clamp(wanted - car.steerAngle, -rate, rate);
@@ -415,10 +425,27 @@ export function createVehicle(opts = {}) {
     // makes it pull and understeer instead of simply going slower.
     const dmgF = dmg ? (dmg.gripScale[0] + dmg.gripScale[1]) * 0.5 : 1;
     const dmgR = dmg ? (dmg.gripScale[2] + dmg.gripScale[3]) * 0.5 : 1;
+    // Trail-braking: brake and steer together, which loads the front, unloads
+    // the rear and rotates the car. Computed here because the stability aid
+    // below needs to know the driver is asking for it.
+    const steerAmount = Math.min(1, Math.abs(car.input.steer || 0));
+    const trailBrake = brakePedal * steerAmount * smoothstep(6, 16, planarSpeed);
+
     const muF = surfGrip * spec.gripFront * dmgF * loadSens(frontLoad, weight * spec.cgBias);
     let muR = surfGrip * spec.gripRear * dmgR * loadSens(rearLoad, weight * (1 - spec.cgBias));
     // Handbrake breaks the rear away on purpose.
     if (handbrake > 0) muR *= lerp(1, 0.42, handbrake);
+
+    // Brake AND steer together rotates the car.
+    //
+    // This is real: braking loads the front and unloads the rear, and trailing
+    // the brake into a corner is how you make a car turn in. The model already
+    // transfers the weight, but the effect was too subtle to use deliberately,
+    // so it is given teeth — hold the brake and some lock and the back comes
+    // round. It scales with BOTH inputs, so it never fires when you are simply
+    // braking in a straight line, and it fades out below walking pace where it
+    // would only make the car feel broken at a junction.
+    if (trailBrake > 0) muR *= lerp(1, 0.66, trailBrake);
 
     let Fy_front = tyreCurve(-frontSlip, 9.2, 1.45, muF * frontLoad);
     let Fy_rear = tyreCurve(-rearSlip, 9.6, 1.42, muR * rearLoad);
@@ -444,11 +471,36 @@ export function createVehicle(opts = {}) {
     // to be catching. Clamping to mu*g/v is the standard ESC reference model and
     // is the difference between an aid and an accomplice.
     const Izz = spec.mass * (spec.wheelbase * spec.wheelbase + spec.track * spec.track) / 12;
+
+    // Electronic stability, and it may ONLY ever oppose.
+    //
+    // The previous version chased a target yaw rate of mu*g/v. That target
+    // GROWS as the car slows, so once the car began to slide the aid demanded
+    // more yaw, which cost more speed, which raised the target again. Measured:
+    // with ESC ON the car sat at 80 degrees of slip, while with it OFF the same
+    // input gave a tidy 20. The aid was the thing spinning the car.
+    //
+    // A real ESC brakes individual wheels to KILL yaw it does not want. It has
+    // no mechanism for adding any. So this is strictly corrective: it acts on
+    // yaw beyond what the surface can hold, and on body slip past the angle a
+    // driver would call sideways, and it does nothing at all below those.
     let stabilityMoment = 0;
     if (car.aids.stability > 0 && planarSpeed > 4) {
-      const yawCeiling = (surfGrip * spec.gripRear * G) / Math.max(6, Math.abs(vLong));
-      const wantYaw = clamp(-(vLong * car.steerAngle) / spec.wheelbase, -yawCeiling, yawCeiling);
-      stabilityMoment = (wantYaw - car.yawRate) * Izz * 2.8 * car.aids.stability;
+      const yawCeiling = (surfGrip * spec.gripRear * G) / Math.max(7, Math.abs(vLong));
+      const over = Math.abs(car.yawRate) - yawCeiling;
+      if (over > 0) {
+        stabilityMoment -= Math.sign(car.yawRate) * over * Izz * 3.4 * car.aids.stability;
+      }
+      const slipAng = Math.atan2(vLat, Math.max(1, Math.abs(vLong)));
+      const overSlip = Math.abs(slipAng) - 0.13;
+      if (overSlip > 0) {
+        stabilityMoment -= Math.sign(slipAng) * overSlip * Izz * (spec.escSlipGain ?? 7.5) * car.aids.stability;
+      }
+      // Trail-braking is a deliberate request for the back end, so the aid
+      // stands down while the driver is asking for it. Without this the ESC
+      // fights the one manoeuvre it is most obvious the player wants, and the
+      // car simply refuses to rotate however it is driven.
+      stabilityMoment *= 1 - 0.85 * clamp(trailBrake * 1.6, 0, 1);
     }
 
     // ---- Integrate the planar body --------------------------------------
@@ -481,10 +533,16 @@ export function createVehicle(opts = {}) {
     // made full right lock steer the car left.
     const yawMoment = -(Fy_front * hb - Fy_rear * hb) + stabilityMoment;
     car.yawRate += (yawMoment / Izz) * dt;
-    // Light structural damping only. Real yaw damping comes from the rear tyre
-    // building slip angle as the car rotates, which the model now produces on
-    // its own; a large artificial term here would just mask the tyres.
-    car.yawRate *= Math.exp(-0.35 * dt);
+    // Yaw damping rises with how hard the tyres are scrubbing.
+    //
+    // A tyre dragged sideways does not just make a lateral force, it soaks up
+    // rotational energy — which is most of why a real car that steps out
+    // settles instead of carrying on round. With a flat 0.35 there was nothing
+    // arresting a slide once it started, and with the stability aid switched
+    // off the car went to 180 degrees from ordinary steering input and stayed
+    // there. It is still edgy without the aid; it is no longer a coin flip.
+    const scrub = 1 + Math.min(3.4, Math.max(Math.abs(frontSlip), Math.abs(rearSlip)) * 4.2);
+    car.yawRate *= Math.exp(-0.35 * scrub * dt);
     car.yawRate = clamp(car.yawRate, -3.2, 3.2);
     car.yaw += car.yawRate * dt;
 

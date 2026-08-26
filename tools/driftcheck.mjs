@@ -75,9 +75,16 @@ function realWorld() {
   return worldOnce;
 }
 
-function newCar(ground = FLAT, speed = 30, esc = 0.62) {
+function newCar(ground = FLAT, speed = 30, esc = 0) {
   const c = createVehicle({ ground, isPlayer: true });
-  // Everything else is left at the defaults main.js gives a new player.
+  // ESC OFF by default in this harness, because that is what drifting is.
+  //
+  // It used to default to the player's 0.62, which was harmless while the
+  // stability aid barely worked. Now that it is a real one — it holds the car
+  // at about 13 degrees of body slip — asking for a 60 degree drift with it
+  // switched on gets 8.7 degrees, and every scoring test failed. That is the
+  // aid doing its job. Drifting is an aid-off activity, or a trail-braking one,
+  // and the harness has to ask for it the way a player would.
   c.aids.stability = esc;
   c.reset(0, 0, 0);
   c.vz = -speed;                       // facing -Z, so this is forwards
@@ -92,10 +99,21 @@ function newCar(ground = FLAT, speed = 30, esc = 0.62) {
 function driver(target, vTarget) {
   return (t, c) => {
     const a = angleOf(c);
-    c.input.brake = 0;
+    const want = Math.abs(target);
+    // Trail-brake to ROTATE the car when it is well short of the angle asked
+    // for, then come off the brake and hold on the throttle.
+    //
+    // The old version steered alone. That was enough against a car with almost
+    // no yaw damping, where any steering input eventually produced any angle
+    // you liked; against one that settles — and with a stability aid that
+    // actually resists — steering alone tops out around seven degrees no matter
+    // what you ask for, and every angle-dependent test failed. Braking to
+    // initiate is how a driver does it and how this car is built to respond.
+    const short = want > 0.15 && Math.abs(a) < want * 0.75;
+    c.input.brake = short && c.speed > 11 ? 0.6 : 0;
     c.input.handbrake = 0;
-    c.input.throttle = clamp(0.35 + (vTarget - c.speed) * 0.12, 0, 1);
-    c.input.steer = clamp(3 * (a - target) + 0.6 * c.yawRate, -1, 1);
+    c.input.throttle = clamp((short ? 0.25 : 0.45) + (vTarget - c.speed) * 0.12, 0, 1);
+    c.input.steer = clamp(5.5 * (a - target) + 0.5 * c.yawRate, -1, 1);
   };
 }
 

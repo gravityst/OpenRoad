@@ -213,7 +213,7 @@ async function boot() {
   scene.add(props.group);
 
   const particles = await stage(0.90, 'dust and smoke', () =>
-    mParticles ? mParticles.createParticles(scene) : null) ||
+    mParticles ? mParticles.createParticles(scene, { maxBillow: 4200, maxSpark: 900 }) : null) ||
     stub(['emitDust', 'emitSmoke', 'emitSparks', 'addSkid', 'splash', 'setRain', 'update', 'dispose']);
 
   const effects = await stage(0.93, 'post-processing', () =>
@@ -470,6 +470,10 @@ async function boot() {
   // STATE, not a view: the car is parked and the physics is idle while it runs.
   const orbit = { yaw: 0.7, pitch: 0.28, dist: 7.5, dragging: false, px: 0, py: 0 };
   const damageEvents = [];
+  // Repair shops. Progress is deliberately not instant: pulling onto a
+  // forecourt and waiting is a beat, and a car that snaps back to perfect the
+  // moment a trigger fires reads as a cheat rather than as a repair.
+  let repairIn = null, repairT = 0;
   const fxCars = [null];
   let driftState = drift.state;
   let inputOverride = null;
@@ -774,14 +778,30 @@ async function boot() {
         // What makes it read is a rooster tail from the REAR wheels that grows
         // hard when the car is sideways, thrown often enough to be continuous
         // but not so often it fills the frame.
-        const rear = i >= 2 ? 1 : 0.30;
+        // A rooster tail, thrown mostly by the driven rear wheels and hugely
+        // more when the car is sideways. This has been tuned three times: the
+        // first version blinded the player, the correction left barely a wisp.
+        // What it wants is VOLUME behind the car and clear air in front of it,
+        // which is a matter of where it comes from and how fast it falls
+        // behind — not of emitting less.
+        const rear = i >= 2 ? 1 : 0.55;
         skidCooldown[i] -= dt;
         if (skidCooldown[i] <= 0) {
-          const slide = working ? 3.4 : 1;
-          particles.emitDust(wx, car.y - car.spec.rideHeight + 0.05, wz,
-            surf.dust * rear * (0.42 + Math.min(car.speed, 38) * 0.030) * slide,
+          const slide = working ? 4.8 : 1;
+          // Spawn BEHIND the wheel, further back the faster you are going.
+          //
+          // Dust carries no velocity of its own — it hangs where it is made and
+          // the car drives out of it. Made at the wheel it therefore billows
+          // over the car before the car can leave, and the chase camera looks
+          // straight into it: the plume was enormous and you could not see the
+          // thing you were steering. Laying it down a couple of metres back
+          // puts the whole cloud behind the rear bumper, where a rooster tail
+          // belongs, and costs nothing in volume.
+          const back = 1.1 + Math.min(car.speed, 32) * 0.075;
+          particles.emitDust(wx - fx * back, car.y - car.spec.rideHeight + 0.02, wz - fz * back,
+            surf.dust * rear * (0.85 + Math.min(car.speed, 40) * 0.060) * slide,
             surf.colour);
-          skidCooldown[i] = 0.022;
+          skidCooldown[i] = 0.013;
         }
       } else if (working && car.speed > 4) {
         particles.emitSmoke(wx, car.y - car.spec.rideHeight + 0.05, wz, car.slipping * 2.4);
@@ -1001,6 +1021,7 @@ async function boot() {
   window.__OPENROAD = {
     build: BUILD, world, ground, car, controls, scene, renderer, camera,
     traffic, settings, failures,
+    garages: world.garages,
     layers: { terrain, roads, city, props, particles, effects, sky, traffic, hud, menus, audio, touch,
               collision, debris, damageFx, drift, models, get carDamage() { return carDamage; } },
     /** Wreck the car on demand, for looking at damage without crashing first. */

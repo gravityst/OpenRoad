@@ -83,9 +83,14 @@ const LINK_WINDOW = 1.25;      // s of straight running a chain survives
 // the surface (see SURFACE.hold) because 70 degrees on gravel is a drift and
 // 70 degrees on tarmac is a passenger looking at the scenery through the
 // windscreen he came in through.
-const SPIN_ANGLE = 1.05;       // rad, 60 deg on dry asphalt
-const SPIN_YAW = 2.4;          // rad/s, with the car already well past sideways
-const SPIN_YAW_ANGLE = 0.85;   // rad, 49 deg — the angle that qualifies the above
+// Raised from 60 to 80 degrees once the car could actually hold a slide.
+// These were set against physics where the only two outcomes were "gripping"
+// and "spinning", so 60 was a sensible line. With scrub-dependent yaw damping
+// the car now sits at 40-63 degrees on gravel under power and comes back from
+// it — calling that a spin forfeited every legitimate rally drift in the game.
+const SPIN_ANGLE = 1.40;       // rad, 80 deg on dry asphalt
+const SPIN_YAW = 2.8;          // rad/s, with the car already well past sideways
+const SPIN_YAW_ANGLE = 1.15;   // rad, 66 deg — the angle that qualifies the above
 const SPIN_HOLD = 0.10;        // s, so one noisy frame cannot end a chain
 
 // --- scoring --------------------------------------------------------------

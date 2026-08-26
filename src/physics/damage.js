@@ -52,9 +52,9 @@ const WHEELS = 4;
 // reverse. This table is the whole reason a crash feels specific rather than
 // generic.
 const ZONE_TO_SYSTEM = {
-  front: { radiator: 1.00, engine: 0.55, steering: 0.30, gearbox: 0.15 },
-  fl:    { radiator: 0.55, engine: 0.30, steering: 0.55, gearbox: 0.10 },
-  fr:    { radiator: 0.55, engine: 0.30, steering: 0.55, gearbox: 0.10 },
+  front: { radiator: 0.72, engine: 0.45, steering: 0.30, gearbox: 0.15 },
+  fl:    { radiator: 0.40, engine: 0.24, steering: 0.55, gearbox: 0.10 },
+  fr:    { radiator: 0.40, engine: 0.24, steering: 0.55, gearbox: 0.10 },
   left:  { steering: 0.20, gearbox: 0.10, engine: 0.08 },
   right: { steering: 0.20, gearbox: 0.10, engine: 0.08 },
   rl:    { gearbox: 0.35, exhaust: 0.60, engine: 0.10 },
@@ -87,6 +87,7 @@ export function createDamage(spec = {}) {
 
     // --- thermal ---------------------------------------------------------
     coolant: 1,       // leaks away once the radiator is holed
+    cookedFor: 0,     // seconds spent over the ignition threshold
     temp: 0.35,       // 0 = cold, 1 = boiling
     onFire: 0,        // 0..1, spreads once alight
     burntFor: 0,
@@ -285,18 +286,31 @@ export function createDamage(spec = {}) {
     // top of it is a bonus, not the mechanism. Overheating is now strictly a
     // CONSEQUENCE of losing coolant, which is the only thing that can take the
     // cooling capacity below what the engine produces.
-    const heatIn = 0.10 + load * 0.30;                 // max 0.40 at full load
+    const heatIn = 0.06 + load * 0.34;                 // max 0.40 at full load
     const fan = 0.62;                                  // alone, already beats it
     const ram = Math.min(speed, 60) * 0.016;
-    const heatOut = (fan + ram) * (0.10 + 0.90 * d.coolant) * (0.35 + 0.65 * d.temp);
-    d.temp = clamp(d.temp + (heatIn - heatOut) * dt * 0.6, 0.18, 1.4);
+    // Plus what a hot block sheds to the air on its own, which needs no coolant
+    // at all. Without it a holed radiator sat pinned at maximum temperature
+    // forever, even parked with the engine idling — so "let it cool down" was
+    // not a thing the player could do, and that is the obvious response to a
+    // temperature gauge in the red.
+    const radiate = 0.16 * Math.max(0, d.temp - 0.18);
+    const heatOut = (fan + ram) * (0.10 + 0.90 * d.coolant) * (0.35 + 0.65 * d.temp) + radiate;
+    d.temp = clamp(d.temp + (heatIn - heatOut) * dt * 0.6, 0.15, 1.4);
 
     if (d.temp > 0.86 && d.onFire <= 0) {
       // Cooking, not yet alight: this is the smoke stage.
       d.engine = clamp(d.engine - (d.temp - 0.86) * 0.09 * dt, 0, 1);
     }
-    const ignitable = d.temp > 1.0 || (d.engine < 0.15 && d.temp > 0.8);
-    if (ignitable && d.onFire <= 0) {
+    // Fire needs the engine to be cooking for a WHILE, not to touch a threshold
+    // for an instant. Igniting the moment temp crossed a line meant one hard
+    // nose-on could put the car ablaze almost immediately, with no window in
+    // which the temperature gauge and the smoke were a warning rather than an
+    // epitaph. Twelve seconds over the line is long enough to notice, back off,
+    // and go looking for a garage.
+    const cooking = d.temp > 1.12 || (d.engine < 0.12 && d.temp > 0.95);
+    d.cookedFor = cooking ? (d.cookedFor || 0) + dt : Math.max(0, (d.cookedFor || 0) - dt * 1.5);
+    if (d.cookedFor > 12 && d.onFire <= 0) {
       d.onFire = 0.05;
       emit('fire-start');
     }
@@ -355,8 +369,15 @@ export function createDamage(spec = {}) {
     out.steerPull = clamp(pull, -1.4, 1.4);
     out.dragAdd = drag;
 
-    out.smoke = clamp(
-      Math.max((d.temp - 0.72) * 2.4, (1 - d.engine) * 0.55, d.onFire * 1.4), 0, 1);
+    // Smoke begins at 0.60, well below the 0.86 where the engine starts cooking
+    // and the 1.0 where it lights. That gap is the whole point: a plume in the
+    // mirror is the warning, and a warning that arrives with the fire is not
+    // one. Losing coolant also smokes on its own — steam off a hot block.
+    out.smoke = clamp(Math.max(
+      (d.temp - 0.60) * 2.6,
+      (1 - d.coolant) * 0.45,
+      (1 - d.engine) * 0.70,
+      d.onFire * 1.5), 0, 1);
     out.fire = d.onFire;
     out.sparks = clamp(
       (d.blown[0] || d.blown[1] || d.blown[2] || d.blown[3]) ? 0.5 : 0, 0, 1);
@@ -392,7 +413,7 @@ export function createDamage(spec = {}) {
     for (const g of GLASS) d.glass[g] = 0;
     for (const l of LIGHTS) d.light[l] = 0;
     for (const a of DETACHABLE) d.attached[a] = true;
-    d.coolant = 1; d.temp = 0.35; d.onFire = 0; d.burntFor = 0;
+    d.coolant = 1; d.temp = 0.35; d.onFire = 0; d.burntFor = 0; d.cookedFor = 0;
     d.totalImpacts = 0; d.worstImpact = 0;
     d.events.length = 0;
     recompute();

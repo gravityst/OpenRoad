@@ -755,11 +755,14 @@ export function createDamageFx(scene, opts = {}) {
     // first pass ran at 27 and four burning cars held 386 live puffs, three
     // quarters of the pool, with nothing left for the glass and tyre bursts that
     // arrive during the crash that set them alight in the first place.
-    const rate = smoke * (5 + 7 * smoke) * (0.70 + 0.40 * wWhite + 0.45 * wBlack);
+    // 12 puffs a second at full was a wisp, not a plume — an overheating engine
+    // is meant to be the warning you get BEFORE the fire, and you cannot warn
+    // someone with something they do not notice.
+    const rate = smoke * (26 + 44 * smoke) * (0.70 + 0.40 * wWhite + 0.45 * wBlack);
     slot.smokeDebt += rate * dt;
     let n = slot.smokeDebt | 0;
     slot.smokeDebt -= n;
-    if (n > 8) n = 8;
+    if (n > 22) n = 22;
     if (n <= 0) return;
 
     // Interpolate the whole character in one pass: grey -> white as the coolant
@@ -806,10 +809,15 @@ export function createDamageFx(scene, opts = {}) {
     if (fire <= 0.01) return;
     const rnd = Math.random;
 
-    slot.fireDebt += fire * (12 + 34 * fire) * dt;
+    // Real flame reads as a MASS, not as shapes. At 46 tongues a second with a
+    // half-second life there were only about twenty alive at once, each up to a
+    // metre and a half across — so you saw the individual billboards as orange
+    // triangles. Four times as many, a third the size, and shorter-lived is the
+    // same total light with none of the geometry showing.
+    slot.fireDebt += fire * (60 + 130 * fire) * dt;
     let n = slot.fireDebt | 0;
     slot.fireDebt -= n;
-    if (n > 12) n = 12;
+    if (n > 34) n = 34;
 
     if (n > 0) {
       const f = lerp(F_SHUT, F_NOSE, fire) * cwb;
@@ -833,9 +841,9 @@ export function createDamageFx(scene, opts = {}) {
         GP.x = localX(car, ff, rr);
         GP.z = localZ(car, ff, rr);
         GP.y = y;
-        GP.life = 0.30 + rnd() * 0.34;
-        GP.size0 = 0.20 + fire * 0.34 + rnd() * 0.12;
-        GP.alpha0 = (0.42 + rnd() * 0.34) * (0.45 + 0.55 * fire);
+        GP.life = 0.20 + rnd() * 0.26;
+        GP.size0 = 0.09 + fire * 0.15 + rnd() * 0.07;
+        GP.alpha0 = (0.30 + rnd() * 0.26) * (0.45 + 0.55 * fire);
         // Flames are dragged back over the car at speed, which is why a burning
         // car at 40 m/s streams fire down its own flank instead of upward.
         GP.vx = cvx * 0.55 + (rnd() - 0.5) * 1.2;

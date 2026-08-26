@@ -48,8 +48,8 @@ export function createControls(opts = {}) {
 
   const settings = {
     sensitivity: 1.0,
-    steerSpeed: 5.6,       // rad/s of virtual wheel travel for digital input
-    steerReturn: 9.0,
+    steerSpeed: 9.5,       // rad/s of virtual wheel travel for digital input
+    steerReturn: 12.0,
     deadzone: 0.10,
     triggerDeadzone: 0.18,
   };

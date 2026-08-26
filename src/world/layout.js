@@ -1010,6 +1010,63 @@ function buildLots(world, rnd, ground) {
     world.lots = kept;
   }
 
+  // --- Repair shops -------------------------------------------------------
+  // A wrecked car needs somewhere to go that is not the respawn key. Each shop
+  // is a shed set back from the road with a forecourt in front of it: the
+  // building is solid like any other, and the forecourt is the trigger. They
+  // are placed on the paved network rather than on gravel, because limping a
+  // holed radiator up a rally stage is not a rescue.
+  if (ground) {
+    const GARAGE_NAMES = [
+      'Marrowfield Motor Works', 'Culver & Sons', 'Ashcombe Autos',
+      'Thornhollow Garage', 'Verrand Repairs', 'Kestrel Service',
+    ];
+    const wanted = GARAGE_NAMES.length;
+    for (let attempt = 0; attempt < 6000 && world.garages.length < wanted; attempt++) {
+      const x = (rnd() * 2 - 1) * (world.half - 260);
+      const z = (rnd() * 2 - 1) * (world.half - 260);
+      const near = ground.nearestRoad(x, z, 90, (e) => e.kind === 'rural');
+      if (!near) continue;
+      if (near.dist < 30 || near.dist > 74) continue;
+      if (world.terrain.slope(x, z) > 0.16) continue;          // needs flat ground
+      // Not on top of another shop, and not next to one either.
+      let clash = false;
+      for (const g of world.garages) if (Math.hypot(g.x - x, g.z - z) < 620) { clash = true; break; }
+      if (clash) continue;
+
+      // Lay the shop out FROM THE ROAD, not from the random sample point.
+      //
+      // Offsetting the forecourt a fixed distance toward the road from a point
+      // that was itself 30-74 m away left forecourts stranded up to 55 m out in
+      // a field — you could not drive onto one. Measuring outward from the
+      // carriageway instead puts the apron at a known distance every time.
+      const rot = Math.atan2(near.tx, near.tz);
+      let awX = x - near.x, awZ = z - near.z;
+      const awL = Math.hypot(awX, awZ) || 1;
+      awX /= awL; awZ /= awL;
+      const halfW = (near.edge.width || 9.5) * 0.5;
+      const padX = near.x + awX * (halfW + 7);
+      const padZ = near.z + awZ * (halfW + 7);
+      const shopX = near.x + awX * (halfW + 20);
+      const shopZ = near.z + awZ * (halfW + 20);
+      if (Math.abs(shopX) > world.half - 90 || Math.abs(shopZ) > world.half - 90) continue;
+      if (world.terrain.slope(padX, padZ) > 0.20) continue;
+      if (world.lots.some((l) => Math.hypot(l.x - shopX, l.z - shopZ) < 34)) continue;
+
+      world.lots.push({
+        x: shopX, z: shopZ, y: 0, w: 22, d: 13, rot,
+        kind: 'warehouse', height: 7.5, district: 'garage',
+        seed: (rnd() * 1e9) | 0, garage: true,
+      });
+      world.garages.push({
+        name: GARAGE_NAMES[world.garages.length],
+        x: padX, z: padZ, rot, radius: 16,
+      });
+      // The map wants them labelled.
+      world.villages.push({ name: GARAGE_NAMES[world.garages.length - 1], x: padX, z: padZ });
+    }
+  }
+
   for (const lot of world.lots) lot.y = world.terrain.height(lot.x, lot.z);
 }
 
@@ -1077,7 +1134,7 @@ export function buildWorld(seed = 20260820) {
   const world = {
     seed, half: HALF, terrain,
     nodes: [], edges: [], blocks: [], lots: [], props: [], districts: [], villages: [],
-    circuits: [],
+    circuits: [], garages: [],
   };
 
   // --- The open road ------------------------------------------------------

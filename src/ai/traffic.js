@@ -429,6 +429,11 @@ export function createTraffic(world, ground, opts = {}) {
 
   /** Places `car` at travel station `s` on `e`, already up to speed. */
   function place(car, e, dir, s, vCap) {
+    // A recycled slot is a different car. Damage state is cleared by main.js
+    // when it notices respawnId move; the speed cap is cleared here because
+    // traffic.js is what reads it.
+    car.speedCap = undefined;
+    car.wrecked = false;
     setSlot(car.route[0], e, dir);
     for (let i = 1; i < 4; i++) fillSlot(car.route[i], car.route[i - 1]);
     car.s = clamp(s, 0, car.route[0].len);
@@ -580,6 +585,10 @@ export function createTraffic(world, ground, opts = {}) {
    * most of what separates traffic from a conveyor belt.
    */
   function planSpeed(car) {
+    // A car the player has wrecked limps or stops. Applied here rather than by
+    // writing car.speed from the collision callback, which would undo the
+    // separation the solver had just computed.
+    const cap = car.speedCap;
     const look = clamp(car.speed * 1.9 + 14, 22, 90);
     const n = Math.min(10, Math.max(3, Math.round(look / 9)));
     const step = look / n;
@@ -605,7 +614,8 @@ export function createTraffic(world, ground, opts = {}) {
       const vAllow = Math.sqrt(vHere * vHere + 2 * B_COMF * d);
       if (vAllow < v0) v0 = vAllow;
     }
-    return Math.max(v0, 2.5);
+    const capped = Math.max(v0, 2.5);
+    return cap === undefined ? capped : Math.min(capped, cap);
   }
 
   // Gap to the nearest thing obstacles() found, so the caller can tell "waiting

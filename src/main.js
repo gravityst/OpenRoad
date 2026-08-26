@@ -313,8 +313,15 @@ async function boot() {
       // the last one's dents.
       if (trafficRespawn[i] !== undefined && trafficRespawn[i] !== t.respawnId) {
         trafficRespawn[i] = t.respawnId;
-        if (trafficDamage[i]) trafficDamage[i].reset();
-        if (t.damage) { t.damage.reset(); t.wrecked = false; }
+        // Disposed, not reset. reset() restores the paint but keeps every mesh
+        // the split produced and leaves the full-body scuff overlay visible at
+        // zero alpha, so a recycled slot kept paying for a transparent pass it
+        // no longer needed. The rig is rebuilt lazily if this car is hit too.
+        if (trafficDamage[i]) { trafficDamage[i].dispose(); trafficDamage[i] = undefined; }
+        if (t.damage) t.damage.reset();
+        t.wrecked = false;
+        t.exploded = false;
+        t.speedCap = undefined;
       }
       if (trafficDamage[i] && t.damage) trafficDamage[i].update(t.damage.state, dt);
 
@@ -670,7 +677,11 @@ async function boot() {
           if (ev.type === 'detach' && carModel) {
             // Thrown with the car's own velocity, so a bumper torn off at speed
             // cartwheels down the road instead of dropping straight down.
-            debris.spawnPart(ev.part, carModel.group, car.vx, car.vy || 0, car.vz);
+            // One object, not three loose numbers: the third parameter is the
+            // whole velocity. Passing car.vx bound carVelocity to a Number, so
+            // every component read back as 0 and the bumper dropped straight
+            // down — the exact failure the line above claims to prevent.
+            debris.spawnPart(ev.part, carModel.group, car);
           }
         }
       }
@@ -914,30 +925,66 @@ async function boot() {
     npcEvents.length = 0;
     other.damage.drainEvents(npcEvents);
     const mi = other.id;
+    // Tracked whether or not the renderer exists. Keying this off the visual
+    // rig meant that with the car-damage layer unavailable — which it is
+    // designed to be, layer() returns null rather than throwing — the respawn
+    // reset below never fired for any slot, and every car in the pool
+    // eventually came back from a recycle still carrying the last one's wreck.
+    if (mi != null && trafficRespawn[mi] === undefined) trafficRespawn[mi] = other.respawnId;
+
     if (mi != null && trafficModels[mi] && trafficDamage[mi] === undefined && mCarDamage) {
       try {
-        // detail:'low' alone would switch dents and scuffs OFF, which is the
-        // whole point of building this. Ask for them explicitly and drop only
-        // the cavities, which are the expensive part nobody sees on a car that
-        // is not the player's.
+        // EVERY flag is named explicitly, because detail:'low' is not a
+        // quality hint — it is `wantX = opts.X ?? !low`, so it switches dents,
+        // scuffs AND cavities off unless each is asked for by name. Omitting a
+        // key does not mean "default"; it means off.
+        //
+        // Cavities matter because carving a panel away and opening the hole
+        // behind it are two steps and only the second is optional: without
+        // them a car that sheds its bonnet is carved through to nothing, and
+        // the paint is FrontSide so there is not even a backface to stop the
+        // eye. They are built lazily, only for a car that actually shed a
+        // panel, so sixty untouched traffic cars pay nothing for them.
         trafficDamage[mi] = mCarDamage.createCarDamage(
           trafficModels[mi], other.spec || {},
-          { detail: 'low', dents: true, scuffs: true, cavities: false });
-        trafficRespawn[mi] = other.respawnId;
+          { detail: 'low', dents: true, scuffs: true, cavities: true });
       } catch (err) {
         console.error('[open road] traffic damage failed:', err);
         trafficDamage[mi] = null;
       }
     }
     if (trafficDamage[mi] && npcEvents.length) trafficDamage[mi].applyEvents(npcEvents);
+
+    // A panel that comes off a traffic car should hit the road, not blink out.
+    if (npcEvents.length && debris && trafficModels[mi]) {
+      const tvx = -Math.sin(other.yaw) * other.speed;
+      const tvz = -Math.cos(other.yaw) * other.speed;
+      for (let i = 0; i < npcEvents.length; i++) {
+        const ev = npcEvents[i];
+        if (ev.type === 'detach') {
+          debris.spawnPart(ev.part, trafficModels[mi].group, { x: tvx, y: 0, z: tvz });
+        }
+      }
+    }
+
     // A badly hurt traffic car stops being traffic and starts being an
     // obstacle: it slows, limps, and if it is wrecked it stays where it is.
+    //
+    // Capped rather than assigned. onTrafficHit runs from inside the collision
+    // solver's substep loop, and writing the velocity the solver just computed
+    // undoes the separation that lets the contact resolve — the closing speed
+    // never goes negative, so the next substep fires a second full impulse and
+    // a second impact. A 30 m/s rear-end became six impulses in one frame.
     const integ = other.damage.integrity;
-    if (integ < 0.35) { other.wrecked = true; other.speed = Math.min(other.speed, 2); }
-    else if (integ < 0.7) other.speed = Math.min(other.speed, 8);
-    if (other.damage.state.onFire > 0 || integ < 0.22) {
+    if (integ < 0.35) { other.wrecked = true; other.speedCap = 2; }
+    else if (integ < 0.7) other.speedCap = Math.min(other.speedCap ?? Infinity, 8);
+
+    // Rising edge. This used to be a level test, so once a car was under the
+    // threshold every subsequent substep of every subsequent contact detonated
+    // it again — 135 explosions in 90 frames, measured.
+    if (integ < 0.22 && !other.exploded) {
+      other.exploded = true;
       explode(other.x, other.y + 0.6, other.z, 0.8);
-      other.damage.state.onFire = Math.max(other.damage.state.onFire, 0.5);
     }
   }
 

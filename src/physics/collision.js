@@ -52,7 +52,7 @@ export function createCollision(world, opts = {}) {
   grid.clear();
   const EMPTY = new Int32Array(0);
 
-  const result = { hit: false, severity: 0, nx: 0, nz: 0, x: 0, z: 0 };
+  const result = { hit: false, severity: 0, recovered: false, nx: 0, nz: 0, x: 0, z: 0 };
   // Car corners in body space, filled per call. Reused so resolve() allocates
   // nothing — it runs every physics step.
   const cornerX = new Float64Array(4);
@@ -65,6 +65,11 @@ export function createCollision(world, opts = {}) {
   function resolve(car) {
     result.hit = false;
     result.severity = 0;
+    // `result` is shared and reused, and resolveAll() returns it whenever
+    // nothing was hit. Leaving this latched meant one wedge recovery made every
+    // later frame claim a recovery, so the toast re-fired ~360 times a second
+    // and no other message — fire, coolant, a burst tyre — was ever seen again.
+    result.recovered = false;
 
     const spec = car.spec;
     const hb = spec.wheelbase * 0.5 + 0.55;      // body overhang past the axles

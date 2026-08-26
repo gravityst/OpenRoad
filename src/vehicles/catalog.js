@@ -27,6 +27,93 @@ export const CLASSES = {
 
 export const CARS = [
   {
+    id: 'kaida2', brand: 'Tamura', model: 'Kaida Group R',
+    class: 'offroad', body: 'hatch', cylinders: 4,
+    blurb: 'The homologation one. Anti-lag, a centre diff that hates tarmac, and enough suspension travel to land from a crest without asking permission.',
+    colours: [0xf2f4f6, 0x1746a0, 0xd6212a, 0x1b1e22, 0xf0b323],
+    spec: {
+      mass: 1290, wheelbase: 2.58, track: 1.62, cgHeight: 0.50, cgBias: 0.55,
+      wheelRadius: 0.35, rideHeight: 0.38, drive: DRIVE.AWD,
+      power: 280000, peakRpm: 6200, redline: 7200,
+      gears: [3.42, 2.28, 1.70, 1.34, 1.08, 0.88], finalDrive: 4.10,
+      brakeTorque: 3600, brakeBias: 0.58, handbrakeTorque: 3600,
+      dragArea: 0.94, downforce: 0.20,
+      gripFront: 1.10, gripRear: 1.14,
+      springRate: 25000, damping: 3700, maxSteer: 0.68, steerRate: 4.2,
+      // A rally car is meant to be steered on the throttle, so it gets more
+      // lock past the tyre's peak than anything else here.
+      steerMargin: 1.85, escSlipGain: 3.2,
+    },
+  },
+  {
+    id: 'scout', brand: 'Auroch', model: 'Scout 4x4',
+    class: 'offroad', body: 'suv', cylinders: 6,
+    blurb: 'Live axles, a low range and the aerodynamics of a shed. It will climb anything and corner like none of it.',
+    colours: [0x3f5540, 0xd9d2c2, 0x8a5a2b, 0x1e2226, 0xb8452f],
+    spec: {
+      mass: 2020, wheelbase: 2.62, track: 1.60, cgHeight: 0.82, cgBias: 0.53,
+      wheelRadius: 0.42, rideHeight: 0.52, drive: DRIVE.AWD,
+      power: 172000, peakRpm: 5000, redline: 5600,
+      gears: [4.62, 2.62, 1.62, 1.18, 0.88], finalDrive: 4.30,
+      brakeTorque: 3800, brakeBias: 0.58, handbrakeTorque: 2600,
+      dragArea: 1.45, downforce: 0.02,
+      gripFront: 0.98, gripRear: 1.02,
+      springRate: 24000, damping: 3600, maxSteer: 0.66,
+      steerMargin: 1.25,
+    },
+  },
+  {
+    id: 'ridgeback', brand: 'Norvex', model: 'Ridgeback TRX',
+    class: 'offroad', body: 'pickup', cylinders: 8,
+    blurb: 'A lifted pickup on knobbly tyres with long-travel dampers. Absurd over a crest, hopeless in a hairpin, and worth it.',
+    colours: [0xc8641f, 0x2b2f34, 0xe6e4df, 0x3d5540, 0x8a2f2a],
+    spec: {
+      mass: 2480, wheelbase: 3.28, track: 1.78, cgHeight: 0.80, cgBias: 0.56,
+      wheelRadius: 0.45, rideHeight: 0.55, drive: DRIVE.AWD,
+      power: 335000, peakRpm: 5400, redline: 6000,
+      gears: [3.86, 2.28, 1.52, 1.16, 0.90, 0.72], finalDrive: 3.90,
+      brakeTorque: 4600, brakeBias: 0.60, handbrakeTorque: 2400,
+      dragArea: 1.72, downforce: 0.02,
+      gripFront: 1.00, gripRear: 1.04,
+      springRate: 26000, damping: 3900, maxSteer: 0.62,
+      steerMargin: 1.35,
+    },
+  },
+  {
+    id: 'rs200', brand: 'Verrick', model: 'RS Sport',
+    class: 'sport', body: 'coupe', cylinders: 4,
+    blurb: 'Mid-engined, four-wheel drive and barely civilised. Built to satisfy a rulebook and never quite tamed afterwards.',
+    colours: [0xe8e9eb, 0x1746a0, 0x14161a, 0xd6212a, 0x4b8f3a],
+    spec: {
+      mass: 1180, wheelbase: 2.53, track: 1.63, cgHeight: 0.44, cgBias: 0.44,
+      wheelRadius: 0.33, rideHeight: 0.24, drive: DRIVE.AWD,
+      power: 310000, peakRpm: 7200, redline: 8000,
+      gears: [3.30, 2.16, 1.62, 1.28, 1.04, 0.86], finalDrive: 3.80,
+      brakeTorque: 4400, brakeBias: 0.60, handbrakeTorque: 2800,
+      dragArea: 0.72, downforce: 0.42,
+      gripFront: 1.18, gripRear: 1.22,
+      springRate: 44000, damping: 5400, maxSteer: 0.60, steerRate: 4.2,
+      steerMargin: 1.55,
+    },
+  },
+  {
+    id: 'lupo', brand: 'Salvana', model: 'Lupo GT',
+    class: 'sport', body: 'sports', cylinders: 6,
+    blurb: 'Small, light, rear-drive and utterly uninterested in helping you. The purest thing in the garage.',
+    colours: [0xf5c518, 0x1b1d21, 0xbf2233, 0xe9eef2, 0x2a6f9e],
+    spec: {
+      mass: 1180, wheelbase: 2.45, track: 1.58, cgHeight: 0.43, cgBias: 0.46,
+      wheelRadius: 0.33, rideHeight: 0.20, drive: DRIVE.RWD,
+      power: 235000, peakRpm: 7400, redline: 8200,
+      gears: [3.38, 2.10, 1.56, 1.22, 1.00, 0.82], finalDrive: 3.72,
+      brakeTorque: 4000, brakeBias: 0.61, handbrakeTorque: 2600,
+      dragArea: 0.66, downforce: 0.34,
+      gripFront: 1.14, gripRear: 1.12,
+      springRate: 40000, damping: 5000, maxSteer: 0.62, steerRate: 4.0,
+      steerMargin: 1.60,
+    },
+  },
+  {
     id: 'lark', brand: 'Kestrel', model: 'Lark',
     class: 'city', body: 'hatch', cylinders: 4,
     blurb: 'Cheap, willing and impossible to dislike. Front-drive, so it washes wide when you ask too much — which is most of the time.',
@@ -196,7 +283,12 @@ export const CARS = [
 export const CAR_BY_ID = Object.fromEntries(CARS.map((c) => [c.id, c]));
 
 /** The car a new player starts in. */
-export const STARTER = 'kaze';
+// The starter is a rally car, not a shopping car.
+//
+// It was a city hatch at the top of the list in a world that is now open roads,
+// gravel stages and circuits — the first thing a player drove was the least
+// interesting thing in the garage, on the surface it is worst at.
+export const STARTER = 'kaida2';
 
 /**
  * Everything the physics needs for one car, ready to hand to createVehicle.

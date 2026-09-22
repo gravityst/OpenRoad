@@ -28,6 +28,29 @@
 // the car down, it switches to an explicit airborne state and integrates a
 // proper ballistic arc, then lands and hands control back. That is a state
 // change with a clear entry and exit condition, not an emergent accident.
+//
+// WHY THE CAR USED TO BE HARD TO DRIVE — five faults, all measured, all fixed
+// here, and all of them physics rather than feel:
+//
+//   1. The yaw moment put both axles half a wheelbase from the centre of mass
+//      while the LOADS used the real weight split. A nose-heavy car therefore
+//      needed equal cornering force from a lightly loaded rear axle, so the
+//      rear always ran out first: every car in the garage was oversteer-biased
+//      at the limit, whatever its tyres said. The arms now come from cgBias.
+//   2. Yaw inertia came from a uniform box, which is about half what a real
+//      car carries (engine and axles sit at the ends). The car rotated twice as
+//      eagerly as it should, which is most of "twitchy".
+//   3. Drive force never shared the tyres' friction budget with cornering. A
+//      car sliding sideways at 18 degrees with the wheel straight still got its
+//      full thrust, and was measured accelerating from 81 to 121 km/h in the
+//      slide. Each axle now has one friction circle, shared by everything.
+//   4. A key is full lock or nothing, and full lock was 16 degrees at 81 km/h:
+//      far past the front tyres' peak. Lock now follows what a driver would
+//      actually use at the speed — see STEERING below.
+//   5. A driver lets the wheel go and it straightens itself: caster pulls the
+//      front wheels round to where the car is actually going. A key has no
+//      caster, so a released key held the wheels dead straight in a slide and
+//      the car carried on round. See the countersteer assist below.
 
 import { clamp, lerp, smoothstep } from '../world/noise.js';
 import { createDamage } from './damage.js';
@@ -47,6 +70,7 @@ export const DEFAULT_SPEC = {
   wheelRadius: 0.34,        // m
   rideHeight: 0.28,         // m from contact patch to chassis underside
   drive: DRIVE.RWD,
+  awdFront: 0.42,           // share of drive to the front axle, AWD only
 
   power: 209000,            // W at peak (about 280 hp)
   peakRpm: 6200,
@@ -55,28 +79,137 @@ export const DEFAULT_SPEC = {
   gears: [3.55, 2.05, 1.42, 1.05, 0.84, 0.68],
   finalDrive: 3.46,
   reverseRatio: 3.30,
-  shiftTime: 0.22,          // s of torque interruption
+  // A modern automatic changes gear in a tenth and a half with the drive only
+  // partly interrupted. 0.22 s at 6% torque was a manual driver fumbling the
+  // lever, and it was felt as a stall at every change.
+  shiftTime: 0.15,          // s of reduced torque
 
   brakeTorque: 3400,        // N·m per axle at full pedal
   brakeBias: 0.63,          // fraction to the front
   handbrakeTorque: 2600,    // N·m, rear only
 
   maxSteer: 0.62,           // rad at the road wheel, full lock at a standstill
-  steerMargin: 1.15,        // how far past the tyre's peak the driver may steer
-  escSlipGain: 6.0,         // how hard the stability aid fights body slip
-  steerRate: 3.4,           // rad/s of steering-wheel movement
+  steerRate: 3.4,           // rad/s the road wheels can be turned
   dragArea: 0.68,           // Cd * A, m^2
   downforce: 0.22,          // N per (m/s)^2, mild road-car lift compensation
 
   gripFront: 1.06,          // peak tyre friction, dry asphalt
   gripRear: 1.08,
+  // Izz = mass * a * b * yawIndex, where a and b are the axle distances from
+  // the centre of mass. Road cars measure 0.85-1.05; a uniform box is ~0.45.
+  yawIndex: 0.92,
   springRate: 34000,        // N/m per corner
   damping: 4200,            // N·s/m per corner
 };
 
-/** Simplified Pacejka: peak near 0.16 rad of slip, gentle fall-off after. */
+// ---- tyres -----------------------------------------------------------------
+// Simplified Pacejka, D * sin(C * atan(B * slip)). B is the stiffness and sets
+// where the peak falls. It was 9.2, which peaks at 11.5 degrees of slip — a
+// soft, sidewall-heavy tyre — and made every other number in this file larger
+// than a real car's: 16 degrees of lock at 80 km/h, 7 degrees of body slip in
+// an ordinary fast corner. 12 puts the peak at 8.9 degrees and the cornering
+// stiffness at 17 per radian of load, which is a road tyre. D (the peak) is
+// unchanged, so the car corners no harder than it did — it just gets there
+// with the wheels and the body pointing where a real one would.
+const TYRE_BF = 12.0, TYRE_CF = 1.45;
+const TYRE_BR = 12.5, TYRE_CR = 1.42;
+/** Slip angle (rad) at which the tyre makes `frac` of its peak force. */
+const slipFor = (B, C, frac) => Math.tan(Math.asin(frac) / C) / B;
+const PEAK_F = slipFor(TYRE_BF, TYRE_CF, 1);   // 0.155 rad, 8.9 deg
+const PEAK_R = slipFor(TYRE_BR, TYRE_CR, 1);   // 0.160 rad, 9.2 deg
+
 function tyreCurve(slip, B, C, D) {
   return D * Math.sin(C * Math.atan(B * slip));
+}
+
+// ---- steering ---------------------------------------------------------------
+// STEERING. The road-wheel angle a key asks for is the angle a competent
+// driver would actually use at this speed to corner at the limit, and never
+// more: the geometric angle for the tightest radius the tyres can hold, plus
+// the slip the front tyres need to make LOCK_GRIP of their peak.
+//
+// That is 36 degrees parking, 9 at 80 km/h and 7.6 at 120 on the starter car —
+// the angles a real driver reaches at the limit, where the old fixed allowance
+// of 1.15x the peak slip gave 16 at 81 km/h. Everything past the front tyre's
+// peak is pure understeer and scrub (measured last time: MORE lock gave a
+// WIDER line), and on a key it is worse than useless because every tap
+// delivered all of it.
+// An analogue stick or a phone wheel scales the same range, so full deflection
+// means the limit and half means half; they have the whole range to work in.
+const LOCK_GRIP = 0.97;
+const LOCK_SLIP = slipFor(TYRE_BF, TYRE_CF, LOCK_GRIP);   // 0.108 rad, 6.2 deg
+const MIN_LOCK = 0.07;                                    // rad; never less than 4 deg
+
+// COUNTERSTEER ASSIST. When the rear axle's slip passes CS_ON the front wheels
+// start following the direction the front axle is actually travelling, and by
+// CS_FULL they follow it entirely. That is what caster does to a real steering
+// wheel held lightly — it spins into the slide on its own — and it is why a
+// real car that steps out comes back when the driver relaxes. The driver's own
+// input is added on top, so a slide can still be steered. Keyed to the REAR
+// slip, not body slip: at walking pace the body slips 10+ degrees in any tight
+// turn with the tyres not sliding at all.
+// Measured, the rear axle works at 5-6 degrees when the car is cornering at
+// its limit, so the assist stays out of the way of a fast corner and only
+// takes over once the tail is genuinely past its peak.
+const CS_ON = 0.10;        // rad, 5.7 deg — just past a car cornering at the limit
+const CS_FULL = 0.19;      // rad, 10.9 deg — past the rear tyre's 9.2 degree peak
+
+// ELECTRONIC STABILITY. See the long note in step().
+// Tuned by sweeping the brief's step test (80 and 120 km/h, cruise, full
+// throttle and lift-off) across the whole garage: weaker gains let a lift-off
+// at 120 reach 8 degrees of slip; a tighter slip threshold trims the turn-in
+// a driver needs, because at 120 km/h heading and body slip are the same
+// degrees — the car cannot turn its path any faster than the tyres allow.
+const ESC_YAW_GAIN = 8.0;          // 1/s on unwanted yaw rate
+const ESC_YAW_DEADBAND = 0.05;     // rad/s of unwanted yaw ignored outright...
+const ESC_YAW_SLACK = 0.2;         // ...plus this share of what was asked for
+const ESC_SLIP_ON = 0.095;         // rad of rear slip before the slip term acts
+const ESC_SLIP_GAIN = 40;          // 1/s^2 per rad past it
+const ESC_CUT = 0.85;              // throttle removed at full intervention
+
+// ---- ground -----------------------------------------------------------------
+// OFF-ROAD DRAG, as a fraction of weight per m/s. Rolling resistance on grass
+// is only about six times asphalt's, which on its own leaves a 280 hp car doing
+// 250 km/h across a field — measured, and the reason the roads did not matter.
+// What actually stops a car in a field is the ground's unevenness: every bump
+// is a damper stroke, damper energy per metre rises with speed, so the loss is
+// a force proportional to speed. Tuned so the starter car tops out at roughly
+// half its road speed on grass, which is about what a driver would dare.
+// Gravel and dirt ROADS are graded; they cost a little, not a lot.
+const ROUGH_DRAG = {
+  asphalt: 0, concrete: 0, sidewalk: 0.0004,
+  gravel: 0.0012, dirt: 0.0022, rock: 0.0080,
+  grass: 0.0082, sand: 0.0120,
+};
+
+/**
+ * The driving aids a player's settings give the car.
+ *
+ * One function, used by main.js for the player and by every harness that
+ * wants "the car people actually drive", so the two cannot drift apart —
+ * which they had: the vehicle's own defaults, main.js's applyAssists and the
+ * drift harness each carried their own copy of these numbers.
+ *
+ * Switching stability off relaxes traction control to a sport setting rather
+ * than leaving it at full strength. That is what the button does on a real car,
+ * and it is the difference between "ESC off" meaning a car you can drift and a
+ * car whose rear tyres are still being starved of torque by a second nanny —
+ * measured, a handbrake slide held for ten seconds by the same driver ends at
+ * 13 km/h with TC at full strength and at 92 km/h with it relaxed. Turning TC
+ * off by name still means off.
+ */
+export function aidsFor(s = {}) {
+  const esc = s.esc !== false;
+  return {
+    abs: s.abs === false ? 0 : 0.95,
+    tc: s.tc === false ? 0 : esc ? 0.85 : 0.35,
+    stability: esc ? 0.8 : 0,
+    // Not a setting. Speed-sensitive lock only leaves room to countersteer a
+    // slide because the lock is measured from where the car is going once it
+    // slides; without this a slide at speed cannot be caught by anyone.
+    countersteer: 1,
+    autoGear: true,
+  };
 }
 
 export function createVehicle(opts = {}) {
@@ -125,21 +258,38 @@ export function createVehicle(opts = {}) {
     ],
 
     steerAngle: 0,           // current road-wheel angle, rad, + = right
+    steerLock: spec.maxSteer,// the lock available at this speed, rad
     input: { throttle: 0, brake: 0, steer: 0, handbrake: 0 },
-    // Defaults match what main.js applies for a new player, so the headless
-    // harnesses measure the car people actually drive.
-    aids: { abs: 0.95, tc: 0.55, stability: 0.62, autoGear: true },
+    // Defaults are what main.js applies for a new player (aidsFor of the
+    // default settings), so the headless harnesses measure the car people
+    // actually drive.
+    //   countersteer: 0..1, how fully the front wheels follow a slide
+    aids: aidsFor(),
 
     // Live steering dial, 0.5..2.5, 1 = stock. Scales how fast the wheel moves
-    // and how far past the tyre's peak the driver may steer, which between them
-    // are what "sensitivity" actually means from the seat.
+    // and how far toward (and past) the front tyres' peak a full input goes,
+    // which between them are what "sensitivity" actually means from the seat.
     feel: { steer: 1 },
 
     // readouts
     speed: 0,                // m/s along the ground
     lonG: 0, latG: 0,
+    // The acceleration the suspension has caught up with. Weight moves through
+    // springs and dampers, not instantly; fed straight from lonG, a driver
+    // flicking between brake and throttle made the axle loads flip at 120 Hz.
+    loadG: 0, loadLatG: 0,
     surface: 'asphalt',
     slipping: 0,             // 0..1, how far past the grip limit the tyres are
+    bodySlip: 0,             // rad, velocity against heading at the centre of mass
+    rearSlip: 0,             // rad, the rear axle's slip angle
+    esc: 0,                  // 0..1, how hard the stability aid is working
+    tcCut: 0,                // 0..1, drive the traction control is holding back
+    assist: 0,               // 0..1, how much the countersteer assist is steering
+    offroad: 0,              // 0..1, share of the wheels on unmade ground
+    // Per-axle force budget, newtons: what each axle could give (cap) and what
+    // it is giving along (x) and across (y) its own heading. For diagnosis —
+    // "why won't it turn" is almost always answered by one of these six.
+    axles: { capF: 0, capR: 0, fxF: 0, fyF: 0, fxR: 0, fyR: 0 },
     odometer: 0,
     time: 0,
   };
@@ -147,6 +297,9 @@ export function createVehicle(opts = {}) {
   const gsample = {};
   const wheelG = [{}, {}, {}, {}];
   const wheelSurf = ['asphalt', 'asphalt', 'asphalt', 'asphalt'];
+  const offs = [[0, 0], [0, 0], [0, 0], [0, 0]];
+  const axleOut = { x: 0, y: 0 };
+  let hbHold = 0;            // s the stability aid stays stood down after the handbrake
 
   function forwardX() { return -Math.sin(car.yaw); }
   function forwardZ() { return -Math.cos(car.yaw); }
@@ -160,6 +313,9 @@ export function createVehicle(opts = {}) {
     car.gear = 1; car.rpm = spec.idleRpm; car.shiftTimer = 0; car.wheelSpin = 0;
     car.airborne = false; car.airTime = 0;
     car.steerAngle = 0;
+    car.esc = 0; car.tcCut = 0; car.assist = 0;
+    car.lonG = 0; car.latG = 0; car.loadG = 0; car.loadLatG = 0;
+    hbHold = 0;
     if (damage && opts.repairOnReset !== false) damage.reset();
     const g = ground.sample(x, z, gsample);
     car.groundY = g.y;
@@ -170,32 +326,35 @@ export function createVehicle(opts = {}) {
     car.speed = 0;
   }
 
-  /** Engine torque (N·m) at the crank for a given rpm and throttle. */
+  /** Throttle torque (N·m) at the crank. Never negative except at the limiter. */
   function engineTorque(rpm, throttle) {
     const r = clamp(rpm, spec.idleRpm, spec.redline);
+    const peak = spec.power / (spec.peakRpm * 2 * Math.PI / 60);
 
     // An electric motor is not a small engine — it makes peak torque from a
     // standstill and then holds constant power. Running one through the
     // combustion curve below gives it a torque hole at zero rpm, which is the
     // exact opposite of what makes an EV feel quick.
     if (spec.cylinders === 0) {
-      const peak = spec.power / (spec.peakRpm * 2 * Math.PI / 60);
       const flat = r <= spec.peakRpm ? 1 : spec.peakRpm / r;   // constant power above base
       let t = peak * flat * throttle;
       if (r >= spec.redline - 200) t *= 0.1;
-      t -= (1 - throttle) * peak * 0.09;                       // regenerative braking
       return t;
     }
     // Torque peaks below the power peak and tails off toward the limiter, which
     // is what makes a gearbox worth having.
     const n = r / spec.peakRpm;
     const shape = clamp(1.12 - 0.42 * (n - 0.85) * (n - 0.85) * 3.2, 0.25, 1.12);
-    const peakTorque = spec.power / (spec.peakRpm * 2 * Math.PI / 60);
-    let t = peakTorque * shape * throttle;
+    let t = peak * shape * throttle;
     if (r >= spec.redline - 60) t *= 0.15;                 // limiter
-    // Engine braking when off throttle.
-    t -= (1 - throttle) * peakTorque * 0.11 * (r / spec.peakRpm);
     return t;
+  }
+
+  /** Engine braking (N·m at the crank, a magnitude) with the throttle closed. */
+  function engineDrag(rpm, throttle) {
+    const peak = spec.power / (spec.peakRpm * 2 * Math.PI / 60);
+    if (spec.cylinders === 0) return (1 - throttle) * peak * 0.09;   // regeneration
+    return (1 - throttle) * peak * 0.11 * (clamp(rpm, spec.idleRpm, spec.redline) / spec.peakRpm);
   }
 
   function gearRatio() {
@@ -206,18 +365,22 @@ export function createVehicle(opts = {}) {
   function autoShift(dt, vLong) {
     if (!car.aids.autoGear) return;
     if (car.shiftTimer > 0) return;
+    // Selecting a direction at rest is a lever, not a gear change: nothing is
+    // turning, so there is no torque to interrupt. Charging a full shift for it
+    // was a quarter of a second of nothing every time the player pulled away.
+    const atRest = car.speed < 0.6;
 
     // Reverse is a deliberate selection, never something the box does for you
     // while the player is asking for forward. This was a real bug last time:
     // the car would silently select reverse and pull away backwards.
     if (car.gear === 0) {
       if (car.input.throttle > 0.05 && vLong > -0.2 && car.input.brake < 0.05) {
-        car.gear = 1; car.shiftTimer = spec.shiftTime;
+        car.gear = 1; car.shiftTimer = atRest ? 0 : spec.shiftTime;
       }
       return;
     }
     if (vLong < 0.4 && car.input.brake > 0.55 && car.speed < 1.2) {
-      car.gear = 0; car.shiftTimer = spec.shiftTime;
+      car.gear = 0; car.shiftTimer = atRest ? 0 : spec.shiftTime;
       return;
     }
 
@@ -234,6 +397,33 @@ export function createVehicle(opts = {}) {
   }
 
   /**
+   * One axle's friction circle. Everything the axle is asked for — cornering,
+   * drive, brakes — comes out of the same `cap` newtons, and asking for more
+   * than that spins or locks the wheels, at which point the tyre is sliding and
+   * its force points mostly along the direction it is being dragged. That last
+   * part is what makes a spinning rear end step out and a locked front refuse
+   * to steer. Writes into axleOut; allocates nothing.
+   */
+  function frictionCircle(fx, fy, cap) {
+    const need = Math.hypot(fx, fy);
+    if (need <= cap || cap <= 0) { axleOut.x = fx; axleOut.y = fy; return 0; }
+    // Proportional share while the wheels are still rolling...
+    const k = cap / need;
+    let x = fx * k, y = fy * k;
+    // ...blending to a sliding tyre as the longitudinal demand alone passes
+    // the limit: most of the force along the slip, very little across it.
+    const over = Math.abs(fx) / cap;
+    const s = smoothstep(0.85, 1.25, over);
+    if (s > 0) {
+      const sx = Math.sign(fx) * cap * 0.96;
+      const sy = Math.sign(fy) * Math.min(Math.abs(fy), cap * 0.28);
+      x = lerp(x, sx, s); y = lerp(y, sy, s);
+    }
+    axleOut.x = x; axleOut.y = y;
+    return s;
+  }
+
+  /**
    * One physics step. `dt` should be a fixed 1/120 s; the caller is responsible
    * for accumulating real time into fixed steps.
    */
@@ -245,49 +435,28 @@ export function createVehicle(opts = {}) {
     const rx = rightX(), rz = rightZ();
 
     // Body-frame velocity.
-    let vLong = car.vx * fx + car.vz * fz;
-    let vLat = car.vx * rx + car.vz * rz;
+    const vLong = car.vx * fx + car.vz * fz;
+    const vLat = car.vx * rx + car.vz * rz;
     const planarSpeed = Math.hypot(car.vx, car.vz);
     car.speed = planarSpeed;
+    const dir = vLong < 0 ? -1 : 1;
 
-    // ---- Steering -------------------------------------------------------
-    // Lock is limited to roughly what the front tyres can actually use: the
-    // Ackermann angle for a corner at the limit, plus the slip angle where the
-    // tyre makes peak force, plus a little margin for deliberate oversteer.
-    //
-    // A plain 1/(1+v^2) falloff looks reasonable and is quietly wrong — it caps
-    // lock BELOW the peak-slip angle at speed, so the front tyres can never
-    // reach their own maximum and the car understeers no matter what the driver
-    // does. Measured at 0.63 g where the tyres were good for over 1.0.
-    const PEAK_SLIP = 0.20;                      // rad, where the curve peaks
-    const ackermann = spec.wheelbase * spec.gripFront * G / Math.max(25, planarSpeed * planarSpeed);
-    // How far past the tyre's peak the driver is allowed to steer.
-    //
-    // At 1.15 there is exactly enough lock to reach the grip peak and none left
-    // over, which is correct on paper and feels dead: the car understeers into
-    // everything and will not rotate. Too much and it simply spins — at 1.75
-    // every case, ESC included, went to 90 degrees of slip and stopped. This
-    // margin IS the steering feel, and it is per-car: a rally car wants more of
-    // it than a limousine.
-    const feel = clamp(car.feel?.steer ?? 1, 0.5, 2.5);
-    const margin = (spec.steerMargin ?? 1.15) * feel;
-    const maxSteerNow = clamp(PEAK_SLIP * margin + ackermann, 0.09, spec.maxSteer);
-    const wanted = clamp(car.input.steer, -1, 1) * maxSteerNow;
-    const rate = spec.steerRate * feel * (car.input.steer === 0 ? 1.8 : 1) * dt;
-    car.steerAngle += clamp(wanted - car.steerAngle, -rate, rate);
-    car.steerAngle = clamp(car.steerAngle, -maxSteerNow, maxSteerNow);
-    // A blown tyre or bent steering pulls the ROAD WHEELS, not the input. The
-    // player keeps full authority and simply has to hold against it, which is
-    // the difference between a damaged car and a car that fights you.
-    const pulled = dmg ? car.steerAngle + dmg.steerPull * 0.055 * Math.min(1, planarSpeed / 14) : car.steerAngle;
+    // Axle positions from the centre of mass. The static load split and the
+    // moment arms MUST come from the same number; see fault 1 at the top.
+    const L = spec.wheelbase;
+    const aF = L * (1 - spec.cgBias);           // centre of mass to front axle
+    const bR = L * spec.cgBias;                 // centre of mass to rear axle
+    const Izz = spec.mass * aF * bR * (spec.yawIndex ?? 0.92);
 
     // ---- Sample the ground under each wheel ------------------------------
-    const hw = spec.track / 2, hb = spec.wheelbase / 2;
-    const offs = [[-hw, hb], [hw, hb], [-hw, -hb], [hw, -hb]];   // x=right, z=forward
-    let sumY = 0, sumNx = 0, sumNy = 0, sumNz = 0, gripSum = 0, roughSum = 0, rollSum = 0;
-    let pitchFromGround = 0, rollFromGround = 0;
+    const hw = spec.track / 2;
+    offs[0][0] = -hw; offs[0][1] = aF;
+    offs[1][0] = hw; offs[1][1] = aF;
+    offs[2][0] = -hw; offs[2][1] = -bR;
+    offs[3][0] = hw; offs[3][1] = -bR;
+    let sumY = 0, sumNx = 0, sumNy = 0, sumNz = 0, gripSum = 0, roughSum = 0, rollSum = 0, dragSum = 0;
     for (let i = 0; i < 4; i++) {
-      const [ox, oz] = offs[i];
+      const ox = offs[i][0], oz = offs[i][1];
       const wxp = car.x + rx * ox + fx * oz;
       const wzp = car.z + rz * ox + fz * oz;
       const g = ground.sample(wxp, wzp, wheelG[i]);
@@ -295,6 +464,7 @@ export function createVehicle(opts = {}) {
       w.surface = g.surface; w.grip = g.grip;
       sumY += g.y; sumNx += g.nx; sumNy += g.ny; sumNz += g.nz;
       gripSum += g.grip; roughSum += g.roughness; rollSum += g.rolling;
+      dragSum += ROUGH_DRAG[g.surface] ?? 0.006;
     }
     const planeY = sumY / 4;
     let nx = sumNx / 4, ny = sumNy / 4, nz = sumNz / 4;
@@ -306,13 +476,60 @@ export function createVehicle(opts = {}) {
     const surfGrip = gripSum / 4;
     const rough = roughSum / 4;
     const rollRes = rollSum / 4;
+    const roughDrag = dragSum / 4;
     car.surface = car.wheels[2].surface;
+    car.offroad = clamp(roughDrag / ROUGH_DRAG.grass, 0, 1);
 
     // Ground slope resolved into the body frame: this is what makes hills pull.
-    pitchFromGround = Math.asin(clamp(-(nx * fx + nz * fz), -1, 1));
-    rollFromGround = Math.asin(clamp(-(nx * rx + nz * rz), -1, 1));
+    const pitchFromGround = Math.asin(clamp(-(nx * fx + nz * fz), -1, 1));
+    const rollFromGround = Math.asin(clamp(-(nx * rx + nz * rz), -1, 1));
     const slopeAccelLong = -G * (nx * fx + nz * fz);
     const slopeAccelLat = -G * (nx * rx + nz * rz);
+
+    // ---- Slip, measured before anything acts on it -----------------------
+    // Below walking pace the slip angle is a ratio of two tiny numbers, and an
+    // explicit step at 120 Hz overshoots it into a buzz. A 2 m/s floor keeps
+    // the lateral dynamics inside what the integrator can resolve.
+    const absLong = Math.max(2.0, Math.abs(vLong));
+    // Direction each axle is actually travelling, relative to the nose,
+    // right-positive. A textbook bicycle model with a LEFT-positive axis writes
+    //     af = atan((vy + a*r)/vx) - d        ar = atan((vy - b*r)/vx)
+    // Mirroring vy, r and d to right-positive flips the sign of the yaw-rate
+    // term in BOTH, which is easy to miss and expensive to get wrong: with the
+    // signs the other way the rear tyre pushes the car further into the turn
+    // instead of resisting it, the model loses its natural yaw damping, and the
+    // car spins on the spot at any real steering angle.
+    const frontTravel = Math.atan2(vLat - car.yawRate * aF, absLong);
+    const rearSlip = Math.atan2(vLat + car.yawRate * bR, absLong);
+    car.rearSlip = rearSlip;
+    car.bodySlip = planarSpeed > 1.5 ? Math.atan2(vLat, Math.abs(vLong)) : 0;
+
+    // ---- Steering -------------------------------------------------------
+    const feel = clamp(car.feel?.steer ?? 1, 0.5, 2.5);
+    const muFront = surfGrip * spec.gripFront;
+    const v2 = Math.max(1, planarSpeed * planarSpeed);
+    // See STEERING at the top. atan(L / R) for the tightest radius this surface
+    // can hold at this speed, plus the slip the front tyre needs to deliver it.
+    const lock = clamp(Math.atan(L * muFront * G / v2) + LOCK_SLIP * feel, MIN_LOCK, spec.maxSteer);
+    car.steerLock = lock;
+    const command = clamp(car.input.steer, -1, 1);
+    const commandAngle = command * lock;
+
+    // See COUNTERSTEER ASSIST at the top. Faded in with speed, because below
+    // ~20 km/h nothing slides that a driver would want caught.
+    const csAid = car.aids.countersteer ?? 0;
+    const assist = csAid > 0 && !car.airborne
+      ? csAid * smoothstep(CS_ON, CS_FULL, Math.abs(rearSlip)) * smoothstep(4, 9, planarSpeed) * (vLong > 0 ? 1 : 0)
+      : 0;
+    car.assist = assist;
+    const wanted = clamp(commandAngle + assist * frontTravel, -spec.maxSteer, spec.maxSteer);
+    // The wheels move at a finite rate, faster on the way back to centre.
+    const rate = spec.steerRate * feel * (command === 0 ? 1.8 : 1) * dt;
+    car.steerAngle += clamp(wanted - car.steerAngle, -rate, rate);
+    // A blown tyre or bent steering pulls the ROAD WHEELS, not the input. The
+    // player keeps full authority and simply has to hold against it, which is
+    // the difference between a damaged car and a car that fights you.
+    const delta = dmg ? car.steerAngle + dmg.steerPull * 0.055 * Math.min(1, planarSpeed / 14) : car.steerAngle;
 
     // ---- Airborne handling ----------------------------------------------
     const targetY = planeY + spec.rideHeight;
@@ -341,6 +558,7 @@ export function createVehicle(opts = {}) {
       car.vz -= car.vz * drag * dt;
       car.x += car.vx * dt; car.z += car.vz * dt;
       car.yaw += car.yawRate * dt;
+      car.esc = 0; car.tcCut = 0;
 
       if (car.y <= targetY) {
         car.y = targetY;
@@ -350,7 +568,7 @@ export function createVehicle(opts = {}) {
         car.heightVel = clamp(car.vy, -9, 0);
         car.vy = 0;
       }
-      finishTelemetry(dt, vLong, vLat, 0, 0);
+      finishTelemetry(dt, vLong, vLat, 0, 0, 0);
       return;
     }
 
@@ -358,160 +576,192 @@ export function createVehicle(opts = {}) {
     const weight = spec.mass * G;
     const aeroLoad = spec.downforce * planarSpeed * planarSpeed;
     const totalLoad = weight + aeroLoad;
-    const lonTransfer = clamp(car.lonG * spec.mass * spec.cgHeight / spec.wheelbase, -weight * 0.42, weight * 0.42);
-    const latTransfer = clamp(car.latG * spec.mass * spec.cgHeight / spec.track, -weight * 0.42, weight * 0.42);
+    // m * a * h / L, and lonG is in g, so a is lonG * G. The G used to be
+    // missing, which made every weight shift a tenth of its real size: 0.9 g of
+    // braking moved 240 N onto the front of a 1400 kg car instead of 2400.
+    // That is why trail braking "was too subtle to use deliberately" and was
+    // faked with a flat cut to rear grip — the real mechanism was switched off.
+    const lonTransfer = clamp(car.loadG * G * spec.mass * spec.cgHeight / L, -weight * 0.42, weight * 0.42);
+    const latTransfer = clamp(car.loadLatG * G * spec.mass * spec.cgHeight / spec.track, -weight * 0.42, weight * 0.42);
 
     const frontStatic = totalLoad * spec.cgBias;
     const rearStatic = totalLoad * (1 - spec.cgBias);
-    const loads = [
-      Math.max(60, (frontStatic - lonTransfer) * 0.5 - latTransfer * 0.5),  // FL
-      Math.max(60, (frontStatic - lonTransfer) * 0.5 + latTransfer * 0.5),  // FR
-      Math.max(60, (rearStatic + lonTransfer) * 0.5 - latTransfer * 0.5),   // RL
-      Math.max(60, (rearStatic + lonTransfer) * 0.5 + latTransfer * 0.5),   // RR
-    ];
+    const frontLoad = Math.max(120, frontStatic - lonTransfer);
+    const rearLoad = Math.max(120, rearStatic + lonTransfer);
 
-    // ---- Drivetrain ------------------------------------------------------
-    autoShift(dt, vLong);
-    const ratio = gearRatio() * spec.finalDrive;
-    const wheelOmega = vLong / spec.wheelRadius;
-    car.rpm = clamp(Math.abs(wheelOmega * ratio) * 60 / (2 * Math.PI), spec.idleRpm, spec.redline);
-
-    let throttle = clamp(car.input.throttle, 0, 1);
-    if (car.shiftTimer > 0) throttle *= 0.06;
-    const crankTorque = engineTorque(car.rpm, throttle);
-    let driveForce = (crankTorque * ratio) / spec.wheelRadius;
-    if (dmg) driveForce *= dmg.powerScale;
-
-    // Traction control: cut drive when the driven tyres are asking for more
-    // than the surface can give.
-    const drivenLoad = spec.drive === DRIVE.FWD ? loads[0] + loads[1]
-      : spec.drive === DRIVE.RWD ? loads[2] + loads[3] : totalLoad;
-    const gripLimit = drivenLoad * surfGrip * (spec.drive === DRIVE.FWD ? spec.gripFront : spec.gripRear);
-    if (car.aids.tc > 0 && Math.abs(driveForce) > gripLimit) {
-      const excess = Math.abs(driveForce) / gripLimit;
-      driveForce /= lerp(1, excess, car.aids.tc);
-    }
-
-    // ---- Brakes ----------------------------------------------------------
-    const brakePedal = clamp(car.input.brake, 0, 1);
-    let brakeForce = (brakePedal * spec.brakeTorque * 2) / spec.wheelRadius;
-    if (dmg) brakeForce *= dmg.brakeScale;
-    const handbrake = clamp(car.input.handbrake, 0, 1);
-
-    // ABS: bound total braking to what the tyres can hold, with a little
-    // margin. A proportional limit, not an integrating servo — an integrator
-    // here winds to full cut in three frames and strangles the brakes, which is
-    // exactly what went wrong on the last project.
-    const brakeGripLimit = totalLoad * surfGrip * (spec.gripFront * spec.brakeBias + spec.gripRear * (1 - spec.brakeBias));
-    if (car.aids.abs > 0 && brakeForce > brakeGripLimit && planarSpeed > 2) {
-      brakeForce = lerp(brakeForce, brakeGripLimit * 1.02, car.aids.abs);
-    }
-
-    // ---- Tyre forces -----------------------------------------------------
-    const absLong = Math.max(1.2, Math.abs(vLong));
-    // Slip angles, mirrored into this file's right-positive lateral axis.
-    //
-    // A textbook bicycle model with a LEFT-positive axis writes
-    //     af = atan((vy + a*r)/vx) - d        ar = atan((vy - b*r)/vx)
-    // Mirroring vy, r and d to right-positive flips the sign of the yaw-rate
-    // term in BOTH, which is easy to miss and expensive to get wrong: with the
-    // signs the other way the rear tyre pushes the car further into the turn
-    // instead of resisting it, the model loses its natural yaw damping, and the
-    // car spins on the spot at any real steering angle.
-    const frontSlip = Math.atan2(vLat - car.yawRate * hb, absLong) - pulled * Math.sign(vLong || 1);
-    const rearSlip = Math.atan2(vLat + car.yawRate * hb, absLong);
-
-    const frontLoad = loads[0] + loads[1];
-    const rearLoad = loads[2] + loads[3];
     // Load sensitivity: a tyre carrying twice the load gives less than twice
     // the grip, which is what makes weight transfer matter.
     const loadSens = (Fz, Fz0) => Math.pow(Fz0 / Math.max(200, Fz), 0.12);
-
     // Per-corner damage is averaged onto its own axle. A single blown front
     // tyre therefore halves front grip rather than the car's, which is what
     // makes it pull and understeer instead of simply going slower.
     const dmgF = dmg ? (dmg.gripScale[0] + dmg.gripScale[1]) * 0.5 : 1;
     const dmgR = dmg ? (dmg.gripScale[2] + dmg.gripScale[3]) * 0.5 : 1;
-    const muF = surfGrip * spec.gripFront * dmgF * loadSens(frontLoad, weight * spec.cgBias);
-    let muR = surfGrip * spec.gripRear * dmgR * loadSens(rearLoad, weight * (1 - spec.cgBias));
-    // Handbrake breaks the rear away on purpose.
-    // Brake and steer together loads the front, unloads the rear and rotates
-    // the car. Computed before the aid below, which has to stand down while the
-    // driver is deliberately asking for it.
-    const steerAmount = Math.min(1, Math.abs(car.input.steer || 0));
-    const trailBrake = brakePedal * steerAmount * smoothstep(6, 16, planarSpeed);
+    const capF = surfGrip * spec.gripFront * dmgF * loadSens(frontLoad, weight * spec.cgBias) * frontLoad;
+    const capR = surfGrip * spec.gripRear * dmgR * loadSens(rearLoad, weight * (1 - spec.cgBias)) * rearLoad;
 
-    if (handbrake > 0) muR *= lerp(1, 0.42, handbrake);
-    if (trailBrake > 0) muR *= lerp(1, 0.66, trailBrake);
-
-    // Brake AND steer together rotates the car.
+    // ---- Electronic stability -------------------------------------------
     //
-    // This is real: braking loads the front and unloads the rear, and trailing
-    // the brake into a corner is how you make a car turn in. The model already
-    // transfers the weight, but the effect was too subtle to use deliberately,
-    // so it is given teeth — hold the brake and some lock and the back comes
-    // round. It scales with BOTH inputs, so it never fires when you are simply
-    // braking in a straight line, and it fades out below walking pace where it
-    // would only make the car feel broken at a junction.
-
-    let Fy_front = tyreCurve(-frontSlip, 9.2, 1.45, muF * frontLoad);
-    let Fy_rear = tyreCurve(-rearSlip, 9.6, 1.42, muR * rearLoad);
-
-    // Longitudinal demand shares the same friction budget as cornering.
-    const netLong = driveForce - Math.sign(vLong || 1) * brakeForce
-                    - Math.sign(vLong || 1) * handbrake * spec.handbrakeTorque / spec.wheelRadius;
-    const longCapacity = totalLoad * surfGrip * 1.25;
-    const usedLong = clamp(Math.abs(netLong) / longCapacity, 0, 1);
-    const ellipse = Math.sqrt(Math.max(0, 1 - usedLong * usedLong * 0.82));
-    Fy_front *= ellipse;
-    Fy_rear *= ellipse;
-
-    // Electronic stability.
+    // A real ESC brakes individual wheels to KILL yaw the driver did not ask
+    // for, and cuts the engine while it does. Three rules, each learned:
     //
-    // NOTE THE SIGN: lateral is right-positive and yaw grows counter-clockwise,
-    // so steering right (positive) asks for NEGATIVE yaw rate.
+    // It may only ever oppose. The first version chased a target of mu*g/v,
+    // which grows as the car slows: once the car began to slide the aid
+    // demanded more yaw, which cost speed, which raised the target again. With
+    // ESC on the car sat at 80 degrees of slip. The aid was spinning it.
     //
-    // The reference yaw rate is the kinematic one CLAMPED BY GRIP. The kinematic
-    // figure alone is what a car would rotate at if tyres were infinite, and at
-    // 90 km/h it asks for about five times what the road can deliver — so the
-    // controller spends the whole corner adding yaw into a slide it is supposed
-    // to be catching. Clamping to mu*g/v is the standard ESC reference model and
-    // is the difference between an aid and an accomplice.
-    const Izz = spec.mass * (spec.wheelbase * spec.wheelbase + spec.track * spec.track) / 12;
-
-    // Electronic stability, and it may ONLY ever oppose.
+    // It must know what the driver ASKED for. The second version only acted
+    // on yaw beyond what the surface could hold, which meant it did nothing at
+    // all to a car sliding at 0.4 rad/s with the wheel dead straight — that is
+    // within the limit, and it is also not what anybody wants. The reference
+    // here is the yaw the COMMANDED steering would give (the countersteer
+    // assist is excluded, since that is the car correcting, not the driver
+    // asking), capped at what the surface can deliver.
     //
-    // The previous version chased a target yaw rate of mu*g/v. That target
-    // GROWS as the car slows, so once the car began to slide the aid demanded
-    // more yaw, which cost more speed, which raised the target again. Measured:
-    // with ESC ON the car sat at 80 degrees of slip, while with it OFF the same
-    // input gave a tidy 20. The aid was the thing spinning the car.
-    //
-    // A real ESC brakes individual wheels to KILL yaw it does not want. It has
-    // no mechanism for adding any. So this is strictly corrective: it acts on
-    // yaw beyond what the surface can hold, and on body slip past the angle a
-    // driver would call sideways, and it does nothing at all below those.
-    let stabilityMoment = 0;
-    if (car.aids.stability > 0 && planarSpeed > 4) {
-      const yawCeiling = (surfGrip * spec.gripRear * G) / Math.max(7, Math.abs(vLong));
-      const over = Math.abs(car.yawRate) - yawCeiling;
-      if (over > 0) {
-        stabilityMoment -= Math.sign(car.yawRate) * over * Izz * 3.4 * car.aids.stability;
-      }
-      const slipAng = Math.atan2(vLat, Math.max(1, Math.abs(vLong)));
-      const overSlip = Math.abs(slipAng) - 0.13;
-      if (overSlip > 0) {
-        stabilityMoment -= Math.sign(slipAng) * overSlip * Izz * (spec.escSlipGain ?? 7.5) * car.aids.stability;
-      }
-      stabilityMoment *= 1 - 0.85 * clamp(trailBrake * 1.6, 0, 1);
+    // It is not free. Braking one front wheel is what makes the moment, so the
+    // same brake force is charged to the front axle below and the car slows as
+    // it is caught — which is how a real one feels, and why it can never add
+    // energy. The moment is capped at what one side's brakes can make.
+    let escMoment = 0, escBrake = 0, escLevel = 0;
+    const handbrake = clamp(car.input.handbrake, 0, 1);
+    // The handbrake is the one thing a player uses precisely to make the tail
+    // come round; the aid stands aside while it is held and for a moment after,
+    // then catches whatever the player has made.
+    hbHold = handbrake > 0.1 ? 0.45 : Math.max(0, hbHold - dt);
+    const stab = (car.aids.stability || 0) * (1 - smoothstep(0, 0.45, hbHold));
+    if (stab > 0 && planarSpeed > 4) {
+      const vRef = Math.max(6, Math.abs(vLong));
+      const yawMax = (surfGrip * Math.min(spec.gripFront, spec.gripRear) * G) / vRef;
+      const rWant = clamp(-vLong * Math.tan(commandAngle) / L, -yawMax, yawMax);
+      const r = car.yawRate;
+      let excess = r * rWant > 0 ? Math.abs(r) - Math.abs(rWant) : Math.abs(r);
+      excess -= ESC_YAW_DEADBAND + ESC_YAW_SLACK * Math.abs(rWant);
+      if (excess > 0) escMoment -= Math.sign(r) * excess * Izz * ESC_YAW_GAIN;
+      // Rear slip past what an ordinary corner uses: turn the nose back toward
+      // the direction of travel.
+      const overSlip = Math.abs(rearSlip) - ESC_SLIP_ON;
+      if (overSlip > 0 && vLong > 0) escMoment -= Math.sign(rearSlip) * overSlip * Izz * ESC_SLIP_GAIN;
+      escMoment *= stab;
+      const mMax = 0.5 * capF * spec.track;          // one front wheel at its limit
+      escMoment = clamp(escMoment, -mMax, mMax);
+      escBrake = Math.abs(escMoment) / (spec.track * 0.5);
+      escLevel = mMax > 0 ? Math.abs(escMoment) / mMax : 0;
     }
+    // Smoothed so the engine cut does not chatter at the edge of the threshold.
+    car.esc += (escLevel - car.esc) * Math.min(1, dt * 18);
+
+    // ---- Drivetrain ------------------------------------------------------
+    autoShift(dt, vLong);
+    const ratio = gearRatio() * spec.finalDrive;
+    let throttle = clamp(car.input.throttle, 0, 1);
+    if (car.shiftTimer > 0) throttle *= 0.35;
+    throttle *= 1 - ESC_CUT * clamp(car.esc * 2, 0, 1);
+
+    // Engine speed. Below the road speed at which the engine would be turning
+    // at its launch rpm in this gear, the clutch (or converter) slips and holds
+    // it there: nobody pulls away with the engine lugging at idle. Driving it
+    // through the torque curve at 850 rpm made every launch a stall — the car
+    // crept at 0.6 g-and-falling until the road speed dragged the engine up to
+    // where it makes torque.
+    const wheelRpm = Math.abs((vLong / spec.wheelRadius) * ratio) * 60 / (2 * Math.PI);
+    let engineRpm = wheelRpm;
+    if (spec.cylinders !== 0 && throttle > 0.02) {
+      const launch = lerp(spec.idleRpm, spec.launchRpm ?? spec.peakRpm * 0.55, clamp(throttle * 1.4, 0, 1));
+      if (engineRpm < launch) engineRpm = launch;
+    }
+    car.rpm = clamp(engineRpm, spec.idleRpm, spec.redline);
+
+    let driveForce = (engineTorque(car.rpm, throttle) * ratio) / spec.wheelRadius;
+    // Engine braking opposes motion, and fades out below walking pace where the
+    // clutch would be open. Computed as signed torque it used to push a car
+    // sitting still in gear gently backwards.
+    const engBrake = (engineDrag(car.rpm, throttle) * Math.abs(ratio) / spec.wheelRadius) *
+      smoothstep(0.5, 2.5, Math.abs(vLong)) * (car.shiftTimer > 0 ? 0.3 : 1);
+    if (dmg) driveForce *= dmg.powerScale;
+
+    const shareF = spec.drive === DRIVE.FWD ? 1 : spec.drive === DRIVE.RWD ? 0 : (spec.awdFront ?? 0.42);
+    let driveF = (driveForce - dir * engBrake) * shareF;
+    let driveR = (driveForce - dir * engBrake) * (1 - shareF);
+
+    // ---- Tyre forces -----------------------------------------------------
+    const frontSlip = frontTravel - delta * dir;
+    const fyF = tyreCurve(-frontSlip, TYRE_BF, TYRE_CF, capF);
+    const fyR = tyreCurve(-rearSlip, TYRE_BR, TYRE_CR, capR);
+
+    // Traction control: hold each driven axle's drive to what its friction
+    // circle has left over after cornering. A key is full throttle or none, so
+    // on a keyboard this is the only thing standing between "accelerate out of
+    // the corner" and "spin in the corner".
+    const tc = car.aids.tc || 0;
+    let tcCut = 0;
+    if (tc > 0) {
+      const leftF = Math.sqrt(Math.max(0, capF * capF - fyF * fyF)) * 0.95;
+      const leftR = Math.sqrt(Math.max(0, capR * capR - fyR * fyR)) * 0.95;
+      if (driveF * dir > leftF) { const n = dir * lerp(Math.abs(driveF), leftF, tc); tcCut = Math.max(tcCut, 1 - Math.abs(n / driveF)); driveF = n; }
+      if (driveR * dir > leftR) { const n = dir * lerp(Math.abs(driveR), leftR, tc); tcCut = Math.max(tcCut, 1 - Math.abs(n / driveR)); driveR = n; }
+    }
+    car.tcCut = tcCut;
+
+    // Brakes. The pedal is split by bias; ABS holds each axle just under the
+    // longitudinal limit, which leaves the tyre some cornering force — the
+    // entire point of ABS is that you can still steer.
+    const brakePedal = clamp(car.input.brake, 0, 1);
+    let brakeForce = (brakePedal * spec.brakeTorque * 2) / spec.wheelRadius;
+    if (dmg) brakeForce *= dmg.brakeScale;
+    let brakeF = brakeForce * spec.brakeBias;
+    let brakeR = brakeForce * (1 - spec.brakeBias);
+    const abs = car.aids.abs || 0;
+    if (abs > 0 && planarSpeed > 2) {
+      brakeF = lerp(brakeF, Math.min(brakeF, capF * 0.9), abs);
+      brakeR = lerp(brakeR, Math.min(brakeR, capR * 0.9), abs);
+    }
+    // The handbrake bypasses ABS on every real car, which is why it locks.
+    const handForce = handbrake * spec.handbrakeTorque / spec.wheelRadius;
+
+    const fxF = driveF - dir * (brakeF + escBrake);
+    const fxR = driveR - dir * (brakeR + handForce);
+
+    const slideF = frictionCircle(fxF, fyF, capF);
+    const FxF = axleOut.x, FyF = axleOut.y;
+    const slideR = frictionCircle(fxR, fyR, capR);
+    const FxR = axleOut.x, FyR = axleOut.y;
+    const ax0 = car.axles;
+    ax0.capF = capF; ax0.capR = capR; ax0.fxF = FxF; ax0.fyF = FyF; ax0.fxR = FxR; ax0.fyR = FyR;
+
+    // The front tyres push along and across THEIR heading, not the body's.
+    const cd = Math.cos(delta), sd = Math.sin(delta);
+    const frontLong = FxF * cd - FyF * sd;
+    const frontLat = FxF * sd + FyF * cd;
 
     // ---- Integrate the planar body --------------------------------------
     const dragForce = 0.5 * 1.225 * (spec.dragArea + (dmg ? dmg.dragAdd : 0)) * planarSpeed * planarSpeed;
-    const rollingForce = rollRes * totalLoad * (1 + rough * 0.6);
+    // Off-road losses scale with the suspension's travel: a lifted 4x4 floats
+    // over ground that shakes a low sports car to pieces.
+    const suspension = clamp(0.30 / spec.rideHeight, 0.6, 1.8) ** 0.7;
+    const rollingForce = rollRes * totalLoad * (1 + rough * 0.6) +
+      spec.mass * G * roughDrag * suspension * planarSpeed;
 
-    const aLong = (netLong - Math.sign(vLong || 1) * (dragForce + rollingForce)) / spec.mass + slopeAccelLong;
-    const aLat = (Fy_front + Fy_rear) / spec.mass + slopeAccelLat;
+    let aLong = (frontLong + FxR - dir * (dragForce + rollingForce)) / spec.mass + slopeAccelLong;
+    const aLat = (frontLat + FyR) / spec.mass + slopeAccelLat;
+
+    // Brakes, rolling resistance and drag can stop the car. They cannot start
+    // it the other way: they are friction, and friction only ever opposes.
+    // Left to integrate, a car held on the brake at rest was pushed gently
+    // backwards by its own brakes, which is energy from nowhere.
+    //
+    // So when this step would carry the car through zero, or it is already at
+    // rest, the question is what would MOVE it — the engine and the hill —
+    // against what HOLDS it — brakes, handbrake, rolling resistance. Asked in
+    // terms of the direction of travel instead, reverse gear pulling away from
+    // a standstill reads as a brake pushing the car backwards, and it was held
+    // there: a tenth of the long-drive harness spent parked in reverse on sand.
+    const vNext = vLong + aLong * dt;
+    if (vNext * vLong < 0 || Math.abs(vLong) < 0.05) {
+      const push = driveForce + spec.mass * slopeAccelLong;
+      const hold = brakeForce + handForce + escBrake + rollingForce;
+      if (Math.abs(push) <= hold) aLong = -vLong / dt;                        // at rest, and staying there
+      else if (vNext * vLong < 0 && push * vNext <= 0) aLong = -vLong / dt;   // stops now, pulls away next step
+    }
 
     // Integrate velocity in the WORLD frame.
     //
@@ -529,25 +779,31 @@ export function createVehicle(opts = {}) {
     car.vx += ax * dt;
     car.vz += az * dt;
 
-    // A RIGHTWARD force on the front axle yaws the car clockwise seen from
-    // above, and yaw grows counter-clockwise here — hence the leading minus.
-    // Textbook bicycle models write `a*Fyf - b*Fyr` because their lateral axis
-    // points LEFT; this one points right, and dropping that distinction is what
-    // made full right lock steer the car left.
-    const yawMoment = -(Fy_front * hb - Fy_rear * hb) + stabilityMoment;
+    // A RIGHTWARD force ahead of the centre of mass yaws the car clockwise seen
+    // from above, and yaw grows counter-clockwise here — hence the minus on the
+    // front term. Textbook bicycle models write `a*Fyf - b*Fyr` because their
+    // lateral axis points LEFT; this one points right, and dropping that
+    // distinction is what once made full right lock steer the car left.
+    const yawMoment = -frontLat * aF + FyR * bR + escMoment;
     car.yawRate += (yawMoment / Izz) * dt;
-    // Yaw damping rises with how hard the tyres are scrubbing. A tyre dragged
-    // sideways soaks up rotational energy, which is most of why a real car that
-    // steps out settles instead of carrying on round. With a flat 0.35 nothing
-    // arrests a slide: brake and steer together at 100 km/h and the car goes to
-    // 179 degrees and stays there. This is a stability fix, not a feel knob.
-    const scrub = 1 + Math.min(3.4, Math.max(Math.abs(frontSlip), Math.abs(rearSlip)) * 4.2);
-    car.yawRate *= Math.exp(-0.35 * scrub * dt);
+    // A little extra yaw damping as the tyres scrub. A tyre dragged sideways
+    // soaks up rotational energy through its carcass, which the slip curve
+    // alone does not capture; without any, a car that spins does so like a
+    // top. Dissipative by construction — it can only ever slow the rotation.
+    const scrubAngle = Math.max(Math.abs(frontSlip), Math.abs(rearSlip));
+    car.yawRate *= Math.exp(-(0.25 + Math.min(1.2, scrubAngle * 2.4)) * dt);
     car.yawRate = clamp(car.yawRate, -3.2, 3.2);
     car.yaw += car.yawRate * dt;
 
     car.lonG = aLong / G;
+    // ~60 ms to settle onto the springs: a road car's pitch mode, first order.
+    const kLoad = 1 - Math.exp(-dt / 0.06);
     car.latG = aLat / G;
+    // A car held on the brakes is not accelerating, whatever the stop clamp
+    // above had to do to keep it that way — and lonG feeds the load transfer.
+    if (Math.abs(car.lonG) > 3) car.lonG = Math.sign(car.lonG) * 3;
+    car.loadG += (car.lonG - car.loadG) * kLoad;
+    car.loadLatG += (car.latG - car.loadLatG) * kLoad;
 
     // A stationary car should stay put rather than creep down a slope.
     if (planarSpeed < 0.35 && throttle < 0.05) { car.vx *= 0.72; car.vz *= 0.72; }
@@ -577,28 +833,33 @@ export function createVehicle(opts = {}) {
     car.pitch = lerp(car.pitch, pitchFromGround + dive, k);
     car.roll = lerp(car.roll, rollFromGround + lean, k);
 
+    finishTelemetry(dt, vLong, vLat, frontSlip, rearSlip, Math.max(slideF, slideR));
+
     if (damage) {
       for (let i = 0; i < 4; i++) wheelSurf[i] = car.wheels[i].surface;
       damage.abrade(dt, wheelSurf, planarSpeed, car.slipping);
       damage.step(dt, clamp(Math.abs(throttle) * 0.7 + Math.abs(car.lonG) * 0.5, 0, 1.4), planarSpeed);
     }
 
-    finishTelemetry(dt, vLong, vLat, frontSlip, rearSlip);
-
     // Per-wheel readouts for the renderer and HUD.
     for (let i = 0; i < 4; i++) {
       const w = car.wheels[i];
-      w.load = loads[i];
+      const axleLoad = i < 2 ? frontLoad : rearLoad;
+      w.load = Math.max(60, axleLoad * 0.5 + (i % 2 === 0 ? -0.5 : 0.5) * latTransfer);
       w.slipAngle = i < 2 ? frontSlip : rearSlip;
+      w.slip = i < 2 ? slideF : slideR;
       w.comp = clamp((car.height - spec.rideHeight) * -1 + (i < 2 ? dive : -dive), -0.12, 0.12);
       w.spin += (vLong / spec.wheelRadius) * dt;
     }
   }
 
-  function finishTelemetry(dt, vLong, vLat, frontSlip, rearSlip) {
+  function finishTelemetry(dt, vLong, vLat, frontSlip, rearSlip, wheelSlide) {
     car.speed = Math.hypot(car.vx, car.vz);
-    const slipMag = Math.max(Math.abs(frontSlip), Math.abs(rearSlip));
-    car.slipping = clamp((slipMag - 0.14) / 0.30, 0, 1);
+    // Smoke, skids and tyre squeal. Starts just short of the tyre's peak, and
+    // a spinning or locked axle counts as much as a sideways one — a burnout
+    // should smoke.
+    const slipMag = Math.max(Math.abs(frontSlip) / PEAK_F, Math.abs(rearSlip) / PEAK_R);
+    car.slipping = Math.max(clamp((slipMag - 0.85) / 1.6, 0, 1), clamp(wheelSlide, 0, 1) * 0.8);
     car.vLong = vLong; car.vLat = vLat;
   }
 

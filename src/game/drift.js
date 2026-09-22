@@ -33,8 +33,7 @@
 //
 //   * an ANGLE dead band — the twitch itself. Measured by walking the angle up
 //     and back down, it latches on at 12.3 deg and releases at 6.7 deg: 5.6 deg
-//     of margin, against a car that is settled at 8.0 deg while merely being
-//     driven fast.
+//     of margin, against a car that carries 3-6 deg cornering at its limit.
 //   * a TIME hold at each edge (0.12 s in, 0.30 s out) — noise inside the band.
 //     A square wave straddling the band at 120 Hz for fifty seconds changes the
 //     state zero times.
@@ -44,25 +43,26 @@
 // Over one 8.7 s corner slide, tools/driftcheck.mjs counts exactly two
 // transitions of `active`: in, and out.
 //
-// ELECTRONIC STABILITY MATTERS, AND NOT THE WAY YOU WOULD EXPECT
+// WHAT THE CAR DOES, SO THE NUMBERS BELOW MAKE SENSE
 //
-// The obvious assumption is that drifting wants ESC off. Measured against this
-// car, the opposite is true, and it is worth knowing before tuning anything
-// here. Handed the same countersteering driver asking for 34 degrees at
-// 100 km/h, `settings.esc` ON (aids.stability 0.62) settles at a steady 27 deg
-// and holds it for as long as there is road; the identical driver with ESC OFF
-// is through 112 deg inside two seconds and never comes back.
+// Measured against physics/vehicle.js, with the aids a player actually gets
+// (vehicle.aidsFor):
 //
-// The reason is in vehicle.js: steering lock is capped near the front tyre's
-// own peak slip angle, about 16 deg at speed, and 16 deg of opposite lock is
-// not enough to catch a slide of 30. The ESC yaw controller is what catches it.
-// Turning ESC off does not unlock drifting here, it removes the only thing
-// holding the slide together — an open-loop input at a fixed steering angle
-// spins the car at every throttle setting that was tried.
+//   * Cornering flat out without drifting — 1.02 g for thirty seconds at
+//     111 km/h — the car carries 3-6 degrees. ENTER_ANGLE sits at twice that,
+//     so nothing short of a real slide can trip it.
+//   * ESC ON catches slides: that is its job, and it is what makes the car safe
+//     for somebody who has never driven. It stands aside for the handbrake, so
+//     a flick still swings the tail — and then catches it.
+//   * ESC OFF (which also relaxes traction control to a sport setting, as the
+//     button does on a real car) drifts. A driver asking for 34 degrees at
+//     108 km/h holds 30-34 for eight seconds; asking for 75 goes past the 60
+//     degree line and spins; the same 60-degree request on gravel carries 65.
 //
-// None of that changes the scoring, which is identical either way. It is
-// recorded here because the natural instinct — "make the drift scorer assume
-// ESC is off" — would be tuned against a car that only ever spins.
+// The countersteer assist in vehicle.js is what lets anyone hold a slide at
+// all once steering lock falls with speed: past the rear tyre's peak the front
+// wheels follow the direction of travel, so the driver's input steers the
+// slide rather than fighting a wheel that has run out of lock.
 
 import { clamp, smoothstep } from '../world/noise.js';
 
@@ -83,14 +83,18 @@ const LINK_WINDOW = 1.25;      // s of straight running a chain survives
 // the surface (see SURFACE.hold) because 70 degrees on gravel is a drift and
 // 70 degrees on tarmac is a passenger looking at the scenery through the
 // windscreen he came in through.
-// Raised from 60 to 80 degrees once the car could actually hold a slide.
-// These were set against physics where the only two outcomes were "gripping"
-// and "spinning", so 60 was a sensible line. With scrub-dependent yaw damping
-// the car now sits at 40-63 degrees on gravel under power and comes back from
-// it — calling that a spin forfeited every legitimate rally drift in the game.
-const SPIN_ANGLE = 1.40;       // rad, 80 deg on dry asphalt
-const SPIN_YAW = 2.8;          // rad/s, with the car already well past sideways
-const SPIN_YAW_ANGLE = 1.15;   // rad, 66 deg — the angle that qualifies the above
+// 60 degrees on tarmac, and SURFACE.hold widens it: 78 on gravel, 80 on grass.
+//
+// It was briefly raised to 80 on tarmac because the car was measured holding
+// 40-63 degrees ON GRAVEL — but gravel's line was already 78, so none of those
+// slides was ever being called a spin. The raise moved tarmac's line instead,
+// where it made a car 74 degrees sideways on asphalt a scoring drift, and it
+// is what broke the three checks in tools/driftcheck.mjs that pin the surface
+// lines. A competition drift on tarmac lives at 30-50 degrees; past 60 the car
+// is being carried by its momentum, not steered.
+const SPIN_ANGLE = 1.05;       // rad, 60 deg on dry asphalt
+const SPIN_YAW = 2.4;          // rad/s, with the car already well past sideways
+const SPIN_YAW_ANGLE = 0.85;   // rad, 49 deg — the angle that qualifies the above
 const SPIN_HOLD = 0.10;        // s, so one noisy frame cannot end a chain
 
 // --- scoring --------------------------------------------------------------
@@ -116,7 +120,7 @@ const NEAR_CLOSE = 0.4;        // m
 
 // `pay` scales points per degree; `hold` scales the angle at which the car is
 // declared spun. Loose surfaces let the back end sit further out for longer —
-// asked for 60 degrees, the same driver settles at 36 on asphalt and 50 on
+// asked for 60 degrees, the same driver carries 30 on asphalt and 65 on
 // gravel — which is exactly why they are forgiving to drift on and worth less
 // per degree when you are.
 //

@@ -23,12 +23,11 @@
 // them drifts. So the drivers below close the loop the way a person does:
 // countersteer proportional to the angle being carried, damped by yaw rate,
 // aiming at a target angle. Changing that one target is the only difference
-// between the driver who goes straight and the driver who is sideways for a
-// mile — which also makes the ESC comparison in check 4 exact, since both sides
-// of it are driven by the same controller.
+// between the driver who goes straight, the driver who is sideways for a mile,
+// and the driver in check 4 who asks for more than the car can hold and spins.
 import { buildWorld } from '../src/world/layout.js';
 import { createGround } from '../src/world/ground.js';
-import { createVehicle } from '../src/physics/vehicle.js';
+import { createVehicle, aidsFor } from '../src/physics/vehicle.js';
 import { createDrift } from '../src/game/drift.js';
 
 const dt = 1 / 120;
@@ -75,17 +74,17 @@ function realWorld() {
   return worldOnce;
 }
 
-function newCar(ground = FLAT, speed = 30, esc = 0) {
+function newCar(ground = FLAT, speed = 30, esc = false) {
   const c = createVehicle({ ground, isPlayer: true });
   // ESC OFF by default in this harness, because that is what drifting is.
   //
-  // It used to default to the player's 0.62, which was harmless while the
-  // stability aid barely worked. Now that it is a real one — it holds the car
-  // at about 13 degrees of body slip — asking for a 60 degree drift with it
-  // switched on gets 8.7 degrees, and every scoring test failed. That is the
-  // aid doing its job. Drifting is an aid-off activity, or a trail-braking one,
-  // and the harness has to ask for it the way a player would.
-  c.aids.stability = esc;
+  // The aids come from aidsFor(), the same function main.js uses for the
+  // player, so "ESC off" here is exactly the car a player gets by switching it
+  // off in the menu — stability off, traction control relaxed to its sport
+  // setting. This used to set aids.stability alone, which silently left the
+  // harness's "ESC off" car with a full-strength traction control no player
+  // with ESC off would ever have.
+  Object.assign(c.aids, aidsFor({ esc: !!esc }));
   c.reset(0, 0, 0);
   c.vz = -speed;                       // facing -Z, so this is forwards
   return c;
@@ -109,10 +108,25 @@ function driver(target, vTarget) {
     // actually resists — steering alone tops out around seven degrees no matter
     // what you ask for, and every angle-dependent test failed. Braking to
     // initiate is how a driver does it and how this car is built to respond.
-    const short = want > 0.15 && Math.abs(a) < want * 0.75;
-    c.input.brake = short && c.speed > 11 ? 0.6 : 0;
+    //
+    // Off the throttle while braking. This driver used to hold the brake at
+    // 0.6 while its speed term opened the throttle toward full — left foot on
+    // the brake, right foot flat — so on a car where the driven wheels share
+    // one friction budget the rear axle was being pushed, not braked, and
+    // nothing rotated. That combination only worked while the physics cut rear
+    // grip by a flat 34% whenever brake and steer overlapped, which also spun
+    // every player who braked in a corner.
+    //
+    // Only for a DRIFT. Nobody trail-brakes to hold a twelve-degree cornering
+    // attitude; they steer. Braking toward any target over 0.15 rad made the
+    // "carrying slip" driver below stand on the brake for thirty seconds,
+    // because a car that is cornering hard never reaches 9.5 degrees of slip
+    // without stepping into a slide.
+    const short = want > 0.3 && Math.abs(a) < want * 0.75;
+    const rotating = short && c.speed > 11;
+    c.input.brake = rotating ? 0.6 : 0;
     c.input.handbrake = 0;
-    c.input.throttle = clamp((short ? 0.25 : 0.45) + (vTarget - c.speed) * 0.12, 0, 1);
+    c.input.throttle = rotating ? 0 : clamp((short ? 0.25 : 0.45) + (vTarget - c.speed) * 0.12, 0, 1);
     c.input.steer = clamp(5.5 * (a - target) + 0.5 * c.yawRate, -1, 1);
   };
 }
@@ -182,19 +196,28 @@ function rateAt(surfaceName, deg, speed) {
     `30 s of continuous correction: peak angle ${peak.toFixed(2)} deg`);
 }
 {
-  // And a car genuinely carrying slip — a fast road-going cornering attitude,
-  // settled just under the entry threshold. This is the one that catches a
-  // detector whose threshold is too low to mean anything.
+  // And a car genuinely carrying slip — cornering as hard as it will go
+  // without being thrown sideways, for thirty seconds. This is the one that
+  // catches a detector whose threshold is too low to mean anything.
+  //
+  // It used to say "settled just under the entry threshold", which described
+  // a car that sat at 8 degrees of body slip merely being driven fast. With the
+  // axle moment arms and the weight transfer corrected in vehicle.js, a car at
+  // its cornering limit carries 3-6 degrees — a road car's figure — and there
+  // is no steady state between that and a slide. So this now also asserts the
+  // car really was at the limit (mean lateral g), which is what stops it
+  // passing by driving in a straight line.
   const car = newCar(FLAT, 30);
   const drift = createDrift();
-  let everActive = false, peak = 0, mean = 0, n = 0;
+  let everActive = false, peak = 0, mean = 0, n = 0, lat = 0;
   run(car, drift, 30, driver(-0.22, 30), (t, c, s) => {
     if (s.active) everActive = true;
     peak = Math.max(peak, Math.abs(s.angleDeg));
-    if (t > 2) { mean += Math.abs(s.angleDeg); n++; }
+    if (t > 2) { mean += Math.abs(s.angleDeg); lat += Math.abs(c.latG); n++; }
   });
   check('a fast car carrying slip scores nothing',
-    !everActive && drift.state.banked === 0,
+    !everActive && drift.state.banked === 0 && lat / n > 0.85,
+    `${(lat / n).toFixed(2)} g for 30 s at ${(car.speed * 3.6).toFixed(0)} km/h, ` +
     `held ${(mean / n).toFixed(1)} deg (peak ${peak.toFixed(1)}) against a 12.0 deg entry`);
 }
 
@@ -250,6 +273,11 @@ let slide = null;
     const a = e.pts[0], b = e.pts[1];
     const yaw = Math.atan2(-(b.x - a.x), -(b.z - a.z));
     const car = createVehicle({ ground, isPlayer: true });
+    // The SAME drift means the same car: ESC off, as in the slide above. This
+    // one used to take createVehicle's defaults — the player's, ESC on — and
+    // only drifted because the old stability aid stood down whenever the
+    // driver braked and steered together, which is also what spun players.
+    Object.assign(car.aids, aidsFor({ esc: false }));
     car.reset(a.x, a.z, yaw);
     car.vx = -Math.sin(yaw) * 26; car.vz = -Math.cos(yaw) * 26;
     const drift = createDrift({ ground });
@@ -272,28 +300,40 @@ let slide = null;
 // ---------------------------------------------------------------------------
 // 4. A SPIN LOSES THE CHAIN
 // ---------------------------------------------------------------------------
-// The identical driver with ESC switched off. It cannot hold the slide — the
-// countersteer available in vehicle.js runs out — so it spins, and the chain
-// that was building has to go with it.
+// The same driver, asking for 75 degrees on tarmac: more than the car can
+// hold, and past the 60 degree line. It builds a chain on the way in, then goes
+// round, and the chain that was building has to go with it.
+//
+// This used to be "the identical driver with ESC switched off" — the SAME
+// driver and target as check 2, whose car had also been switched to ESC off by
+// default. The two checks were then the same six seconds of simulation, one
+// requiring a sustained slide and the other a spin, so exactly one of them
+// could ever pass. Asking for too much angle is the honest way to spin a car.
 {
-  const car = newCar(FLAT, 30, 0);
+  const car = newCar(FLAT, 30);
   const drift = createDrift();
-  let peak = 0, everChained = false, bankedBefore = 0;
-  run(car, drift, 6, driver(-0.60, 30), (t, c, s) => {
+  let peak = 0, everChained = false, atLoss = null;
+  run(car, drift, 6, driver(-1.30, 30), (t, c, s) => {
     peak = Math.max(peak, Math.abs(s.angleDeg));
-    if (s.combo > 0) everChained = true;
-    bankedBefore = Math.max(bankedBefore, s.banked);
+    if (s.combo > 0 && !atLoss) everChained = true;
+    // Judged at the moment of the spin. The car now comes back from one and
+    // this driver sets off again, so six seconds later there can be a fresh,
+    // perfectly legitimate chain running — which says nothing about whether
+    // the lost one was cleared.
+    if (!atLoss && s.lastResult.kind === 'lost') {
+      atLoss = { reason: s.lastResult.reason, points: s.lastResult.points,
+        combo: s.combo, score: s.score, pending: s.pending, banked: s.banked };
+    }
   });
-  const st = drift.state;
+  const st = atLoss || { reason: '', points: 0, combo: -1, score: -1, pending: -1, banked: -1 };
   check('spinning loses the chain',
-    everChained && st.lastResult.kind === 'lost' && st.lastResult.reason === 'spin' &&
+    everChained && !!atLoss && st.reason === 'spin' &&
     st.combo === 0 && st.score === 0 && st.pending === 0,
-    `ESC off, same driver: reached ${peak.toFixed(0)} deg, ` +
-    `"${st.lastResult.kind}" (${st.lastResult.reason}), ` +
-    `${st.lastResult.points.toFixed(0)} pts forfeited`);
+    `same driver asking for 75 deg: reached ${peak.toFixed(0)} deg, ` +
+    `${atLoss ? `"lost" (${st.reason})` : 'never lost'}, ${st.points.toFixed(0)} pts forfeited`);
   check('a lost chain never reaches the bank',
-    st.banked === 0,
-    `bank still ${st.banked.toFixed(0)} pts after the spin`);
+    !!atLoss && st.banked === 0,
+    `bank ${st.banked.toFixed(0)} pts at the moment of the spin`);
 }
 
 // ---------------------------------------------------------------------------
@@ -323,11 +363,18 @@ let slide = null;
   const hold = driver(-0.60, 22);
   run(car, drift, 3, hold);
   const chained = drift.state.combo > 0;
-  // Anchors out while still sideways: the slide dies below the speed floor.
+  // Brakes hard while still sideways: the slide dies below the speed floor.
+  //
+  // Firmly, not flat. Full pedal with the front wheels countersteered to their
+  // 36 degree stop spins the car — the brake force acts along the wheels, and
+  // with them turned that far it pushes the nose on round — which the scorer
+  // correctly calls a spin, and check 4 covers. The 0.6 this driver already
+  // uses to rotate the car scrubs the speed out of the slide instead, which is
+  // the case this check exists for.
   run(car, drift, 5, (t, c) => {
     hold(t, c);
     c.input.throttle = 0;
-    c.input.brake = 1;
+    c.input.brake = 0.6;
   });
   const st = drift.state;
   check('bogging down mid-slide loses the chain',
@@ -407,17 +454,23 @@ let slide = null;
     `74 deg on tarmac is a spin and pays ${tarSpun.toFixed(0)}`);
 
   // And on the car, not the stub: given the same driver asking for the same
-  // 60 degrees, gravel settles further out than asphalt ever gets. Gravel is
-  // slow to build — it takes about eight seconds — so the average is taken
-  // late, over the last third of a sixteen-second run.
+  // 60 degrees, gravel carries more angle than asphalt ever gets.
+  //
+  // Averaged from 4 s, once the entry is done, over the time the car is still
+  // above the scorer's own 22 km/h floor — below that it is not a drift by this
+  // module's definition. The window used to be the last third of a sixteen
+  // second run because gravel took eight seconds to build; with the weight
+  // transfer in vehicle.js corrected it builds in two, holds 50-80 degrees, and
+  // by ten seconds a rear-drive saloon has scrubbed itself down to walking
+  // pace doing it. A late window was measuring the car after the drift.
   const measure = (ground) => {
     const car = newCar(ground, 24);
     const drift = createDrift();
     let mean = 0, n = 0;
     run(car, drift, 16, driver(-1.05, 24), (t, c, s) => {
-      if (t > 10.5) { mean += Math.abs(s.angleDeg); n++; }
+      if (t > 4 && c.speed > 6) { mean += Math.abs(s.angleDeg); n++; }
     });
-    return mean / n;
+    return n ? mean / n : 0;
   };
   const onTar = measure(FLAT);
   const onGrv = measure(LOOSE);
@@ -456,7 +509,10 @@ let slide = null;
     car: newCar(FLAT, 30), drift: createDrift(), seconds: 18,
     input: (t, c) => (t < 5 ? right(t, c) : t < 6.2 ? straight(t, c) : t < 12 ? left(t, c) : straight(t, c)),
   });
-  runs.push({ car: newCar(FLAT, 30, 0), drift: createDrift(), seconds: 8, input: right });
+  // The spin, the way check 4 makes one: asking for more angle than the car
+  // can hold. This was `right` with ESC off, which with the harness default
+  // also ESC off was just a second copy of a slide that holds.
+  runs.push({ car: newCar(FLAT, 30), drift: createDrift(), seconds: 8, input: driver(-1.30, 24) });
 
   // Then eight over real ground, half of them with ESC off.
   for (let k = 0; k < 8; k++) {
@@ -464,7 +520,7 @@ let slide = null;
     const a = e.pts[0], b = e.pts[1];
     const yaw = Math.atan2(-(b.x - a.x), -(b.z - a.z));
     const car = createVehicle({ ground, isPlayer: true });
-    if (k % 2) car.aids.stability = 0;
+    if (k % 2) Object.assign(car.aids, aidsFor({ esc: false }));
     car.reset(a.x, a.z, yaw);
     car.vx = -Math.sin(yaw) * 20; car.vz = -Math.cos(yaw) * 20;
     runs.push({

@@ -20,6 +20,7 @@ const CHECKS = [
   ['model', 'imported cars match the rig, and a missing one is harmless'],
   ['traffic', 'the other cars behave like traffic'],
   ['drift', 'sideways scores, straight does not, and the detector never flickers'],
+  ['atmosphere', 'roads are sharp, seamless and drawn above the ground they stand on'],
   ['brand', 'every name in the game is invented'],
 ];
 

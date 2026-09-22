@@ -308,12 +308,14 @@ export function generateChallenges(world, opts = {}) {
    * nudged up to 40 m to keep it clear of a junction, where a gate's posts
    * would stand in the other road.
    */
-  function placeGates(route, d0, d1, count) {
+  function placeGates(route, d0, d1, count, lapFinish = false) {
     const gates = [];
     for (let k = 1; k <= count; k++) {
       const want = d0 + (d1 - d0) * (k / count);
       let best = want, bestClear = -1;
       const last = k === count;
+      // A lap's finish IS its start line; nothing moves it.
+      if (last && lapFinish) { gates.push(gateAt(route, d1)); continue; }
       for (let off = -40; off <= (last ? 0 : 40); off += 4) {
         const d = want + off;
         if (d <= d0 + 30 || d > d1) continue;
@@ -358,14 +360,21 @@ export function generateChallenges(world, opts = {}) {
 
   // ---- circuits -----------------------------------------------------------
   for (const c of world.circuits || []) {
-    const pieces = circuitLap(world, c);
-    if (!pieces) continue;
+    const loop = circuitLap(world, c);
+    if (!loop) continue;
+    // Start the lap 40 m past the circuit's start node. That node is where the
+    // access road joins, and a start line on a junction stands its gantry in
+    // the other road. Rotating the loop keeps start and finish on one line.
+    const f0 = loop[0];
+    const dir = f0.s1 >= f0.s0 ? 1 : -1;
+    const cut = Math.min(40, f0.edge.length * 0.5);
+    const pieces = [{ edge: f0.edge, s0: f0.s0 + dir * cut, s1: f0.s1 }, ...loop.slice(1), { edge: f0.edge, s0: f0.s0, s1: f0.s0 + dir * cut }];
     const route = buildRoute(pieces);
     if (route.length < 800) continue;
     const prof = speedProfile(route, { heights, v0: 0 });
     const count = Math.max(5, Math.min(8, Math.round(route.length / 330)));
     const d0 = 0;
-    const gates = placeGates(route, d0, route.length, count);
+    const gates = placeGates(route, d0, route.length, count, true);
     const start = gateAt(route, d0);
     list.push(makeRace({
       id: `race-${slug(c.name)}`, name: `${c.name} Lap`, venue: c.name,

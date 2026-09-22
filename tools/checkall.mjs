@@ -21,6 +21,7 @@ const CHECKS = [
   ['traffic', 'the other cars behave like traffic'],
   ['drift', 'sideways scores, straight does not, and the detector never flickers'],
   ['brand', 'every name in the game is invented'],
+  ['goals', 'every challenge is on a road, every race is winnable, saves survive'],
 ];
 
 const results = [];

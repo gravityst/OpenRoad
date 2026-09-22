@@ -167,6 +167,40 @@ const ESC_SLIP_ON = 0.095;         // rad of rear slip before the slip term acts
 const ESC_SLIP_GAIN = 40;          // 1/s^2 per rad past it
 const ESC_CUT = 0.85;              // throttle removed at full intervention
 
+// ---- driveline --------------------------------------------------------------
+export const DRIVELINE = 0.88;   // share of crank power that reaches the tyres
+const WHEEL_INERTIA = 4.4;       // kg·m², four road wheels with tyres and discs
+
+/**
+ * The engine speed the clutch (or converter) holds a combustion engine at
+ * while the car pulls away with the throttle open. See the launch note in
+ * step(). Exported so the garage's estimate can launch the way the car does.
+ */
+export function launchRpm(spec, throttle = 1) {
+  if (spec.cylinders === 0) return 0;
+  return lerp(spec.idleRpm, spec.launchRpm ?? spec.peakRpm * 0.55, clamp(throttle * 1.4, 0, 1));
+}
+
+/**
+ * The engine and wheels, expressed as extra mass the car carries while they
+ * are geared to the road: flywheel inertia times the square of the overall
+ * ratio, so it is large in first and close to nothing in top.
+ */
+export function rotatingMass(spec, ratio) {
+  return ((spec.engineInertia ?? 0.18) * ratio * ratio + WHEEL_INERTIA) /
+    (spec.wheelRadius * spec.wheelRadius);
+}
+
+/**
+ * The share of the engine's torque at the wheels that accelerates the car
+ * while pulling away in a gear of overall ratio `ratio`. Exported so the
+ * garage can quote the same 0-100 the car does: menus.js estimates it
+ * analytically, and without this its figures run up to two seconds kind.
+ */
+export function driveEfficiency(spec, ratio) {
+  return DRIVELINE * spec.mass / (spec.mass + rotatingMass(spec, ratio));
+}
+
 // ---- ground -----------------------------------------------------------------
 // OFF-ROAD DRAG, as a fraction of weight per m/s. Rolling resistance on grass
 // is only about six times asphalt's, which on its own leaves a 280 hp car doing
@@ -178,9 +212,10 @@ const ESC_CUT = 0.85;              // throttle removed at full intervention
 // Gravel and dirt ROADS are graded; they cost a little, not a lot.
 const ROUGH_DRAG = {
   asphalt: 0, concrete: 0, sidewalk: 0.0004,
-  gravel: 0.0012, dirt: 0.0022, rock: 0.0080,
-  grass: 0.0082, sand: 0.0120,
+  gravel: 0.0010, dirt: 0.0020, rock: 0.0080,
+  grass: 0.0075, sand: 0.0110,
 };
+const ROUGH_KNEE = 18;     // m/s, ~65 km/h
 
 /**
  * The driving aids a player's settings give the car.
@@ -665,13 +700,14 @@ export function createVehicle(opts = {}) {
     // where it makes torque.
     const wheelRpm = Math.abs((vLong / spec.wheelRadius) * ratio) * 60 / (2 * Math.PI);
     let engineRpm = wheelRpm;
-    if (spec.cylinders !== 0 && throttle > 0.02) {
-      const launch = lerp(spec.idleRpm, spec.launchRpm ?? spec.peakRpm * 0.55, clamp(throttle * 1.4, 0, 1));
-      if (engineRpm < launch) engineRpm = launch;
-    }
+    if (throttle > 0.02) engineRpm = Math.max(engineRpm, launchRpm(spec, throttle));
     car.rpm = clamp(engineRpm, spec.idleRpm, spec.redline);
 
-    let driveForce = (engineTorque(car.rpm, throttle) * ratio) / spec.wheelRadius;
+    // The driveline is not free. About an eighth of the crank's output is lost
+    // in the gearbox and differentials — and see massLong below. Leaving both
+    // out put a 280 hp hatch through 0-100 in 2.97 s, supercar territory, and
+    // a 113 hp city car through it in 8.0.
+    let driveForce = (engineTorque(car.rpm, throttle) * ratio) / spec.wheelRadius * DRIVELINE;
     // Engine braking opposes motion, and fades out below walking pace where the
     // clutch would be open. Computed as signed torque it used to push a car
     // sitting still in gear gently backwards.
@@ -736,12 +772,25 @@ export function createVehicle(opts = {}) {
     // ---- Integrate the planar body --------------------------------------
     const dragForce = 0.5 * 1.225 * (spec.dragArea + (dmg ? dmg.dragAdd : 0)) * planarSpeed * planarSpeed;
     // Off-road losses scale with the suspension's travel: a lifted 4x4 floats
-    // over ground that shakes a low sports car to pieces.
+    // over ground that shakes a low sports car to pieces. Above ROUGH_KNEE the
+    // wheels start leaving the ground between bumps and every landing is a
+    // hit, so the loss grows faster than speed from there — which is what
+    // stops a 280 hp car simply out-powering a field.
     const suspension = clamp(0.30 / spec.rideHeight, 0.6, 1.8) ** 0.7;
+    const knee = 1 + Math.max(0, planarSpeed - ROUGH_KNEE) / ROUGH_KNEE;
     const rollingForce = rollRes * totalLoad * (1 + rough * 0.6) +
-      spec.mass * G * roughDrag * suspension * planarSpeed;
+      spec.mass * G * roughDrag * suspension * planarSpeed * knee;
 
-    let aLong = (frontLong + FxR - dir * (dragForce + rollingForce)) / spec.mass + slopeAccelLong;
+    // In gear, the engine and wheels have to be spun up (or down) with the car,
+    // which in first is like carrying a quarter as much again. Only while the
+    // driven wheels grip, though: in a power slide they already turn at steady
+    // revs and the torque goes into the road. Charging it there as well cut a
+    // held drift from eight seconds to four, measured.
+    const drivenSlide = spec.drive === DRIVE.FWD ? slideF
+      : spec.drive === DRIVE.RWD ? slideR : Math.max(slideF, slideR);
+    const geared = car.shiftTimer > 0 ? 0 : 1 - drivenSlide;
+    const massLong = spec.mass + rotatingMass(spec, ratio) * geared;
+    let aLong = (frontLong + FxR - dir * (dragForce + rollingForce)) / massLong + slopeAccelLong;
     const aLat = (frontLat + FyR) / spec.mass + slopeAccelLat;
 
     // Brakes, rolling resistance and drag can stop the car. They cannot start

@@ -207,6 +207,39 @@ const goalsStub = { list: gen.list, byId: gen.byId, nav: null };
   }
 }
 
+// ---- 1d. handing the road back to the solo game ----------------------------------
+//
+// goals.setExternalGuide() is how a party game makes the solo challenges stand
+// aside. A stage's party grid is laid on that stage's solo start ring, and a
+// party lap finishes on its own: when the podium came up and the lead was
+// handed back, a car still parked in the ring was put straight onto the solo
+// grid. It must now leave the ring first, exactly as after a solo lap.
+{
+  const { createGoals } = await imp('src/game/goals.js');
+  const { CARS } = await imp('src/vehicles/catalog.js');
+  const mem = new Map();
+  const storage = { getItem: (k) => (mem.has(k) ? mem.get(k) : null), setItem: (k, v) => mem.set(k, String(v)), removeItem: (k) => mem.delete(k) };
+  const car = { x: 0, z: 0, y: 0, yaw: 0, speed: 0, vx: 0, vz: 0, airborne: false, airTime: 0, spec: { rideHeight: 0.3 },
+    reset(x, z, yaw) { this.x = x; this.z = z; this.yaw = yaw; this.speed = 0; } };
+  const g = createGoals({ world, ground, car, cars: CARS, storage, sfx: false, drift: { state: {} } });
+  const stage = g.list.find((q) => q.kind === 'race' && !q.lap);
+  const run = (n) => { for (let i = 0; i < n; i++) g.update(1 / 60, { driving: true }); };
+  const pole = MODES.gridSpot(stage, 0, {});
+  car.x = pole.x; car.z = pole.z; car.yaw = pole.yaw;
+  g.setExternalGuide('hold');                       // on the party grid
+  run(60);
+  const held = g.hold && !g._race.c;
+  g.setExternalGuide(false);                        // the podium: the lead comes back
+  run(120);
+  const stayed = !g._race.c;
+  car.x = stage.start.x + 60; car.z = stage.start.z; run(2);   // out of the ring...
+  car.x = stage.start.x; car.z = stage.start.z; run(2);        // ...and back, stopped
+  const rearmed = g._race.c === stage;
+  check(held && stayed && rearmed,
+    'a party race on a solo start line holds the car there, and handing back does not start the solo race under it',
+    `held on pole, no solo race: ${held}; 2 s after the podium, still none: ${stayed}; out of the ring and back in, ${stage.name} starts: ${rearmed}`);
+}
+
 // ---- 2. the referee, on its own ------------------------------------------------
 //
 // Tag decided from positions alone: a car alongside and closing is tagged; a car

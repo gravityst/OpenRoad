@@ -1228,7 +1228,21 @@ export function createGoals(opts) {
      * brakes, as a solo countdown does (a party race's grid). Off, everything
      * is as it was.
      */
-    setExternalGuide(on) { external = !!on; externalHold = on === 'hold'; },
+    setExternalGuide(on) {
+      // Handing back: a ring the car is sitting in must be LEFT before it
+      // starts anything, as after a solo lap (see `disarmed`). A party grid is
+      // laid on a solo start line and a party lap finishes on one, and when
+      // the podium came up the car still parked there was snapped onto the
+      // solo grid for a race nobody asked for.
+      if (external && !on) {
+        for (const c of list) {
+          if (c.kind !== 'race') continue;
+          const dx = car.x - c.start.x, dz = car.z - c.start.z, r = c.start.hw + 4;
+          if (dx * dx + dz * dz < r * r) disarmed.add(c.id);
+        }
+      }
+      external = !!on; externalHold = on === 'hold';
+    },
     cycleTarget, resync, recommend: () => recommend(null),
     /** For the harness: the internals it needs to drive a race from code. */
     _race: race, _zone: zone,

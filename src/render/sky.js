@@ -1,4 +1,5 @@
-// Sky, sun, weather and the day/night cycle.
+// Sky, sun, weather, the day/night cycle — and the air between you and
+// everything else.
 //
 // WHY THIS IS AN ATMOSPHERE MODEL AND NOT A GRADIENT
 //
@@ -27,14 +28,56 @@
 // scattering alone is visibly wrong and both marked in the code:
 //
 //   * The sun path used for a given pixel shortens as the view direction rises.
-//     Light scattered toward you from high overhead was scattered high in the
-//     atmosphere, where the sun's slant path is still short; light from near the
-//     horizon was scattered down at ground level after the full reddened
-//     crossing. Using one sun path for the whole sky turns everything the same
-//     shade of orange at sunset instead of leaving the zenith deep blue.
+//     Using one sun path for the whole sky turns everything the same shade of
+//     orange at sunset instead of leaving the zenith deep blue.
 //   * A multiple-scattering term. Single scattering drives green to zero at
 //     sunset and makes the sky snap to black the instant the sun sets. The
 //     extra term is what gives twilight its blue-to-violet gradient.
+//
+// AERIAL PERSPECTIVE, FOR EVERY MATERIAL IN THE GAME
+//
+// three's fog is a linear ramp in view depth toward one flat colour. That is
+// what made the world look like it was sitting in milk: the whole middle
+// distance lost contrast at the same rate, hills a kilometre away were no
+// bluer than a barn at a hundred metres, and turning the camera slid the fog
+// across the screen, because view depth is not distance. So this module
+// replaces three's fog chunks, once, for every material that uses them:
+//
+//   * Haze is Beer-Lambert, exp(-sigma * distance), with sigma set from the
+//     weather's meteorological visibility (Koschmieder: sigma = 3.9 / V). On a
+//     clear day a barn at 300 m is hardly touched and a ridge at 900 m is
+//     going blue — which is what makes distance READ.
+//   * The air thins with height, integrated exactly along each ray, so valleys
+//     hold their haze and fog pools in the low ground while hilltops stand
+//     clear of it.
+//   * Blue is extinguished a little faster than red, so the far hills go blue
+//     rather than grey, and the in-scattered light gains a forward lobe around
+//     the sun: drive into a low sun and the haze glows gold; turn away and it
+//     is blue.
+//   * The streamed terrain ends at a ring, so the fog is still forced to total
+//     over the last quarter of that ring. main.js ties the ring to
+//     setDrawDistance(); the sky below the horizon is drawn in the same haze
+//     colour, so where the ground runs out there is nothing to see.
+//
+// The per-pixel parameters travel in three plain {x,y,z,w} uniform objects
+// that are added to three's ShaderLib and are therefore SHARED BY REFERENCE by
+// every built-in material that compiles afterwards (three clones ShaderLib
+// uniforms per material, but copies plain objects by reference — see
+// cloneUniforms). A ShaderMaterial that includes the fog chunks without those
+// uniforms reads them as zero and falls back to three's own linear fog, so
+// nothing anyone else wrote can break.
+//
+// CLOUDS
+//
+// The old decks thresholded plain value noise, which draws thin torn flakes —
+// at a noon sky they read as scratches on the lens. Fair-weather cumulus have
+// flat grey bases, rounded tops and a bright edge on the side facing the sun.
+// The shape here is Perlin-Worley (noise carved by inverted cellular noise, the
+// usual trick for billows), and each cloud is lit by stepping two samples
+// toward the sun through the same density field: where the cloud gets thinner
+// toward the sun it is the lit side, where it gets thicker it is in its own
+// shadow. With a forward-scattering phase on top, a backlit cumulus gets its
+// silver lining for free.
 //
 // EVERYTHING ELSE HANGS OFF THE SAME MODEL
 //
@@ -72,9 +115,8 @@ const BETA_M = [0.0050, 0.0054, 0.0058];
 const MIE_G = 0.76;          // Henyey-Greenstein asymmetry: strongly forward
 const ATMO_R = 758.0;        // Earth radius / atmospheric scale height
 // Sun paths longer than this are where single scattering starts to lie, so
-// their growth is softened. The softening still has to DIVERGE: the first
-// version of this used m/(1+m/K), which asymptotes, and the consequence was a
-// sun that never finished setting and a midnight sky the colour of a sunset.
+// their growth is softened. The softening still has to DIVERGE, or the sun
+// never finishes setting.
 const SUN_PATH_KNEE = 12.0;
 // The sun path seen by the high-altitude air a straight-up view looks through.
 const HIGH_PATH = 2.2;
@@ -120,17 +162,8 @@ export function skyRadiance(out, dx, dy, dz, sx, sy, sz, turbidity, sunI, ms) {
   // it, and that lag IS twilight. So a steep view gets the short, barely
   // reddened sun path — but only in proportion to how much of the column above
   // it is still lit, and that proportion is what has to fall to zero, not the
-  // path length. Stretching the path instead (the first attempt) turns the
-  // zenith through brown on its way to black, because differential extinction
-  // always goes warm before it goes dark.
-  //
-  // The shortening is therefore keyed on `lift` ALONE and never on `twilight`.
-  // Fading both together was the remaining half of that same bug: it leaves the
-  // zenith lit by a long, reddened path right through civil twilight, and a
-  // reddened beam times a blue-weighted in-scatter is neutral. The zenith went
-  // to #1E1D22 — flat grey — at a sun elevation of -5 degrees, which is exactly
-  // the mush this whole model exists to avoid. Only `lit` falls to zero, and
-  // day and full night are bit-identical either way.
+  // path length. The shortening is keyed on `lift` ALONE: fading it by twilight
+  // as well turned the zenith flat grey at a sun elevation of -5 degrees.
   const twilight = smoothstep(-0.26, 0.02, sy);
   const sunPath = lerp(softSun, Math.min(softSun, HIGH_PATH), lift * lift);
   const lit = lerp(1, twilight, lift * lift);
@@ -144,8 +177,7 @@ export function skyRadiance(out, dx, dy, dz, sx, sy, sz, turbidity, sunI, ms) {
     const inScatter = ((bR * phaseR + bM * phaseM) / total) * trans;
     const sunAtten = Math.exp(-total * sunPath) * lit;
     // Multiple-scattered light is the same sunlight and reddens with it, just
-    // far more gently for having taken many shorter paths. Without the tilt,
-    // the sky 30 degrees above a rising sun comes out grey instead of peach.
+    // far more gently for having taken many shorter paths.
     const msAtten = Math.pow(sunAtten, 0.18);
     const v = sunI * (inScatter * sunAtten + MS_TINT[c] * ms * msLift * trans * msAtten);
     if (c === 0) out.r = v; else if (c === 1) out.g = v; else out.b = v;
@@ -176,57 +208,192 @@ function sunTransmittance(out, sy, turbidity) {
 }
 
 // ---------------------------------------------------------------------------
+// Aerial perspective, as the fog chunks compute it
+//
+// A JS copy of FOG_FRAGMENT, for the harness: it is how "the far edge of the
+// streamed ring is always hidden" and "a barn at 300 m on a clear day is not
+// washed out" are measured without a GPU. Keep the two in step.
+// ---------------------------------------------------------------------------
+
+// Blue is extinguished a little faster than red, so the far hills go blue.
+const HAZE_TINT = [0.82, 0.93, 1.16];
+
+/**
+ * Transmittance of the air between the camera at height `camY` and a point
+ * `dist` metres away along a ray whose world direction has vertical component
+ * `rayY`. `sigma` is the extinction at `refY`, `invH` one over the haze's scale
+ * height. Returns the green-channel transmittance; the ring edge is forced.
+ */
+export function hazeTransmittance(dist, rayY, camY, sigma, invH, refY, far) {
+  const dy = rayY * dist * invH;
+  const od = Math.exp(-invH * (camY - refY)) * (Math.abs(dy) > 1e-3 ? (1 - Math.exp(-dy)) / dy : 1 - 0.5 * dy);
+  const tau = sigma * dist * od;
+  const edge = smoothstep(far * 0.72, far, dist);
+  return Math.exp(-tau * HAZE_TINT[1]) * (1 - edge);
+}
+
+// ---------------------------------------------------------------------------
 // Weather
 //
 // Every field is a plain number so that switching weather is a lerp between two
-// of these and nothing has to special-case anything. `cover` is a threshold on
-// the cloud noise, so LOWER means MORE cloud; `fogNear`/`fogFar` are fractions
-// of the draw distance so fog stays sane when the quality tier changes it.
+// of these and nothing has to special-case anything.
+//
+//   visibility  metres; the haze extinction is 3.9 / visibility (Koschmieder)
+//   hazeH       metres; scale height of the haze. Low for fog, which pools.
+//   cumulus     fraction of the sky the low deck covers
+//   cirrus      how much high cloud there is, 0..1
+//   deckDark    how grey the underside of the low deck is
+//   light       direct sun, 1 = clear
+//   ambient     skylight, relative to clear
+//   fogGrey     how far the horizon haze is pulled toward the cloud base
 // ---------------------------------------------------------------------------
 const WEATHER = {
   clear: {
-    turbidity: 1.00, coverHi: 0.74, coverLo: 0.80, opacityHi: 0.50, opacityLo: 0.72,
-    shade: 0.50, light: 1.00, ambient: 1.00, rain: 0.00,
-    fogNear: 0.30, fogFar: 1.55, fogGrey: 0.00,
+    turbidity: 1.00, visibility: 26000, hazeH: 900,
+    cumulus: 0.18, cirrus: 0.18, deckDark: 0.42, opacity: 0.94,
+    light: 1.00, ambient: 1.00, rain: 0.00, fogGrey: 0.00,
   },
   cloudy: {
-    turbidity: 1.45, coverHi: 0.60, coverLo: 0.56, opacityHi: 0.65, opacityLo: 0.94,
-    shade: 0.72, light: 0.74, ambient: 1.18, rain: 0.00,
-    fogNear: 0.22, fogFar: 1.25, fogGrey: 0.16,
+    turbidity: 1.45, visibility: 14000, hazeH: 800,
+    cumulus: 0.50, cirrus: 0.30, deckDark: 0.55, opacity: 0.97,
+    light: 0.80, ambient: 1.08, rain: 0.00, fogGrey: 0.18,
   },
   overcast: {
-    turbidity: 2.30, coverHi: 0.42, coverLo: 0.22, opacityHi: 0.80, opacityLo: 1.00,
-    shade: 0.92, light: 0.28, ambient: 1.45, rain: 0.00,
-    fogNear: 0.14, fogFar: 0.95, fogGrey: 0.55,
+    turbidity: 2.30, visibility: 7000, hazeH: 700,
+    cumulus: 0.96, cirrus: 0.00, deckDark: 0.62, opacity: 1.00,
+    light: 0.26, ambient: 1.30, rain: 0.00, fogGrey: 0.60,
   },
   rain: {
-    turbidity: 2.90, coverHi: 0.36, coverLo: 0.14, opacityHi: 0.85, opacityLo: 1.00,
-    shade: 1.00, light: 0.18, ambient: 1.30, rain: 1.00,
-    fogNear: 0.08, fogFar: 0.62, fogGrey: 0.70,
+    turbidity: 2.90, visibility: 2600, hazeH: 500,
+    cumulus: 1.00, cirrus: 0.00, deckDark: 0.80, opacity: 1.00,
+    light: 0.14, ambient: 1.10, rain: 1.00, fogGrey: 0.74,
   },
   fog: {
-    turbidity: 5.20, coverHi: 0.52, coverLo: 0.40, opacityHi: 0.75, opacityLo: 0.95,
-    shade: 0.78, light: 0.36, ambient: 1.55, rain: 0.12,
-    fogNear: 0.004, fogFar: 0.075, fogGrey: 0.80,
+    turbidity: 5.20, visibility: 220, hazeH: 70,
+    cumulus: 0.70, cirrus: 0.00, deckDark: 0.55, opacity: 0.85,
+    light: 0.40, ambient: 1.35, rain: 0.08, fogGrey: 0.82,
   },
 };
 const WEATHER_KEYS = Object.keys(WEATHER.clear);
 
 // Night sky floor, also added to the CPU-side samples so the fog matches it.
 const NIGHT_ZENITH = [0.006, 0.010, 0.022];
-// A dim sodium wash along the horizon. Every city has one, it costs nothing,
+// A dim sodium wash along the horizon. Every town has one, it costs nothing,
 // and its absence is what makes a game night look like a switched-off screen.
 const NIGHT_HORIZON = [0.038, 0.030, 0.024];
 
+// Shadow map per quality tier. `radius` is PCF softness in texels; the extent
+// is the half-width of the square the sun's shadow camera covers, and it is
+// pushed forward along the view, because nobody looks at the shadows behind
+// the car.
+const QUALITY = {
+  low:    { size: 1024, radius: 2.0, extent: 80 },
+  medium: { size: 2048, radius: 3.0, extent: 105 },
+  high:   { size: 4096, radius: 3.5, extent: 130 },
+};
+
 // ---------------------------------------------------------------------------
-// Shaders
+// Aerial perspective shader chunks
+// ---------------------------------------------------------------------------
+
+const FOG_PARS_VERTEX = /* glsl */`
+#ifdef USE_FOG
+  varying float vFogDepth;
+  varying vec3 vFogRay;
+#endif
+`;
+
+// mvPosition exists by now in every three vertex shader that includes this.
+// vec4 * mat4 is transpose(M) * v, which for the rotation part of a view
+// matrix is its inverse: the camera-to-vertex ray, in world axes.
+const FOG_VERTEX = /* glsl */`
+#ifdef USE_FOG
+  vFogDepth = - mvPosition.z;
+  vFogRay = ( vec4( mvPosition.xyz, 0.0 ) * viewMatrix ).xyz;
+#endif
+`;
+
+const FOG_PARS_FRAGMENT = /* glsl */`
+#ifdef USE_FOG
+  uniform vec3 fogColor;
+  varying float vFogDepth;
+  varying vec3 vFogRay;
+  #ifdef FOG_EXP2
+    uniform float fogDensity;
+  #else
+    uniform float fogNear;
+    uniform float fogFar;
+    uniform vec4 orHaze;    // x sigma at refY /m, y 1/scale height, z refY, w enabled
+    uniform vec4 orHazeSun; // xyz direction toward the sun, world
+    uniform vec4 orHazeGlow;// rgb forward-scattered sun colour in the haze
+  #endif
+#endif
+`;
+
+const FOG_FRAGMENT = /* glsl */`
+#ifdef USE_FOG
+  #ifdef FOG_EXP2
+    float fogFactor = 1.0 - exp( - fogDensity * fogDensity * vFogDepth * vFogDepth );
+    gl_FragColor.rgb = mix( gl_FragColor.rgb, fogColor, fogFactor );
+  #else
+    if ( orHaze.w > 0.5 ) {
+      float fogDist = length( vFogRay );
+      vec3 fogDir = vFogRay / max( fogDist, 1e-4 );
+      // Optical depth through air thinning exponentially with height,
+      // integrated exactly along the ray from the camera.
+      float fogDy = vFogRay.y * orHaze.y;
+      float fogOd = exp( - orHaze.y * ( cameraPosition.y - orHaze.z ) ) *
+        ( abs( fogDy ) > 1e-3 ? ( 1.0 - exp( - fogDy ) ) / fogDy : 1.0 - 0.5 * fogDy );
+      vec3 fogT = exp( - orHaze.x * fogDist * fogOd * vec3( 0.82, 0.93, 1.16 ) );
+      // The streamed ground ends at a ring; it must be gone before it does.
+      fogT *= 1.0 - smoothstep( fogFar * 0.72, fogFar, fogDist );
+      float fogMu = max( dot( fogDir, orHazeSun.xyz ), 0.0 );
+      vec3 fogIn = fogColor + orHazeGlow.rgb * ( 0.16 * fogMu * fogMu + pow( fogMu, 10.0 ) );
+      gl_FragColor.rgb = gl_FragColor.rgb * fogT + fogIn * ( 1.0 - fogT );
+    } else {
+      float fogFactor = smoothstep( fogNear, fogFar, vFogDepth );
+      gl_FragColor.rgb = mix( gl_FragColor.rgb, fogColor, fogFactor );
+    }
+  #endif
+#endif
+`;
+
+// The three shared uniform values. Plain objects on purpose — see the header.
+const HAZE = { x: 0, y: 1 / 900, z: 0, w: 1 };
+const HAZE_SUN = { x: 0, y: 1, z: 0, w: 0 };
+const HAZE_GLOW = { x: 0, y: 0, z: 0, w: 0 };
+let hazeInstalled = false;
+
+/**
+ * Swaps three's fog chunks for the aerial perspective above and adds the
+ * shared uniforms to every ShaderLib entry that already carries fog. Must run
+ * before the first material compiles, which it does: main.js builds the sky
+ * before any other layer and nothing renders until loading ends.
+ */
+function installHaze() {
+  if (hazeInstalled) return;
+  hazeInstalled = true;
+  THREE.ShaderChunk.fog_pars_vertex = FOG_PARS_VERTEX;
+  THREE.ShaderChunk.fog_vertex = FOG_VERTEX;
+  THREE.ShaderChunk.fog_pars_fragment = FOG_PARS_FRAGMENT;
+  THREE.ShaderChunk.fog_fragment = FOG_FRAGMENT;
+  for (const key of Object.keys(THREE.ShaderLib)) {
+    const u = THREE.ShaderLib[key].uniforms;
+    if (!u || !u.fogColor) continue;
+    u.orHaze = { value: HAZE };
+    u.orHazeSun = { value: HAZE_SUN };
+    u.orHazeGlow = { value: HAZE_GLOW };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Sky shaders
 // ---------------------------------------------------------------------------
 
 // A cube, not a sphere, and deliberately: interpolating a vertex position
 // across a planar face is exact, so normalize(vDir) in the fragment shader is
-// the exact view ray. A sphere would need hundreds of triangles to get as close
-// and would still be wrong in between them. gl_Position.z = w pins the whole
-// thing to the far plane so the box size can never clip against camera.far.
+// the exact view ray. gl_Position.z = w pins the whole thing to the far plane
+// so the box size can never clip against camera.far.
 const SKY_VERT = /* glsl */`
 varying vec3 vDir;
 void main() {
@@ -256,15 +423,17 @@ uniform vec3 uNightZenith;
 uniform vec3 uNightHorizon;
 
 uniform sampler2D uCloud;
-uniform vec2 uCamXZ;
-uniform vec4 uDrift;           // xy = high deck, zw = low deck
-uniform vec2 uCover;           // x = high deck, y = low deck (threshold: low = more)
-uniform vec2 uOpacity;
-uniform float uShade;
-uniform vec3 uCloudLit;
-uniform vec3 uCloudDark;
+uniform vec3 uCam;             // camera position, metres
+uniform vec4 uDrift;           // xy = low deck, zw = high deck, in texture units
+uniform vec4 uCover;           // x cumulus threshold, y cirrus threshold, z cirrus amount
+uniform float uOpacity;
+uniform float uDeckDark;
+uniform vec3 uCloudSun;        // sunlight on a cloud, linear
+uniform vec3 uCloudAmb;        // skylight on a cloud's underside, linear
+uniform float uCloudDetail;    // 1 = light the deck, 0 = flat (low tier)
 
-uniform vec3 uGroundHaze;
+uniform vec3 uHaze;            // horizon haze colour, the same as the fog's
+uniform vec3 uHazeGlow;        // its forward-scattered sun lobe
 
 varying vec3 vDir;
 
@@ -279,15 +448,17 @@ const vec3 MS_TINT = vec3(0.19, 0.33, 0.62);
 // dot; this is the usual cinematic exaggeration.
 const float MOON_R = 0.016;
 
-// Exact for a uniform shell, and unlike the usual Kasten-Young fit it keeps
-// growing smoothly once the sun is below the horizon instead of blowing up.
+// The low deck: fair-weather cumulus bases at about 1.4 km, one texture repeat
+// every 5.2 km of sky. The high deck is cirrus at 8 km.
+const float DECK_LO = 1400.0;
+const float REPEAT_LO = 5200.0;
+const float DECK_HI = 8000.0;
+const float REPEAT_HI = 14000.0;
+
 float airMass(float cosZ) {
   float s2 = max(0.0, 1.0 - cosZ * cosZ);
   return sqrt((ATMO_R + 1.0) * (ATMO_R + 1.0) - ATMO_R * ATMO_R * s2) - ATMO_R * cosZ;
 }
-
-// Long paths compressed: linear near zero, sqrt-slow far out. It has to keep
-// growing, or the sun never finishes setting.
 float softPath(float m) {
   return SUN_PATH_KNEE * (sqrt(1.0 + 2.0 * m / SUN_PATH_KNEE) - 1.0);
 }
@@ -312,12 +483,9 @@ float vnoise3(vec3 p) {
   return mix(mix(a, b, f.y), mix(c, d, f.y), f.z);
 }
 
-// Point stars, hashed rather than sampled from a texture. At any equirect
-// resolution that fits in memory a star covers several screen pixels and reads
-// as a smudge; a hashed lattice keeps them a pixel across at any resolution.
-// The fwidth term sizes them to the pixel footprint, which is what stops them
-// boiling into a shimmering mess when the camera turns — and it is computed
-// before any branch, because derivatives inside non-uniform flow are undefined.
+// Point stars, hashed rather than sampled from a texture, sized to the pixel
+// footprint so they neither smudge nor boil when the camera turns. The fwidth
+// is computed before any branch: derivatives in non-uniform flow are undefined.
 float starField(vec3 sd, float t) {
   vec3 p = sd * 260.0;
   float px = max(fwidth(p.x), max(fwidth(p.y), fwidth(p.z)));
@@ -333,19 +501,30 @@ float starField(vec3 sd, float t) {
   return disc * pow(mag, 2.2) * twinkle;
 }
 
-// One cloud deck: x = coverage, y = optical thickness.
-vec2 deck(vec2 uv, float cover, float cirrus) {
-  vec4 t = texture2D(uCloud, uv);
-  float n = mix(t.r, t.b, cirrus) * 0.78 + t.g * 0.22;
-  return vec2(smoothstep(cover, cover + 0.15, n), clamp((n - cover) * 2.6, 0.0, 1.0));
+// Cumulus density at a point on the deck. R is the billow shape, A a much
+// broader field that gathers the clouds into groups and clear lanes, G the
+// fine detail that erodes the thin edges only — so the cores stay round and
+// the rims break up, which is the difference between a cloud and a blob.
+// \`lo\` is the shape value at which cloud begins, chosen on the CPU from the
+// measured distribution of the texture so that the weather's cloud fraction is
+// the fraction of sky actually covered.
+// Returns density in x and, in y, how far into the cloud this point is — which
+// keeps varying where density has saturated, so a full overcast deck still has
+// thicker and thinner patches instead of being one flat grey lid.
+vec2 cumulus(vec2 uv, float lo) {
+  vec4 n = texture2D(uCloud, uv);
+  float shape = n.r * 0.74 + n.a * 0.26;
+  float d = smoothstep(lo, lo + 0.12, shape);
+  // Erode the rim with fine detail at two scales; the second fetch is five
+  // times finer, and it is what turns a cut-out into a cauliflower edge.
+  float fine = texture2D(uCloud, uv * 5.3 + 0.37).g;
+  d = clamp(d - (1.0 - d) * (n.g * 0.8 + fine * 0.6), 0.0, 1.0);
+  return vec2(d, clamp((shape - lo) * 1.6 + (n.g - 0.5) * 0.25, 0.0, 1.0));
 }
 
-// Thin edges are lit through, thick cores are not, and the rim facing the sun
-// gets a silver lining. Lit and dark colours both come from the atmosphere on
-// the CPU, which is why sunset clouds are pink without anyone tinting them.
-vec3 shadeDeck(vec2 dens, float mu, vec3 lit, vec3 dark, float shade) {
-  vec3 c = mix(lit, dark, dens.y * shade);
-  return c + uSunLit * pow(max(mu, 0.0), 10.0) * (1.0 - dens.y) * 0.55;
+float henyey(float mu, float g) {
+  float h = 1.0 + g * g - 2.0 * g * mu;
+  return (1.0 - g * g) / (4.0 * 3.14159265 * h * sqrt(h));
 }
 
 void main() {
@@ -362,24 +541,14 @@ void main() {
 
   float softSun = softPath(airMass(uSunDir.y));
   float lift = clamp(dir.y, 0.0, 1.0);
-  // Scattering along a steep ray happens high up, where the sun's slant path is
-  // still short; along a shallow ray it happens at ground level, at the end of
-  // the full reddened crossing. One sun path for the whole sky would turn
-  // sunset uniformly orange instead of leaving the zenith blue. High air stays
-  // lit for a few degrees after the ground loses the sun — that lag is
-  // twilight — so what fades at dusk is how much of the column is still lit,
-  // not the length of the path through it. So lift alone weights the shortening:
-  // fading it by twilight as well leaves the zenith on a long reddened path all
-  // through civil twilight, and reddened light times a blue-weighted in-scatter
-  // is flat grey. Kept in step with skyRadiance() above.
+  // Kept in step with skyRadiance() above: see there for why the sun path
+  // shortens with elevation and why only lift weights it.
   float twilight = smoothstep(-0.26, 0.02, uSunDir.y);
   float sunPath = mix(softSun, min(softSun, HIGH_PATH), lift * lift);
 
   vec3 trans = 1.0 - exp(-total * airMass(dir.y));
   vec3 inScatter = ((BETA_R * phaseR + betaM * phaseM) / total) * trans;
   vec3 sunAtten = exp(-total * sunPath) * mix(1.0, twilight, lift * lift);
-  // Multiple-scattered light reddens with the direct beam, just far more
-  // gently; untilted, the sky above a rising sun comes out grey, not peach.
   vec3 col = uSunI * (inScatter * sunAtten
     + MS_TINT * uMs * (0.35 + 0.65 * lift) * trans * pow(sunAtten, vec3(0.18)));
 
@@ -387,11 +556,9 @@ void main() {
   if (uNight > 0.002) {
     col += uNight * (uNightZenith + uNightHorizon * pow(1.0 - lift, 5.0));
   }
+  float starVis = 1.0;
   if (uStars > 0.004) {
     vec3 sd = uStarRot * dir;
-    // A band around a galactic plane fixed in star space, so it wheels with the
-    // rest of the sky through the night. Three octaves of noise give it dust
-    // lanes; the mask keeps that cost off the other 85% of the sky.
     float band = 1.0 - abs(dot(sd, vec3(0.3612, 0.8428, -0.3984)));
     float milky = pow(max(band, 0.0), 18.0);
     if (milky > 0.004) {
@@ -400,16 +567,13 @@ void main() {
       col += vec3(0.055, 0.058, 0.078) * milky * uStars;
     }
     float s = starField(sd, uTime);
-    // Cool for the many faint ones, warmer for the few bright ones, which is
-    // roughly what the real magnitude/colour distribution looks like.
     col += mix(vec3(0.72, 0.80, 1.0), vec3(1.0, 0.92, 0.78), s * 0.5) * s * uStars;
 
     float mAng = acos(clamp(dot(dir, uMoonDir), -1.0, 1.0));
     col += vec3(0.62, 0.66, 0.78) * exp(-mAng * 26.0) * 0.09 * uMoonBright * uStars;
     if (mAng < MOON_R * 1.3) {
-      // Reconstruct the sphere normal from the offset inside the disc. One
-      // sqrt, and the terminator then tracks the real sun direction, so the
-      // phase is right at every hour without anyone authoring a moon texture.
+      // Reconstruct the sphere normal from the offset inside the disc, so the
+      // terminator tracks the real sun and the phase is right at every hour.
       vec3 rel = dir - uMoonDir * dot(dir, uMoonDir);
       float a = dot(rel, uMoonRight) / MOON_R;
       float b = dot(rel, uMoonUp) / MOON_R;
@@ -432,33 +596,67 @@ void main() {
   col += sunCol * (1.0 - smoothstep(0.0107, 0.0143, ang)) * 9.0;
   col += sunCol * (exp(-ang * 22.0) * 0.42 + exp(-ang * 3.2) * 0.07);
 
-  // ---- cloud decks --------------------------------------------------------
+  // ---- clouds -------------------------------------------------------------
   // Intersecting the view ray with a flat deck, rather than draping a texture
-  // on a dome, is what makes the puffs converge toward the horizon the way a
-  // real cloud deck does. A dome hangs the same-sized puff overhead and at the
-  // horizon and reads as a painted ceiling.
-  //
-  // Sampled unconditionally rather than behind a visibility test: a
-  // texture2D in non-uniform control flow has undefined derivatives, so the
-  // mip level the far deck depends on would be garbage. The fade is a
-  // multiply. High deck first — it is above the low one, so it is behind it.
-  float above = smoothstep(0.02, 0.075, dir.y);
-  // Scaled into uv BEFORE the long multiply: a grazing ray reaches 80 km out,
-  // and 80000 metres carried in a float has metre-scale error left in it.
-  float ray = 1.0 / max(dir.y, 0.012);
-  vec2 hi = deck(uCamXZ * (1.0 / 6500.0) + dir.xz * (3400.0 / 6500.0 * ray) + uDrift.xy,
-                 uCover.x, 1.0);
-  col = mix(col, shadeDeck(hi, mu, uCloudLit * 1.14, uCloudDark * 1.3, uShade * 0.55),
-            hi.x * uOpacity.x * above);
+  // on a dome, is what makes the clouds converge toward the horizon the way a
+  // real deck does. Sampled unconditionally rather than behind a visibility
+  // test: a texture fetch in non-uniform flow has undefined derivatives, so the
+  // mip level would be garbage. The fades are multiplies.
+  float above = smoothstep(0.015, 0.07, dir.y);
+  float rayLen = 1.0 / max(dir.y, 0.012);
+  // Haze between the eye and the deck: a far cloud is a pale one.
+  vec3 hazeCol = uHaze + uHazeGlow * (0.16 * max(mu, 0.0) * max(mu, 0.0) + pow(max(mu, 0.0), 10.0));
 
-  vec2 lo = deck(uCamXZ * (1.0 / 2200.0) + dir.xz * (950.0 / 2200.0 * ray) + uDrift.zw,
-                 uCover.y, 0.0);
-  col = mix(col, shadeDeck(lo, mu, uCloudLit, uCloudDark, uShade),
-            lo.x * uOpacity.y * above);
+  // High deck first — it is above the low one, so it is behind it.
+  {
+    vec2 uv = (uCam.xz + dir.xz * (DECK_HI - uCam.y) * rayLen) / REPEAT_HI + uDrift.zw;
+    float c = texture2D(uCloud, uv).b;
+    float ci = smoothstep(uCover.y, uCover.y + 0.22, c) * uCover.z;
+    // Ice cloud is thin: it passes most of the light and glows round the sun.
+    vec3 ciCol = uCloudSun * (0.55 + 3.0 * henyey(mu, 0.7)) * 0.9 + uCloudAmb * 0.45;
+    float far = 1.0 - exp(-(DECK_HI * rayLen) / 90000.0);
+    ciCol = mix(ciCol, hazeCol, far * 0.7);
+    col = mix(col, ciCol, ci * 0.55 * above);
+  }
 
-  // Below the horizon the sky becomes the fog colour, so that wherever the
-  // terrain runs out the seam is between two identical colours.
-  col = mix(col, uGroundHaze, 1.0 - smoothstep(-0.05, 0.035, dir.y));
+  {
+    float dist = (DECK_LO - uCam.y) * rayLen;
+    vec2 uv = (uCam.xz + dir.xz * dist) / REPEAT_LO + uDrift.xy;
+    float cover = uCover.x;
+    vec2 c0 = cumulus(uv, cover);
+    float d = c0.x;
+    // Two steps toward the sun through the same field. Thinner toward the sun
+    // is the lit side of the cloud; thicker is its own shadow. A low sun gets
+    // longer steps, because its light crosses more of the deck to arrive.
+    vec2 toSun = uSunDir.xz / max(uSunDir.y + 0.35, 0.35) * (140.0 / REPEAT_LO);
+    vec2 c1 = cumulus(uv + toSun, cover);
+    vec2 c2 = cumulus(uv + toSun * 2.6, cover);
+    float depthToSun = mix(d * 1.2, (d + c0.y) * 0.3 + (c1.x + c1.y) * 0.5 + (c2.x + c2.y) * 0.3, uCloudDetail);
+    float lit = exp(-depthToSun * 2.4);
+    // "Powder": the thinnest wisps scatter less light back out than their
+    // density suggests, which is what darkens the very rims of a backlit puff.
+    float powder = 1.0 - exp(-d * 5.0);
+    float phase = 0.45 + 5.0 * henyey(mu, 0.62);
+    // The underside is lit by the sky and darkens with the depth of cloud
+    // above it; the sunlit part is what the steps toward the sun let through.
+    float thick = smoothstep(0.05, 0.85, d) * (0.7 + 0.3 * c0.y);
+    vec3 cCol = uCloudAmb * (1.0 - uDeckDark * thick) * (1.0 - 0.25 * d)
+              + uCloudSun * lit * phase * mix(1.0, powder, 0.55);
+    float far = 1.0 - exp(-dist / 34000.0);
+    cCol = mix(cCol, hazeCol, far * 0.85);
+    // Scattered cloud fades out toward the horizon; a closed deck does not —
+    // it runs on into the haze, or the clear sky behind it shows through as a
+    // bright band all the way round under every overcast.
+    float closed = smoothstep(0.62, 0.92, uCover.w);
+    float alpha = smoothstep(0.0, 0.42, d) * uOpacity * mix(above, 1.0, closed);
+    col = mix(col, cCol, alpha);
+    // Starlight does not come through a cloud.
+    starVis = 1.0 - alpha;
+  }
+
+  // Below the horizon the sky becomes the haze the fog chunks draw, so that
+  // wherever the terrain runs out the seam is between two identical colours.
+  col = mix(col, hazeCol, 1.0 - smoothstep(-0.05, 0.035, dir.y));
 
   gl_FragColor = vec4(col, 1.0);
   #include <tonemapping_fragment>
@@ -469,93 +667,143 @@ void main() {
 // ---------------------------------------------------------------------------
 // Cloud noise texture
 //
-// Tiling matters more than resolution here: the deck stretches to the horizon,
-// so the texture repeats dozens of times and any seam becomes a visible grid.
-// The lattice is therefore wrapped per octave, per axis.
+// Built from typed arrays rather than a canvas, so the harness can build the
+// sky headless exactly as the browser does. Tiling matters more than
+// resolution: the deck stretches to the horizon, so the texture repeats dozens
+// of times and any seam becomes a visible grid. Every field is periodic by
+// construction, lattice index modulo the period.
+//
+//   R  cumulus billows: value noise carved by inverted cellular noise
+//   G  fine detail that erodes the edges
+//   B  cirrus: noise stretched along one axis, then warped
+//   A  coverage: a broad field that groups the cumulus into streets and gaps
 // ---------------------------------------------------------------------------
 
-function periodicHash(ix, iz, px, pz, seed) {
-  const x = ((ix % px) + px) % px;
-  const z = ((iz % pz) + pz) % pz;
-  let h = Math.imul(x, 374761393) + Math.imul(z, 668265263) + Math.imul(seed, 1274126177);
+function hashP(ix, iy, seed) {
+  let h = Math.imul(ix, 374761393) + Math.imul(iy, 668265263) + Math.imul(seed, 1274126177);
   h = Math.imul(h ^ (h >>> 13), 1274126177);
   h ^= h >>> 16;
   return (h >>> 0) / 4294967296;
 }
 
-function periodicNoise(x, z, px, pz, seed) {
-  const x0 = Math.floor(x), z0 = Math.floor(z);
-  const fx = x - x0, fz = z - z0;
-  const u = fx * fx * fx * (fx * (fx * 6 - 15) + 10);
-  const v = fz * fz * fz * (fz * (fz * 6 - 15) + 10);
-  const a = periodicHash(x0, z0, px, pz, seed);
-  const b = periodicHash(x0 + 1, z0, px, pz, seed);
-  const c = periodicHash(x0, z0 + 1, px, pz, seed);
-  const d = periodicHash(x0 + 1, z0 + 1, px, pz, seed);
-  return lerp(lerp(a, b, u), lerp(c, d, u), v);
+/** Periodic value noise fbm over an N x N tile, cx x cy cells at the base. */
+function tileFbm(N, cx, cy, oct, seed, out, warp = null) {
+  let amp = 1, norm = 0;
+  out.fill(0);
+  for (let o = 0; o < oct; o++) {
+    const px = cx << o, py = cy << o, sd = seed + o * 1013;
+    const L = new Float32Array((px + 1) * (py + 1));
+    for (let j = 0; j <= py; j++) for (let i = 0; i <= px; i++) L[j * (px + 1) + i] = hashP(i % px, j % py, sd);
+    for (let y = 0; y < N; y++) {
+      for (let x = 0; x < N; x++) {
+        let u = (x + 0.5) / N, v = (y + 0.5) / N;
+        if (warp) { u += warp[y * N + x] * 0.06; v += warp[y * N + x] * 0.02; }
+        u = ((u % 1) + 1) % 1; v = ((v % 1) + 1) % 1;
+        const fx = u * px, fy = v * py;
+        const x0 = Math.floor(fx), y0 = Math.floor(fy);
+        const tx = fx - x0, ty = fy - y0;
+        const sx = tx * tx * tx * (tx * (tx * 6 - 15) + 10), sy = ty * ty * ty * (ty * (ty * 6 - 15) + 10);
+        const r0 = y0 * (px + 1), r1 = r0 + px + 1;
+        const a = L[r0 + x0], b = L[r0 + x0 + 1], c = L[r1 + x0], d = L[r1 + x0 + 1];
+        out[y * N + x] += (a + (b - a) * sx + (c + (d - c) * sx - a - (b - a) * sx) * sy) * amp;
+      }
+    }
+    norm += amp; amp *= 0.5;
+  }
+  for (let i = 0; i < out.length; i++) out[i] /= norm;
+  return out;
 }
 
-function periodicFbm(u, v, px, pz, octaves, seed) {
-  let sum = 0, amp = 1, norm = 0, fx = px, fz = pz;
-  for (let o = 0; o < octaves; o++) {
-    sum += periodicNoise(u * fx, v * fz, fx, fz, seed + o * 1013) * amp;
-    norm += amp;
-    amp *= 0.5;
-    fx *= 2; fz *= 2;
+/** Periodic inverted Worley (1 at a feature point, 0 at the cell border). */
+function tileWorley(N, cells, seed, out) {
+  const P = cells + 2;
+  const fx = new Float32Array(P * P), fy = new Float32Array(P * P);
+  for (let j = 0; j < P; j++) {
+    for (let i = 0; i < P; i++) {
+      const si = (i - 1 + cells) % cells, sj = (j - 1 + cells) % cells;
+      fx[j * P + i] = i - 1 + hashP(si, sj, seed);
+      fy[j * P + i] = j - 1 + hashP(si, sj, seed + 1);
+    }
   }
-  return sum / norm;
+  const s = cells / N;
+  for (let y = 0; y < N; y++) {
+    const py = (y + 0.5) * s, cy = Math.floor(py) + 1;
+    for (let x = 0; x < N; x++) {
+      const px = (x + 0.5) * s, cx = Math.floor(px) + 1;
+      let d1 = 9;
+      for (let jy = cy - 1; jy <= cy + 1; jy++) {
+        for (let jx = cx - 1; jx <= cx + 1; jx++) {
+          const k = jy * P + jx, dx = fx[k] - px, dy = fy[k] - py;
+          const dd = dx * dx + dy * dy;
+          if (dd < d1) d1 = dd;
+        }
+      }
+      out[y * N + x] = 1 - Math.min(1, Math.sqrt(d1));
+    }
+  }
+  return out;
+}
+
+function stretch(a) {
+  let lo = Infinity, hi = -Infinity;
+  for (let i = 0; i < a.length; i++) { if (a[i] < lo) lo = a[i]; if (a[i] > hi) hi = a[i]; }
+  const k = 1 / Math.max(1e-6, hi - lo);
+  for (let i = 0; i < a.length; i++) a[i] = (a[i] - lo) * k;
+  return a;
+}
+
+function buildCloudData(N, seed) {
+  const n = N * N;
+  const base = tileFbm(N, 4, 4, 5, seed, new Float32Array(n));
+  const w1 = tileWorley(N, 6, seed + 11, new Float32Array(n));
+  const w2 = tileWorley(N, 13, seed + 12, new Float32Array(n));
+  const w3 = tileWorley(N, 27, seed + 13, new Float32Array(n));
+  const R = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    // Perlin-Worley: the cellular field carves the value noise into rounded
+    // cells, which is what reads as a heap of billows rather than a smear.
+    const wf = w1[i] * 0.625 + w2[i] * 0.25 + w3[i] * 0.125;
+    R[i] = clamp((base[i] - (wf - 1)) / (1 - (wf - 1)) , 0, 1) * 0.55 + wf * 0.45;
+  }
+  stretch(R);
+  const G = stretch(tileFbm(N, 22, 22, 3, seed + 21, new Float32Array(n)));
+  const warp = tileFbm(N, 3, 3, 2, seed + 41, new Float32Array(n));
+  for (let i = 0; i < n; i++) warp[i] = warp[i] * 2 - 1;
+  // Mares' tails rather than rulings: stretched about 2:1, and warped, so
+  // the streaks bend and fray instead of converging on the horizon in lines.
+  const B = stretch(tileFbm(N, 3, 7, 4, seed + 31, new Float32Array(n), warp));
+  const A = stretch(tileFbm(N, 2, 2, 2, seed + 51, new Float32Array(n)));
+  const data = new Uint8Array(n * 4);
+  for (let i = 0; i < n; i++) {
+    data[i * 4] = R[i] * 255;
+    data[i * 4 + 1] = G[i] * 255;
+    data[i * 4 + 2] = B[i] * 255;
+    data[i * 4 + 3] = A[i] * 255;
+  }
+  return data;
+}
+
+/**
+ * Quantile tables for the two cloud fields, so a weather can ask for "16% of
+ * the sky" and get it. Thresholding a noise field at a fixed number gives
+ * whatever coverage that field happens to have there — which is how the old
+ * clear sky came out as a few torn flakes and nothing else.
+ */
+function coverageTables(data, n) {
+  const shape = new Float32Array(n), cirrus = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    shape[i] = (data[i * 4] * 0.74 + data[i * 4 + 3] * 0.26) / 255;
+    cirrus[i] = data[i * 4 + 2] / 255;
+  }
+  shape.sort(); cirrus.sort();
+  const q = (a) => (f) => a[Math.min(a.length - 1, Math.max(0, Math.floor(f * (a.length - 1))))];
+  return { shape: q(shape), cirrus: q(cirrus) };
 }
 
 function makeCloudTexture(size, seed, anisotropy) {
-  const canvas = document.createElement('canvas');
-  canvas.width = size;
-  canvas.height = size;
-  const ctx = canvas.getContext('2d');
-  const img = ctx.createImageData(size, size);
-  const data = img.data;
-  const inv = 1 / size;
-  const n = size * size;
-  const field = new Float32Array(n * 3);
-  const lo = [Infinity, Infinity, Infinity];
-  const hi = [-Infinity, -Infinity, -Infinity];
-
-  for (let j = 0, p = 0; j < size; j++) {
-    const v = j * inv;
-    for (let k = 0; k < size; k++, p += 3) {
-      const u = k * inv;
-      // R: the cumulus coverage field. G: high-frequency detail that erodes the
-      // edges, so thresholding R gives ragged clouds instead of smooth blobs.
-      // B: a separate field stretched across the wind, which is what makes the
-      // high deck read as sheared cirrus rather than more cumulus.
-      field[p] = periodicFbm(u, v, 4, 4, 6, seed);
-      field[p + 1] = periodicFbm(u, v, 13, 13, 5, seed + 7717);
-      field[p + 2] = periodicFbm(u, v, 3, 14, 5, seed + 4409);
-      for (let c = 0; c < 3; c++) {
-        const x = field[p + c];
-        if (x < lo[c]) lo[c] = x;
-        if (x > hi[c]) hi[c] = x;
-      }
-    }
-  }
-
-  // Stretch each channel to fill 0..1. A summed-octave fbm clusters hard around
-  // its mean, so without this a coverage threshold of 0.8 selects nothing at
-  // all and one of 0.2 selects everything — the weather presets would have no
-  // usable range to work in.
-  const scale = [
-    255 / Math.max(1e-6, hi[0] - lo[0]),
-    255 / Math.max(1e-6, hi[1] - lo[1]),
-    255 / Math.max(1e-6, hi[2] - lo[2]),
-  ];
-  for (let i = 0, p = 0, q = 0; i < n; i++, p += 3, q += 4) {
-    data[q] = (field[p] - lo[0]) * scale[0];
-    data[q + 1] = (field[p + 1] - lo[1]) * scale[1];
-    data[q + 2] = (field[p + 2] - lo[2]) * scale[2];
-    data[q + 3] = 255;
-  }
-  ctx.putImageData(img, 0, 0);
-
-  const tex = new THREE.CanvasTexture(canvas);
+  const data = buildCloudData(size, seed);
+  const tex = new THREE.DataTexture(data, size, size, THREE.RGBAFormat, THREE.UnsignedByteType);
+  tex.userData.coverage = coverageTables(data, size * size);
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
   tex.minFilter = THREE.LinearMipmapLinearFilter;
   tex.magFilter = THREE.LinearFilter;
@@ -564,20 +812,21 @@ function makeCloudTexture(size, seed, anisotropy) {
   // Noise, not colour. Letting three sRGB-decode it would bend the coverage
   // threshold into the wrong part of the curve.
   tex.colorSpace = THREE.NoColorSpace;
+  tex.needsUpdate = true;
   return tex;
 }
 
 // ---------------------------------------------------------------------------
-// Scratch — every one of these exists so that update() allocates nothing. A
-// single Vector3 born in a per-frame path is enough to hand the collector a
-// sawtooth and the player a stutter every few seconds.
+// Scratch — every one of these exists so that update() allocates nothing.
 // ---------------------------------------------------------------------------
 const _v = new THREE.Vector3();
 const _right = new THREE.Vector3();
 const _up = new THREE.Vector3();
+const _fwd = new THREE.Vector3();
 const _m4 = new THREE.Matrix4();
 const _zenith = { r: 0, g: 0, b: 0 };
 const _horizon = { r: 0, g: 0, b: 0 };
+const _toward = { r: 0, g: 0, b: 0 };
 const _trans = { r: 0, g: 0, b: 0 };
 const UP = new THREE.Vector3(0, 1, 0);
 // Fallback basis reference for the two moments a year the sun or moon passes
@@ -607,34 +856,42 @@ function celestialDir(out, hours, latRad, decRad, lagHours) {
 // ---------------------------------------------------------------------------
 
 export function createSky(scene, renderer, opts = {}) {
+  installHaze();
+
   const latRad = (opts.latitude ?? 36) * DEG;
   const decRad = (opts.declination ?? 12) * DEG;
   // Eleven hours behind the sun: a waxing gibbous that rises about an hour
   // before sunset and is up all night, which is the only phase that actually
-  // lights a night drive, while still showing enough terminator to prove the
-  // phase is being computed rather than painted.
+  // lights a night drive.
   const moonLag = opts.moonLag ?? 11.0;
   const moonDec = -(opts.declination ?? 12) * DEG;
 
-  const skyBrightness = opts.skyBrightness ?? 2.0;
-  const sunPeak = opts.sunIntensity ?? 3.2;
-  // Night is lit well above what the physics of moonlight would give.
-  //
-  // A real moonlit road reflects almost nothing, and rendering that honestly
-  // gives a black screen with some lit windows floating in it — measured: the
-  // carriageway read 3/255 at midnight, which is not a dark road, it is no
-  // road. Every driving game lifts this. The target is a surface you can place
-  // the car on while the scene still reads unmistakably as night.
+  // LIGHT BALANCE. Measured on the old numbers: sunlit mid-grey rendered five
+  // to seven times darker than the sky above it, and the only fill was a
+  // hemisphere light at a third of the sun. Out of doors at noon the two are
+  // about equal and the sun is five or six times the skylight — which is where
+  // midday shadows get their depth. So the sky is drawn dimmer, the sun
+  // brighter and the fill lower, and the tone map sits the result where the
+  // old picture was on average.
+  const skyBrightness = opts.skyBrightness ?? 1.30;
+  const sunPeak = opts.sunIntensity ?? 4.6;
+  // Night is lit well above what the physics of moonlight would give: an
+  // honestly moonlit road reads 3/255, which is not a dark road, it is no road.
   const moonPeak = opts.moonIntensity ?? 0.34;
-  const hemiPeak = opts.ambientIntensity ?? 1.15;
-  const shadowRadius = opts.shadowRadius ?? 110;
-  const shadowSize = opts.shadowMapSize ?? 2048;
-  const sunDistance = opts.sunDistance ?? shadowRadius * 3;
+  const hemiPeak = opts.ambientIntensity ?? 0.95;
+  let tier = QUALITY[opts.quality] ? opts.quality : 'medium';
+  let shadowRadius = opts.shadowRadius ?? QUALITY[tier].extent;
+  let shadowSize = opts.shadowMapSize ?? QUALITY[tier].size;
+  let sunDistance = opts.sunDistance ?? 360;
   const windX = opts.windX ?? 0.82;
   const windZ = opts.windZ ?? 0.57;
   // 0 means the clock is frozen and main.js drives it with setTime().
   let dayLength = opts.dayLength ?? 0;
-  let drawDistance = opts.drawDistance ?? 3200;
+  let drawDistance = opts.drawDistance ?? 1000;
+  // The height the haze's density is quoted at: the valley floors of this
+  // world sit around -25 m. Fixed, not following the camera, so that fog pools
+  // in the low ground and a car climbing out of it drives into clear air.
+  const hazeFloor = opts.hazeFloor ?? -25;
 
   const cloudTex = makeCloudTexture(
     opts.cloudTexSize ?? 512,
@@ -659,14 +916,16 @@ export function createSky(scene, renderer, opts = {}) {
     uNightZenith: { value: new THREE.Vector3().fromArray(NIGHT_ZENITH) },
     uNightHorizon: { value: new THREE.Vector3().fromArray(NIGHT_HORIZON) },
     uCloud: { value: cloudTex },
-    uCamXZ: { value: new THREE.Vector2() },
+    uCam: { value: new THREE.Vector3() },
     uDrift: { value: new THREE.Vector4() },
-    uCover: { value: new THREE.Vector2(0.74, 0.80) },
-    uOpacity: { value: new THREE.Vector2(0.5, 0.72) },
-    uShade: { value: 0.5 },
-    uCloudLit: { value: new THREE.Vector3(1, 1, 1) },
-    uCloudDark: { value: new THREE.Vector3(0.3, 0.32, 0.36) },
-    uGroundHaze: { value: new THREE.Vector3(0.5, 0.6, 0.7) },
+    uCover: { value: new THREE.Vector4(0.8, 0.8, 0.35, 0) },
+    uOpacity: { value: 0.92 },
+    uDeckDark: { value: 0.3 },
+    uCloudSun: { value: new THREE.Vector3(1, 1, 1) },
+    uCloudAmb: { value: new THREE.Vector3(0.5, 0.55, 0.62) },
+    uCloudDetail: { value: 1 },
+    uHaze: { value: new THREE.Vector3(0.5, 0.6, 0.7) },
+    uHazeGlow: { value: new THREE.Vector3() },
   };
 
   const material = new THREE.ShaderMaterial({
@@ -679,26 +938,40 @@ export function createSky(scene, renderer, opts = {}) {
     fog: false,
   });
   // Size is irrelevant while update() re-centres this on the camera each frame,
-  // which is the contract — but making it larger than the world costs nothing
-  // and means a caller who forgets to pass cameraPos gets a slightly skewed sky
-  // rather than finding themselves outside the box looking at its far wall.
+  // but making it larger than the world costs nothing.
   const geometry = new THREE.BoxGeometry(200000, 200000, 200000);
   const mesh = new THREE.Mesh(geometry, material);
   mesh.frustumCulled = false;
   mesh.renderOrder = -1000;
   scene.add(mesh);
 
+  // The camera is not handed to update(), but it is handed to this, once per
+  // frame before anything else draws. Its forward vector steers the shadow
+  // camera on the next update.
+  const viewDir = new THREE.Vector3(0, 0, -1);
+  mesh.onBeforeRender = (r, s, camera) => {
+    if (camera && camera.getWorldDirection) camera.getWorldDirection(viewDir);
+  };
+
   // ---- lights -------------------------------------------------------------
   const sun = new THREE.DirectionalLight(0xffffff, sunPeak);
   sun.castShadow = opts.shadows !== false;
   sun.shadow.mapSize.set(shadowSize, shadowSize);
   const sc = sun.shadow.camera;
-  sc.left = -shadowRadius; sc.right = shadowRadius;
-  sc.top = shadowRadius; sc.bottom = -shadowRadius;
-  sc.near = 1; sc.far = sunDistance + shadowRadius * 2;
-  sc.updateProjectionMatrix();
+  function fitShadowCamera() {
+    sc.left = -shadowRadius; sc.right = shadowRadius;
+    sc.top = shadowRadius; sc.bottom = -shadowRadius;
+    sc.near = 1; sc.far = sunDistance + shadowRadius * 2;
+    sc.updateProjectionMatrix();
+  }
+  fitShadowCamera();
   sun.shadow.bias = opts.shadowBias ?? -0.0004;
   sun.shadow.normalBias = opts.shadowNormalBias ?? 0.08;
+  // three's PCF takes five hardware-filtered taps on a Vogel disc this many
+  // texels wide, so softness costs nothing extra. At the old radius of one
+  // texel every shadow had a ruled edge, which is not what a sun 0.5 degrees
+  // across casts: a car's shadow is sharp at the tyres and soft at the roof.
+  sun.shadow.radius = QUALITY[tier].radius;
   scene.add(sun);
   scene.add(sun.target);
 
@@ -708,8 +981,10 @@ export function createSky(scene, renderer, opts = {}) {
   // ---- fog ----------------------------------------------------------------
   // Reuse whatever linear fog the engine already made, so anything holding a
   // reference to it keeps working; only build one if there is nothing usable.
+  // It has to stay a THREE.Fog: FogExp2 would switch every material to the
+  // FOG_EXP2 path, which has no ring edge and no height.
   const createdFog = !(scene.fog && scene.fog.isFog);
-  if (createdFog) scene.fog = new THREE.Fog(0x9dc0da, 900, drawDistance * 1.55);
+  if (createdFog) scene.fog = new THREE.Fog(0x9dc0da, 300, drawDistance);
 
   // ---- weather blending ---------------------------------------------------
   // Three copies: where we came from, where we are going, and the interpolated
@@ -727,10 +1002,9 @@ export function createSky(scene, renderer, opts = {}) {
   let hours = opts.hours ?? 10;
   let elapsed = 0;
   let driftX0 = 0, driftY0 = 0, driftX1 = 0, driftY1 = 0;
-  let fogX = 0, fogZ = -1;
+  let wetness = 0;
 
-  // The celestial pole: due north, at an altitude equal to the latitude. Fixed
-  // for the life of the sky, so it is built once rather than every frame.
+  // The celestial pole: due north, at an altitude equal to the latitude.
   const poleAxis = new THREE.Vector3(0, Math.sin(latRad), -Math.cos(latRad));
 
   const state = {
@@ -750,7 +1024,18 @@ export function createSky(scene, renderer, opts = {}) {
     zenithColour: new THREE.Color(),
     horizonColour: new THREE.Color(),
     sunLightColour: new THREE.Color(),
+    visibility: WEATHER.clear.visibility,
+    wetness: 0,
   };
+
+  // What other layers may read off the scene without importing this module:
+  // roads use it for the sky they reflect and how wet they are. A plain
+  // object, rewritten in place every frame.
+  const published = {
+    zenith: new THREE.Color(), horizon: new THREE.Color(),
+    sunDir: state.sunDir, rain: 0, wetness: 0, night: 0,
+  };
+  scene.userData.sky = published;
 
   function setTime(h) {
     hours = ((h % 24) + 24) % 24;
@@ -763,6 +1048,9 @@ export function createSky(scene, renderer, opts = {}) {
     Object.assign(to, WEATHER[name]);
     blendLen = Math.max(0.001, blendSeconds);
     blendT = blendSeconds <= 0 ? 1 : 0;
+    // A weather set with no transition is a teleport of the weather, and the
+    // road surface goes with it rather than taking minutes to dry.
+    if (blendSeconds <= 0) wetness = WEATHER[name].rain;
     weatherName = name;
     state.weather = name;
     return name;
@@ -775,13 +1063,31 @@ export function createSky(scene, renderer, opts = {}) {
     dayLength = Math.max(0, secondsPerDay);
   }
 
+  /** 'low' | 'medium' | 'high': shadow resolution, softness and reach. */
+  function setQuality(q) {
+    if (!QUALITY[q]) return tier;
+    tier = q;
+    const t = QUALITY[q];
+    shadowRadius = t.extent;
+    sun.shadow.radius = t.radius;
+    if (t.size !== shadowSize) {
+      shadowSize = t.size;
+      sun.shadow.mapSize.set(shadowSize, shadowSize);
+      // The map is allocated at its first render; drop it so the next frame
+      // allocates it at the new size.
+      if (sun.shadow.map) { sun.shadow.map.dispose(); sun.shadow.map = null; }
+    }
+    fitShadowCamera();
+    // The low tier lights the cloud deck flat, saving two fetches a sky pixel.
+    uniforms.uCloudDetail.value = q === 'low' ? 0 : 1;
+    return tier;
+  }
+
   function update(dt, cameraPos, cameraDir) {
     const step = Math.min(0.1, Math.max(0, dt));
-    // Only the star twinkle reads this, and a phase jump in twinkle is by
-    // definition invisible, so wrapping it costs nothing and keeps sin() out of
-    // the range where a float32 argument has lost its low bits.
     elapsed = (elapsed + step) % 1024;
     if (dayLength > 0) setTime(hours + (step * 24) / dayLength);
+    if (cameraDir) viewDir.copy(cameraDir);
 
     // ---- weather blend ----------------------------------------------------
     if (blendT < 1) blendT = Math.min(1, blendT + step / blendLen);
@@ -808,6 +1114,7 @@ export function createSky(scene, renderer, opts = {}) {
     state.daylight = daylight;
     state.rainIntensity = now.rain;
     state.turbidity = now.turbidity;
+    state.visibility = now.visibility;
 
     const ms = smoothstep(-0.16, 0.20, sy) * 0.55;
     sunTransmittance(_trans, sy, now.turbidity);
@@ -822,8 +1129,6 @@ export function createSky(scene, renderer, opts = {}) {
     uniforms.uMoonDir.value.copy(state.moonDir);
     uniforms.uMoonBright.value = smoothstep(-0.06, 0.10, state.moonDir.y);
 
-    // Moon tangent basis on the CPU: the shader would otherwise need a
-    // degenerate-cross guard for the nights the moon passes near the zenith.
     _right.crossVectors(Math.abs(state.moonDir.y) > 0.99 ? ALT_UP : UP, state.moonDir).normalize();
     _up.crossVectors(state.moonDir, _right);
     uniforms.uMoonRight.value.copy(_right);
@@ -837,70 +1142,103 @@ export function createSky(scene, renderer, opts = {}) {
     // ---- clouds -----------------------------------------------------------
     // Wrapped to one tile: the texture repeats anyway, and an accumulator left
     // to grow all session eventually loses enough float precision to make the
-    // clouds visibly stutter.
-    driftX0 = (driftX0 + windX * step * 0.0016) % 1;
-    driftY0 = (driftY0 + windZ * step * 0.0016) % 1;
-    driftX1 = (driftX1 + windX * step * 0.0009) % 1;
-    driftY1 = (driftY1 + windZ * step * 0.0009) % 1;
+    // clouds visibly stutter. 6 m/s of wind at the low deck, 14 at the high.
+    driftX0 = (driftX0 + windX * step * 6 / 5200) % 1;
+    driftY0 = (driftY0 + windZ * step * 6 / 5200) % 1;
+    driftX1 = (driftX1 + windX * step * 14 / 14000) % 1;
+    driftY1 = (driftY1 + windZ * step * 14 / 14000) % 1;
     uniforms.uDrift.value.set(driftX0, driftY0, driftX1, driftY1);
-    uniforms.uCover.value.set(now.coverHi, now.coverLo);
-    uniforms.uOpacity.value.set(now.opacityHi, now.opacityLo);
-    uniforms.uShade.value = now.shade;
-    if (cameraPos) uniforms.uCamXZ.value.set(cameraPos.x, cameraPos.z);
+    // Cloud begins a little below the quantile, because the smoothstep and
+    // the edge erosion take back roughly that much.
+    // A closed deck is pushed past the minimum so no hole survives the edge
+    // smoothstep and the erosion.
+    const cov = cloudTex.userData.coverage;
+    uniforms.uCover.value.set(
+      cov.shape(clamp(1 - now.cumulus * 1.18, 0, 1)) - 0.03 - 0.45 * smoothstep(0.72, 0.98, now.cumulus),
+      cov.cirrus(clamp(1 - now.cirrus * 0.5, 0, 1)),
+      now.cirrus, now.cumulus);
+    uniforms.uOpacity.value = now.opacity;
+    uniforms.uDeckDark.value = now.deckDark;
+    if (cameraPos) uniforms.uCam.value.copy(cameraPos);
 
     // ---- colours read back out of the same model --------------------------
     skyRadiance(_zenith, 0, 1, 0, state.sunDir.x, sy, state.sunDir.z,
       now.turbidity, skyBrightness, ms);
     addNightFloor(_zenith, 1, night);
-    // Fog is sampled just above the horizon along the direction the camera is
-    // actually looking, so driving toward a sunset gives orange fog and away
-    // from it gives blue — which is what aerial perspective does in life.
-    if (cameraDir) {
-      const len = Math.hypot(cameraDir.x, cameraDir.z);
-      if (len > 1e-4) { fogX = cameraDir.x / len; fogZ = cameraDir.z / len; }
-    }
-    skyRadiance(_horizon, fogX * 0.9994, 0.035, fogZ * 0.9994,
+
+    // The haze colour is the horizon at right angles to the sun; the extra
+    // light toward the sun is carried separately as the glow, which the fog
+    // chunks and the sky both add back per pixel along the actual view ray.
+    // That is what makes driving into a sunset turn the haze gold and driving
+    // away from it leave it blue — in the same frame, on either side.
+    const hx = state.sunDir.x, hz = state.sunDir.z, hl = Math.hypot(hx, hz);
+    const ax = hl > 1e-4 ? hx / hl : 1, az = hl > 1e-4 ? hz / hl : 0;
+    skyRadiance(_horizon, -az * 0.9994, 0.035, ax * 0.9994,
       state.sunDir.x, sy, state.sunDir.z, now.turbidity, skyBrightness, ms);
     addNightFloor(_horizon, 0.035, night);
+    skyRadiance(_toward, ax * 0.9994, 0.035, az * 0.9994,
+      state.sunDir.x, sy, state.sunDir.z, now.turbidity, skyBrightness, ms);
+    addNightFloor(_toward, 0.035, night);
 
     state.zenithColour.setRGB(_zenith.r, _zenith.g, _zenith.b);
     state.horizonColour.setRGB(_horizon.r, _horizon.g, _horizon.b);
 
-    // Cloud tops take direct sun, bases take sky. Both from the atmosphere
-    // above, which is the whole reason sunset clouds come out pink.
-    const litGain = 2.1 * lerp(0.35, 1, daylight) + 0.10;
-    // Cloud tops still catch the moon. Without this term a cloudy night is a
-    // hole in the star field rather than cloud.
-    const moonLit = uniforms.uMoonBright.value * night * 0.030;
-    uniforms.uCloudLit.value.set(
-      _trans.r * litGain + _zenith.r * 0.85 + moonLit * 0.88,
-      _trans.g * litGain + _zenith.g * 0.85 + moonLit * 0.94,
-      _trans.b * litGain + _zenith.b * 0.85 + moonLit,
+    // Cloud light. Tops of the deck take the direct sun; the underside we see
+    // is lit by the sky above and the ground below. Both come from the model,
+    // which is the whole reason sunset clouds come out pink.
+    const cloudSun = 1.7 * daylight * now.light + 0.05;
+    const moonLit = uniforms.uMoonBright.value * night * 0.022;
+    uniforms.uCloudSun.value.set(
+      _trans.r * cloudSun + moonLit * 0.85,
+      _trans.g * cloudSun + moonLit * 0.92,
+      _trans.b * cloudSun + moonLit,
     );
-    const darkGain = lerp(0.75, 0.42, now.shade);
-    uniforms.uCloudDark.value.set(
-      (_zenith.r * 0.55 + _horizon.r * 0.35) * darkGain,
-      (_zenith.g * 0.55 + _horizon.g * 0.35) * darkGain,
-      (_zenith.b * 0.55 + _horizon.b * 0.35) * darkGain,
+    const ambK = 0.62 + 0.25 * now.fogGrey;
+    // At night a cloud is lit from below by the glow of the ground and
+    // whatever towns there are, so it is a shade LIGHTER than the clear sky
+    // around it, not a black hole in the stars.
+    const nf = night * 1.6;
+    uniforms.uCloudAmb.value.set(
+      (_zenith.r * 0.55 + _horizon.r * 0.45) * ambK + moonLit * 0.5 + nf * (NIGHT_ZENITH[0] + NIGHT_HORIZON[0]),
+      (_zenith.g * 0.55 + _horizon.g * 0.45) * ambK + moonLit * 0.5 + nf * (NIGHT_ZENITH[1] + NIGHT_HORIZON[1]),
+      (_zenith.b * 0.55 + _horizon.b * 0.45) * ambK + moonLit * 0.6 + nf * (NIGHT_ZENITH[2] + NIGHT_HORIZON[2]),
     );
 
-    // Under cloud the horizon is cloud, not clear sky, so the fog has to drift
-    // toward the cloud base or distant terrain glows blue under an overcast.
+    // Under cloud the horizon is cloud, not clear sky, so the haze drifts
+    // toward the grey of the deck's underside, and the glow round the sun
+    // fades with it.
     const grey = now.fogGrey;
-    const cd = uniforms.uCloudDark.value;
+    const ca = uniforms.uCloudAmb.value;
+    const deckBase = 1 - now.deckDark * 0.6;
     state.fogColour.setRGB(
-      lerp(_horizon.r, cd.x * 1.35, grey),
-      lerp(_horizon.g, cd.y * 1.35, grey),
-      lerp(_horizon.b, cd.z * 1.35, grey),
+      lerp(_horizon.r, ca.x * deckBase * 1.15, grey),
+      lerp(_horizon.g, ca.y * deckBase * 1.15, grey),
+      lerp(_horizon.b, ca.z * deckBase * 1.15, grey),
     );
-    uniforms.uGroundHaze.value.set(state.fogColour.r, state.fogColour.g, state.fogColour.b);
+    const glowK = (1 - grey) * (0.4 + 0.6 * now.light);
+    HAZE_GLOW.x = Math.max(0, _toward.r - _horizon.r) * glowK;
+    HAZE_GLOW.y = Math.max(0, _toward.g - _horizon.g) * glowK;
+    HAZE_GLOW.z = Math.max(0, _toward.b - _horizon.b) * glowK;
+    HAZE_SUN.x = state.sunDir.x; HAZE_SUN.y = state.sunDir.y; HAZE_SUN.z = state.sunDir.z;
+    uniforms.uHaze.value.set(state.fogColour.r, state.fogColour.g, state.fogColour.b);
+    uniforms.uHazeGlow.value.set(HAZE_GLOW.x, HAZE_GLOW.y, HAZE_GLOW.z);
+
+    // The haze itself. Extinction from the visibility, thinning with height
+    // above the ground under the camera, which is what lets valleys hold it.
+    HAZE.x = 3.912 / Math.max(50, now.visibility);
+    HAZE.y = 1 / Math.max(20, now.hazeH);
+    HAZE.z = hazeFloor;
+    HAZE.w = 1;
 
     // Re-asserted every frame on purpose: the engine's quality switch also
-    // writes fog.far, and weather has to win that argument.
+    // writes fog.far, and weather has to win that argument. `far` is the ring
+    // edge the terrain streams to, or less in weather thick enough to hide it
+    // sooner; `near` only matters to materials that fall back to linear fog.
     if (scene.fog && scene.fog.isFog) {
       scene.fog.color.copy(state.fogColour);
-      scene.fog.near = drawDistance * now.fogNear;
-      scene.fog.far = Math.max(scene.fog.near + 20, drawDistance * now.fogFar);
+      const far = Math.min(drawDistance, Math.max(160, now.visibility * 3.2));
+      scene.fog.far = far;
+      scene.fog.near = Math.min(far * 0.85, now.visibility * 0.35);
     }
 
     // ---- light ------------------------------------------------------------
@@ -917,25 +1255,18 @@ export function createSky(scene, renderer, opts = {}) {
       _v.copy(state.sunDir);
       sun.intensity = sunPeak * daylight * now.light;
     }
-    // The DIRECTION switches hard, which is safe: both intensity ramps are zero
-    // at sy = -0.09, so nothing is lit at the instant it flips. The COLOUR must
-    // not, and this is the trap. hemi.groundColor below is derived from this
-    // colour, and hemi.intensity is still ~0.36 at the handover — so switching
-    // popped every vertical surface in the world from warm orange to cold blue
-    // in a single frame, at dusk and again at dawn. Cross-fading over the same
-    // window the moon ramp already uses costs nothing: the directional light is
-    // under 3% of its noon value anywhere inside it.
+    // The direction switches hard, which is safe because both intensity ramps
+    // are zero at sy = -0.09. The COLOUR must not: hemi.groundColor is derived
+    // from it and hemi is still lit at the handover, so it cross-fades.
     //
     // pow(T, 0.3) rather than T itself: the raw transmittance at sunset is so
     // close to monochrome red that every surface in the world turns tomato.
-    // The softened version is a warm orange, which is what low sun looks like.
     const lr = Math.pow(Math.max(_trans.r, 1e-4), 0.3);
     const lg = Math.pow(Math.max(_trans.g, 1e-4), 0.3);
     const lb = Math.pow(Math.max(_trans.b, 1e-4), 0.3);
     const peak = Math.max(lr, 1e-4);   // red is always the least extinguished
-    // Moonlight is physically slightly WARMER than sunlight — the moon is a
-    // grey-brown rock. Cool blue is a cinema convention, and it is the one the
-    // player expects, so this is a deliberate lie rather than an error.
+    // Moonlight is physically slightly WARMER than sunlight. Cool blue is a
+    // cinema convention the player expects, so this is a deliberate lie.
     state.sunLightColour.setRGB(
       lerp(0.94 * (lr / peak) + 0.06, 0.55, lunarRamp),
       lerp(0.94 * (lg / peak) + 0.06, 0.66, lunarRamp),
@@ -946,15 +1277,20 @@ export function createSky(scene, renderer, opts = {}) {
     if (cameraPos) {
       mesh.position.copy(cameraPos);
 
-      // Snap the shadow camera to whole shadow-map texels. Without it the map
-      // resamples every frame as the car moves and every shadow edge crawls,
-      // which at 40 m/s is far more obvious than any amount of aliasing.
+      // The shadow camera is centred ahead of the camera along its view, not
+      // on it: half of a square centred on the eye is behind you. Then it is
+      // snapped to whole shadow-map texels, or every shadow edge crawls as the
+      // car moves, which at 40 m/s is far more obvious than any aliasing.
+      const fl = Math.hypot(viewDir.x, viewDir.z);
+      const ahead = shadowRadius * 0.45;
+      _fwd.set(cameraPos.x + (fl > 1e-4 ? viewDir.x / fl : 0) * ahead, cameraPos.y,
+        cameraPos.z + (fl > 1e-4 ? viewDir.z / fl : 0) * ahead);
       const texel = (2 * shadowRadius) / shadowSize;
       _right.crossVectors(Math.abs(_v.y) > 0.99 ? ALT_UP : UP, _v).normalize();
       _up.crossVectors(_v, _right);
-      const a = Math.round(_right.dot(cameraPos) / texel) * texel;
-      const b = Math.round(_up.dot(cameraPos) / texel) * texel;
-      const c = _v.dot(cameraPos);
+      const a = Math.round(_right.dot(_fwd) / texel) * texel;
+      const b = Math.round(_up.dot(_fwd) / texel) * texel;
+      const c = _v.dot(_fwd);
       sun.target.position.set(
         _right.x * a + _up.x * b + _v.x * c,
         _right.y * a + _up.y * b + _v.y * c,
@@ -964,22 +1300,32 @@ export function createSky(scene, renderer, opts = {}) {
     }
 
     // Hemisphere sky is the zenith colour, pulled a third of the way to white:
-    // fully saturated ambient makes white cars look painted. Ground is that
-    // light bounced off earth, so it tracks the sun's colour, not a fixed brown.
-    // HemisphereLight.color IS the sky half; there is no `skyColor` on the
-    // light, only in the shader's uniform.
+    // fully saturated ambient makes white cars look painted. Ground is sunlight
+    // bounced off earth and grass, so it follows the sun's colour and is
+    // tinted by what it bounced off rather than being a fixed brown.
     const zMax = Math.max(_zenith.r, _zenith.g, _zenith.b, 1e-4);
     hemi.color.setRGB(
-      lerp(_zenith.r / zMax, 1, 0.34),
-      lerp(_zenith.g / zMax, 1, 0.34),
-      lerp(_zenith.b / zMax, 1, 0.34),
+      lerp(_zenith.r / zMax, 1, 0.30),
+      lerp(_zenith.g / zMax, 1, 0.30),
+      lerp(_zenith.b / zMax, 1, 0.30),
     );
     hemi.groundColor.setRGB(
-      state.sunLightColour.r * 0.30 + 0.06,
-      state.sunLightColour.g * 0.27 + 0.06,
-      state.sunLightColour.b * 0.21 + 0.07,
+      state.sunLightColour.r * 0.30 + 0.05,
+      state.sunLightColour.g * 0.30 + 0.06,
+      state.sunLightColour.b * 0.20 + 0.05,
     );
-    hemi.intensity = hemiPeak * (0.185 + 0.815 * smoothstep(-0.22, 0.16, sy)) * now.ambient;
+    hemi.intensity = hemiPeak * (0.20 + 0.80 * smoothstep(-0.22, 0.16, sy)) * now.ambient;
+
+    // ---- publish ------------------------------------------------------------
+    // Rain wets the world in about half a minute and it takes minutes to dry;
+    // this is the number roads darken and flood by.
+    wetness += (now.rain - wetness) * (1 - Math.exp(-step / (now.rain > wetness ? 25 : 150)));
+    state.wetness = wetness;
+    published.zenith.setRGB(_zenith.r, _zenith.g, _zenith.b);
+    published.horizon.copy(state.fogColour);
+    published.rain = now.rain;
+    published.wetness = wetness;
+    published.night = night;
   }
 
   function dispose() {
@@ -992,11 +1338,13 @@ export function createSky(scene, renderer, opts = {}) {
     cloudTex.dispose();
     sun.dispose();
     if (createdFog) scene.fog = null;
+    if (scene.userData.sky === published) delete scene.userData.sky;
   }
 
   setWeather(weatherName, 0);
   return {
-    sun, hemi, state, mesh, material,
-    setTime, setWeather, setDrawDistance, setTimeScale, update, dispose,
+    sun, hemi, state, mesh, material, uniforms,
+    setTime, setWeather, setDrawDistance, setTimeScale, setQuality, update, dispose,
+    get quality() { return tier; },
   };
 }

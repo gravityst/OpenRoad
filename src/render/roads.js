@@ -2346,28 +2346,22 @@ export function createRoads(world, ground, opts = {}) {
   let cullDist = opts.drawDistance ?? QUALITY.high.drawDistance;
   const regionRadius = REGION * Math.SQRT1_2;
   let acc = 1;                               // forces a pass on the first frame
-  let wet = 0;
 
   /**
    * Reads what the sky published this frame — the colours the road reflects
-   * and how hard it is raining — off the scene the roads were added to. The
+   * and how wet the world is — off the scene the roads were added to. The
    * contract is a plain object on scene.userData, so there is no import and
    * no ordering between the modules: with no sky it stays a dry clear day.
+   * The sky already lags wetness behind the rain (half a minute to wet, some
+   * minutes to dry), so a shower that has passed leaves the road glistening.
    */
-  function readSky(dt) {
+  function readSky() {
     const scene = group.parent;
     const sky = scene && scene.userData ? scene.userData.sky : null;
     if (!sky) return;
     if (sky.zenith) uniforms.uSkyZenith.value.copy(sky.zenith);
     if (sky.horizon) uniforms.uSkyHorizon.value.copy(sky.horizon);
-    // Roads wet up in about half a minute of rain and take several minutes of
-    // dry weather to lose it again, so a shower that has passed still leaves
-    // the road glistening — and a weather switch never snaps the surface.
-    const target = clamp(sky.wetness ?? sky.rain ?? 0, 0, 1);
-    const tau = target > wet ? 25 : 150;
-    wet += (target - wet) * (1 - Math.exp(-Math.max(0, dt) / tau));
-    if (sky.snapWet) wet = target;
-    uniforms.uWet.value = wet;
+    uniforms.uWet.value = clamp(sky.wetness ?? sky.rain ?? 0, 0, 1);
   }
 
   /**
@@ -2377,7 +2371,7 @@ export function createRoads(world, ground, opts = {}) {
    * toggling on the frame boundary makes the horizon flicker.
    */
   function update(cameraPos, dt) {
-    readSky(dt > 0 ? dt : 0);
+    readSky();
     // A caller that passes no dt (or a paused dt of 0) would otherwise never
     // reach the threshold again after the first pass and freeze the culling
     // wherever it happened to be. Re-evaluating every call instead is 55

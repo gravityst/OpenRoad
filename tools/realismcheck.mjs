@@ -471,11 +471,25 @@ function overlapDepth(a, b) {
   const after = Math.abs(postsF.extras.aBend.src[idx * 3]);
   check('a post driven through bends over and springs back', peak > 0.6 && after < 0.02,
     `bent to ${(peak * 57.3).toFixed(0)} deg, ${(after * 57.3).toFixed(1)} deg four seconds later`);
-  scene.userData.sky = { night: 1 };
-  const roadsLike = new THREE.Group(); scene.add(roadsLike); roadsLike.add(rs.group);
-  rs.update(cam, 1 / 60, null);
-  const lit = rs.fields[0].mesh.material;
   rs.dispose();
+
+  // Headlamps on the tarmac: the road takes the player's car, and the lit
+  // traffic the fleet publishes, when it is dark — and none by day.
+  const roads = createRoads(world, ground, { roadside: false, defer: false });
+  const sc = new THREE.Scene();
+  sc.add(roads.group);
+  const pcar = { x: post.x, y: post.y + 0.3, z: post.z, yaw: 0, speed: 0, spec: { wheelbase: 2.6, track: 1.6 } };
+  sc.userData.carLamps = { count: 2, data: new Float32Array([pcar.x + 30, pcar.y, pcar.z, 1, 0, 1, pcar.x - 30, pcar.y, pcar.z, -1, 0, 1]) };
+  sc.userData.sky = { night: 0, rain: 0 };
+  roads.update(cam, 1 / 60, pcar);
+  const day = roads.uniforms.uBeamCount.value;
+  sc.userData.sky = { night: 1, rain: 0 };
+  roads.update(cam, 1 / 60, pcar);
+  const night = roads.uniforms.uBeamCount.value;
+  const strength = roads.uniforms.uBeam.value[0].w;
+  check('at night the road takes the headlamps, the player\'s first; by day none', day === 0 && night === 3 && strength > 1,
+    `${day} beams at noon, ${night} at midnight (player + 2 traffic), player's at ${strength.toFixed(2)}`);
+  roads.dispose();
 }
 
 // ---------------------------------------------------------------------------

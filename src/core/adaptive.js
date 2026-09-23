@@ -23,10 +23,14 @@
 // HOW IT DECIDES
 //
 // Frames are judged in windows of 1.5 s. A window is SLOW when its 75th
-// percentile misses 54 fps (18.5 ms) — a quarter of the frames late is judder
-// anyone sees — and GOOD when its 90th percentile makes 57 fps (17.6 ms).
-// Percentiles, not the mean, so a single streaming hitch or shader compile
-// never counts as "slow", and a window with a few of them still counts as good.
+// percentile is over 19 ms — a quarter of the frames missing a 60 Hz vsync is
+// judder anyone sees, and so is a variable-refresh screen running under 53
+// fps — and GOOD when its 90th percentile is under 20 ms. The margins over
+// 16.7 are not slack: requestAnimationFrame's own timestamps wobble, and an
+// idle game in the desktop app's browser measured a median of 16.6 ms but a
+// 90th percentile of 18.3. Percentiles, not the mean, so a single streaming
+// hitch or shader compile never counts as slow, and a window with a few of
+// them still counts as good.
 //
 //   down  after two slow windows in a row (one if the median is under 33 fps,
 //         and then two levels at once): a slow machine gets there in seconds.
@@ -91,9 +95,9 @@ const DEFAULTS = {
   budgetMs: 1000 / 60,
   windowSec: 1.5,
   minFrames: 20,       // so a 14 fps machine's windows are not stretched to 2 s
-  slowMs: 18.5,        // p75 above this: slow
+  slowMs: 19,          // p75 above this: slow
   verySlowMs: 30.3,    // median above this (under 33 fps): very slow
-  goodMs: 17.6,        // p90 at or below this: good
+  goodMs: 20,          // p90 at or below this: good
   warmupSec: 2,        // after start: shaders, streaming, the first GC
   settleSec: 0.75,     // after a change: the resize itself costs a frame
   probeWindows: 4,     // good windows before the first step up

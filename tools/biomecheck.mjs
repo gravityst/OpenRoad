@@ -389,6 +389,45 @@ const area = new Array(BIOME_COUNT).fill(0);
   check('birds of the right kind fly by day, and roost at night', birdsRight && roost,
     air.map((a) => `${BIOMES[a.b].key} ${['gulls', 'raptors', 'geese'].filter((k) => a[k] > 0.5).join('+') || '-'}`).join(', ') + `; at 01:00 ${roost ? 'none' : 'STILL FLYING'}`);
   check('the sky reads the world it was built with', activeBiomes() !== null, activeBiomes() ? 'registry set' : 'no field registered');
+
+  // Travel is a cut, and the air cuts with it. Eased over 1.5 s like a
+  // border, the woods' orange leaves went on falling among the pass's snowy
+  // spruce for 5 s after map travel. Driven, it still eases.
+  const at = (b) => cam.set(BIOMES[b].at[0], 0, BIOMES[b].at[1]);
+  at(BIOME.autumn);
+  for (let i = 0; i < 400; i++) sky.update(1 / 60, cam);
+  at(BIOME.alpine);
+  sky.update(1 / 60, cam);
+  const cut = { leaves: sky.state.biome.leaves, snow: sky.state.biome.snow, geese: sky.state.biome.geese };
+  at(BIOME.autumn);
+  for (let i = 0; i < 400; i++) sky.update(1 / 60, cam);
+  cam.x += 8;                                    // a frame at 480 km/h: driving
+  sky.update(1 / 60, cam);
+  const eased = sky.state.biome.leaves;
+  check('travel lands in the new place\'s air at once', cut.leaves < 0.01 && cut.snow > 0.99 && cut.geese < 0.01 && eased > 0.9,
+    `one frame after travel from the woods to the pass: leaves ${cut.leaves.toFixed(2)}, snow ${cut.snow.toFixed(2)}, ` +
+    `geese ${cut.geese.toFixed(2)}; 8 m driven keeps leaves ${eased.toFixed(2)}`);
+
+  // The canyon's mirage (terrain.js) is drawn by the sun's heat on the ground,
+  // which sky.js publishes: a high sun on dry sand. Drawn by daylight alone,
+  // the pools shimmered at sunrise and through a downpour.
+  // (A weather set with no blend dries the road at once; the showers here
+  // clear over 2 s, so the ground has to dry for itself.)
+  const heat = (hours, weather, seconds = 0.05, blend = 0) => {
+    if (weather) sky.setWeather(weather, blend);
+    sky.setTime(hours);
+    for (let t = 0; t < seconds; t += 1 / 60) sky.update(1 / 60, cam);
+    return scene.userData.sky.heat;
+  };
+  const hNoon = heat(11, 'clear'), hDawn = heat(6, 'clear'), hSeven = heat(7, 'clear'), hNight = heat(23, 'clear');
+  const hOver = heat(11, 'overcast'), hRain = heat(11, 'rain', 60), hAfter = heat(11, 'clear', 3, 2);
+  const hDry = heat(11, null, 600);
+  check('the mirage waits for a high sun on dry sand', hNoon > 0.95 && hDawn < 0.05 && hSeven > 0.3 && hSeven < 0.9 &&
+    hNight === 0 && hOver < 0.05 && hRain === 0 && hAfter < 0.2 && hDry > 0.9,
+    `11:00 ${hNoon.toFixed(2)}, 06:00 ${hDawn.toFixed(2)}, 07:00 ${hSeven.toFixed(2)}, 23:00 ${hNight.toFixed(2)}, ` +
+    `overcast ${hOver.toFixed(2)}, rain ${hRain.toFixed(2)}, just after ${hAfter.toFixed(2)}, dry 10 min on ${hDry.toFixed(2)}`);
+  sky.setWeather('clear', 0);
+  sky.setTime(11);
   sky.dispose();
 }
 
@@ -509,6 +548,35 @@ const area = new Array(BIOME_COUNT).fill(0);
   const onIt = named.every((d) => L.some((l) => l.x === d.cx && l.z === d.cz));
   check('the landmarks are named on the maps', named.length >= arches.length + lights.length + 1 && unique && onIt,
     named.map((d) => d.name).join(', '));
+
+  // Invented, and not only by brandcheck's list: the first names were a
+  // superhero's and a line-calling system's mark ("Hawkeye") and two real
+  // rock formations ("Keyhole Arch", "The Chimneys"). The words of famous
+  // real arches, stacks and hoodoo fields; whole words, case-insensitive.
+  // (Brand names stay in brandcheck, which scans this file too.)
+  const REAL = ['hawkeye', 'hawk-eye', 'keyhole', 'chimneys', 'chimney rock', 'delicate', 'landscape arch',
+    'double arch', 'mesa arch', 'corona arch', 'rainbow bridge', 'toadstool', 'goblin', 'fairy chimneys',
+    'needles', 'pinnacles', 'bryce'];
+  const borrowed = named.filter((d) => REAL.some((b) => new RegExp(`(^|[^a-z])${b}([^a-z]|$)`).test(d.name.toLowerCase())));
+  check('no landmark borrows a real formation or a mark', borrowed.length === 0,
+    borrowed.length ? borrowed.map((d) => d.name).join(', ') : `${named.length} names, none on the list of ${REAL.length}`);
+
+  // Each says its name (main.js districtAt) the first time a car comes within
+  // r of it: from the road, where kids drive and where map travel lands. The
+  // stand first named sat 60.1 m from the nearest centreline with r = 60, so
+  // its name could never be said. A car anywhere across a 20 m carriageway
+  // at its nearest point has to be inside r.
+  let deaf = 0, slack = Infinity;
+  const reachNote = [];
+  for (const d of named) {
+    const rd = g.nearestRoad(d.cx, d.cz, 600);
+    const s = rd ? d.r - (rd.dist + 10) : -Infinity;
+    if (s < 0) deaf++;
+    slack = Math.min(slack, s);
+    reachNote.push(`${d.name} ${rd ? rd.dist.toFixed(0) : '-'}/${d.r.toFixed(0)} m`);
+  }
+  check('every landmark says its name from the road', deaf === 0,
+    `${deaf} out of earshot (road/radius): ${reachNote.join(', ')}; least slack ${slack.toFixed(0)} m`);
 }
 
 // ---- Budget ------------------------------------------------------------------------------

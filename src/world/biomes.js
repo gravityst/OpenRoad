@@ -830,8 +830,10 @@ export function buildBiomes(world, terrain) {
     if (tr.index < 0 || moved > 400) {
       for (let b = 0; b < BIOME_COUNT; b++) wAvg[b] = wt[b];
     } else if (moved > 0) {
-      // 1 - exp(-moved / TRACK_M), to within 0.2% at any step a frame takes.
-      const k = moved / (TRACK_M + moved * 0.5);
+      // 1 - exp(-moved / TRACK_M), exactly, so it stays below 1 at any step:
+      // the rational stand-in used before passed 1 past 300 m (1.09 at 360 m)
+      // and overshot the average on a step a skipped call could make.
+      const k = 1 - Math.exp(-moved / TRACK_M);
       for (let b = 0; b < BIOME_COUNT; b++) wAvg[b] += (wt[b] - wAvg[b]) * k;
     }
     let best = 0;

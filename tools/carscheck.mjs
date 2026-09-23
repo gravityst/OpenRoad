@@ -26,7 +26,7 @@
 //
 // Headless, so it cannot see the paint. What to LOOK at is listed at the end.
 import * as THREE from 'three';
-import { createCarModel, BODY_STYLES } from '../src/render/carModel.js';
+import { createCarModel, BODY_STYLES, prewarmCarModels } from '../src/render/carModel.js';
 import { createCarDamage } from '../src/render/carDamage.js';
 import { CARS, specFor } from '../src/vehicles/catalog.js';
 
@@ -81,8 +81,19 @@ function removedCentroids(before, mesh) {
   check('the chassis is a Group holding the named body meshes', !!chassisOf(m));
   check('physics/debris.js can size and colour a torn-off panel',
     m.group.userData.dims === m.dims && typeof m.group.userData.paint === 'number');
-  m.dispose();
   check('BODY_STYLES still lists the seven styles', BODY_STYLES.length === 7, BODY_STYLES.join(' '));
+
+  // Prewarming builds each model once, and a car made afterwards reuses it.
+  const specs = CARS.map((c) => specFor(c.id));
+  const first = prewarmCarModels(specs);
+  const again = prewarmCarModels(specs);
+  const a = createCarModel(specFor('lark')), b = createCarModel(specFor('lark'));
+  const shared = byName(a, 'paint').geometry === byName(b, 'paint').geometry;
+  a.dispose(); b.dispose();
+  // The v340 made above is still alive, so its geometry is already cached.
+  check('prewarmCarModels builds each model once, and cars reuse it', first === CARS.length - 1 && again === 0 && shared,
+    `${first} built (+1 already cached), then ${again}; two cars share one paint buffer`);
+  m.dispose();
 }
 
 // ---------------------------------------------------------------------------

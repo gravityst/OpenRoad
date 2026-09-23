@@ -3192,6 +3192,37 @@ export function createCarModel(spec = {}, opts = {}) {
   };
 }
 
+/**
+ * Build and cache the geometry for these specs now, so the first frame that
+ * shows them does not have to.
+ *
+ * Traffic builds every model it needs on the first frame after Drive — up to
+ * fifteen unique cars — and that frame is the one hitch this module adds (830
+ * ms against 567 before the makeover, measured the same way). Called from the
+ * loading screen, it moves that work behind the progress bar. Optional: skip
+ * it and the models build on demand exactly as before.
+ *
+ * Geometry lives in the shared kit, which tears itself down when the last car
+ * is disposed, so call this while at least one car exists (the player's is
+ * built first). Returns how many new geometry sets were built.
+ */
+export function prewarmCarModels(specs = [], opts = {}) {
+  const detail = opts.detail === 'low' ? 'low' : 'high';
+  acquireKit();
+  let built = 0;
+  for (const spec of specs) {
+    if (!spec) continue;
+    const style = BODY_STYLES.includes(spec.body) ? spec.body : 'sedan';
+    const seed = hash(`${spec.id || style}:${spec.name || ''}`);
+    const variant = variantOf(style, hash(`${spec.id || style}:${spec.name || ''}:look`));
+    const before = kit.geom.size;
+    geometryFor(style, defaults(spec), detail, detail === 'low' ? 0 : seed % 4, variant);
+    if (kit.geom.size > before) built++;
+  }
+  releaseKit();
+  return built;
+}
+
 /** Fill in anything the caller's spec left out, so a bare {body} still works. */
 function defaults(spec) {
   return {

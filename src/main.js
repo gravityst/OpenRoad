@@ -1747,15 +1747,20 @@ async function boot() {
   //  * one frame through every post pass compiles those, and the shadow pass.
   // Capped at 8 s, so a driver that never reports ready cannot hold the game
   // on the loading screen.
+  // Each step is caught on its own: a warm-up that fails costs a hitch later,
+  // which is what happened before it existed, and must not cost the level
+  // below or put "Running without" on the screen.
   await stage(0.985, 'warming up the paint shop', async () => {
-    syncTrafficModels(0, 0);
-    if (renderer.compileAsync) {
-      await Promise.race([
-        renderer.compileAsync(scene, camera),
-        new Promise((resolve) => setTimeout(resolve, 8000)),
-      ]);
-    }
-    if (effects.prewarm) effects.prewarm();
+    try { syncTrafficModels(0, 0); } catch (err) { console.warn('[open road] traffic warm-up:', err); }
+    try {
+      if (renderer.compileAsync) {
+        await Promise.race([
+          renderer.compileAsync(scene, camera),
+          new Promise((resolve) => setTimeout(resolve, 8000)),
+        ]);
+      }
+    } catch (err) { console.warn('[open road] shader warm-up:', err); }
+    try { if (effects.prewarm) effects.prewarm(); } catch (err) { console.warn('[open road] post warm-up:', err); }
     // The remembered automatic-quality level goes on AFTER the warm-up, so the
     // passes a low level switches off were still compiled.
     applyAuto(false);

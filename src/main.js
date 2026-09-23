@@ -1386,8 +1386,19 @@ async function boot() {
     }
   }
 
+  /**
+   * `target` is the vertical field of view for a landscape screen. three.js
+   * fixes the VERTICAL angle, so a phone held upright (aspect ~0.46) was seeing
+   * 30 degrees across — the car filled the width and sat behind the thumb
+   * controls. Narrow screens get a taller angle, so the view across stays
+   * something a driver can use.
+   */
   function setFov(target, rate, dt) {
-    camera.fov += (target - camera.fov) * Math.min(1, dt * rate);
+    const a = camera.aspect;
+    const want = a < 1
+      ? 2 * Math.atan(Math.tan(target * Math.PI / 360) / Math.pow(a, 0.6)) * 180 / Math.PI
+      : target;
+    camera.fov += (want - camera.fov) * Math.min(1, dt * rate);
     camera.updateProjectionMatrix();
   }
 
@@ -1478,8 +1489,11 @@ async function boot() {
     // on the screen. Scaled by the car, so a pickup is not framed like a coupe.
     const far = m === 'chaseFar';
     const size = car.spec.wheelbase, tall = car.spec.rideHeight;
-    const wantDist = (far ? 9.0 : 4.7) + size * 0.62 + speedT * 1.4;
-    const wantHigh = (far ? 3.3 : 1.35) + tall * 1.6 + size * 0.08 + speedT * 0.25;
+    // An upright phone also stands a little further back and higher, so the
+    // car sits above the thumb controls rather than behind them.
+    const upright = camera.aspect < 1 ? Math.pow(1 / camera.aspect, 0.3) : 1;
+    const wantDist = ((far ? 9.0 : 4.7) + size * 0.62 + speedT * 1.4) * upright;
+    const wantHigh = ((far ? 3.3 : 1.35) + tall * 1.6 + size * 0.08 + speedT * 0.25) * upright;
     const lookBack = controls.state.lookBack > 0;
 
     // Trails the HEADING, not the velocity: chasing the velocity swings the

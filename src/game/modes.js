@@ -26,13 +26,20 @@ export const GAME_COLOUR = { race: 0xffb43c, tag: 0xff4d3a, coins: 0xffd84a };
 
 const EMOTE_S = 3.2;           // s a reaction stays over the car
 const EMOTE_GAP = 1.3;         // s between two of yours (the room allows 1.2)
-// A staggered grid, as on a real circuit: two columns, each car 3.3 m behind
-// the one before it on the other side, so 6.6 m nose to nose in a column
-// (these cars are about 4.4 m long). Eight of them fit in the 30 m between a
-// stage's first junction and its start line (challenges.js puts the line at
-// d = 30), five metres short of it.
-const GRID_STEP = 3.3;         // m between consecutive grid places
-const GRID_LINE = 5;           // m from the line to pole position
+// A staggered grid, as on a real circuit: two columns, each car behind the one
+// before it on the other side. How far back each place is, from pole:
+//
+// The chase camera sits 6.7 m behind its car, so the car behind you IN YOUR
+// COLUMN must be ~10 m back or the camera is inside it — the first grid (a
+// place every 3.3 m) filled the bottom of the screen with the next car's
+// bonnet. A stage leaves only 24 m between its first junction and pole
+// (challenges.js puts the line at d = 30; pole is 5 m short of it), so the
+// first four places — two or three siblings, the usual party — get 10 m in
+// each column, and places five to eight close up to fit. A lap's grid is
+// laid past its line on the circuit itself, with room for 10 m throughout.
+const GRID_STAGE = [0, 4.5, 10, 14.5, 17, 19.5, 22, 24];
+const GRID_LAP = 5;            // m between consecutive places on a lap
+const GRID_LINE = 5;           // m from a stage's line to pole position
 const JUMP_START = 3.0;        // m off the grid spot before GO puts you back on it
 const OFF_COURSE = 45;         // m from the race line after a jump: back to the last gate
 const FAR_FROM_HOST = 450;     // m: joining tag or coins from further takes you to them
@@ -50,8 +57,8 @@ const COIN_COUNT = 12;
  */
 export function gridSpot(c, slot, out = {}) {
   const col = slot % 2;
-  const back = slot * GRID_STEP;
-  const d = c.lap ? 3 + 7 * GRID_STEP - back : Math.max(1, c.start.d - GRID_LINE - back);
+  const k = Math.max(0, Math.min(GRID_STAGE.length - 1, slot | 0));
+  const d = c.lap ? 3 + GRID_LAP * (GRID_STAGE.length - 1 - k) : Math.max(1, c.start.d - GRID_LINE - GRID_STAGE[k]);
   const p = c.route.at(d, out);
   const off = (col === 0 ? -1 : 1) * Math.min(2.3, (p.hw || 4.5) * 0.42);
   const x = p.x - p.tz * off, z = p.z + p.tx * off;
@@ -387,10 +394,13 @@ export function createModes(opts) {
       events.push({ k: 'jumpstart' });
     }
     v.myTime = m.phase === 'run' ? (e.fin || Math.max(0, t - m.go)) : 0;
-    // The race line: chevrons from where you are, and the minimap line.
-    guide.route = c.route; guide.hex = GAME_COLOUR.race; guide.css = '#ffb43c';
-    const gl = opts.goals ? opts.goals() : null;
-    nav.route = c.route; nav.markers = gl && gl.nav ? gl.nav.markers : null;
+    // The race line: chevrons from where you are, and the minimap line —
+    // until you are home, when the road is yours again.
+    if (!e.fin) {
+      guide.route = c.route; guide.hex = GAME_COLOUR.race; guide.css = '#ffb43c';
+      const gl = opts.goals ? opts.goals() : null;
+      nav.route = c.route; nav.markers = gl && gl.nav ? gl.nav.markers : null;
+    }
     if (m.phase !== 'run' || e.fin) {
       const pr = c.route.project(self.x, self.z, my.hint, 30, proj);
       my.hint = pr.i; my.d = pr.d;

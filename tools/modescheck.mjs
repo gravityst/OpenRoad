@@ -93,6 +93,18 @@ const goalsStub = { list: gen.list, byId: gen.byId, nav: null };
   }
   check(bad.length === 0, 'every race has an eight-car grid: on the road, facing the race, behind the line, no two slots touching',
     bad.length ? bad.slice(0, 4).join('; ') : `${races.length} races, ${n} slots`);
+  // The chase camera sits 6.7 m behind its car: for the first four places the
+  // car behind in the same column must be clear of it (centres 9.5 m apart,
+  // a 4.4 m car's nose 2.2 m ahead of its centre).
+  const tight = [];
+  for (const c of races) {
+    for (let s = 0; s < 2; s++) {
+      const a = MODES.gridSpot(c, s, {}), b = MODES.gridSpot(c, s + 2, {});
+      const gap = Math.abs(a.d - b.d);
+      if (gap < 9.5) tight.push(`${c.id}#${s}->${s + 2} ${gap.toFixed(1)} m`);
+    }
+  }
+  check(!tight.length, 'with up to four on the grid, the car behind is clear of your chase camera', tight.slice(0, 4).join('; ') || 'every race: 10 m or more nose to tail in each column');
 
   const rng = mulberry(3);
   const bad2 = [];
@@ -564,6 +576,7 @@ try {
     'the finishing order is the room\'s, and it ends on a podium', `Ace P${fin(A).place} ${MODES.fmtRaceTime(ta)}, Bee P${fin(B).place} ${MODES.fmtRaceTime(tb)}`);
   const podium = [A, B, D].map((p) => p.modes.view.rows.map((r) => `${r.pos}.${r.name}`).join(' '));
   check(podium.every((x) => x === podium[0]) && podium[0].startsWith('1.Ace 2.Bee'), 'every screen shows the same podium', podium[0]);
+  check(!A.modes.raceGuide && !A.modes.nav, 'once home, the race line and its chevrons go', A.modes.raceGuide ? 'still drawn' : 'gone');
   const lastGate = c.gates[c.gates.length - 1];
   const truthA = ((lastGate.d - (MODES.gridSpot(c, fin(A).slot, {}).d)) / 31) * 1000;
   check(Math.abs(ta - truthA) < 120, 'race times are true to a tenth, off the synced clock', `Ace ${ta} ms, truth ${truthA.toFixed(0)} ms`);

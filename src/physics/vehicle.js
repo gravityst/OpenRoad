@@ -136,8 +136,8 @@ function tyreCurve(slip, B, C, D) {
 // delivered all of it.
 // An analogue stick or a phone wheel scales the same range, so full deflection
 // means the limit and half means half; they have the whole range to work in.
-const LOCK_GRIP = 0.97;
-const LOCK_SLIP = slipFor(TYRE_BF, TYRE_CF, LOCK_GRIP);   // 0.108 rad, 6.2 deg
+const LOCK_GRIP = 0.93;
+const LOCK_SLIP = slipFor(TYRE_BF, TYRE_CF, LOCK_GRIP);   // 0.091 rad, 5.2 deg
 const MIN_LOCK = 0.07;                                    // rad; never less than 4 deg
 
 // COUNTERSTEER ASSIST. When the rear axle's slip passes CS_ON the front wheels
@@ -230,14 +230,15 @@ const ROUGH_KNEE = 18;     // m/s, ~65 km/h
  * and it is the difference between "ESC off" meaning a car you can drift and a
  * car whose rear tyres are still being starved of torque by a second nanny —
  * measured, a handbrake slide held for ten seconds by the same driver ends at
- * 13 km/h with TC at full strength and at 92 km/h with it relaxed. Turning TC
- * off by name still means off.
+ * 13 km/h with TC at full strength and at 92 km/h with it relaxed; and on keys,
+ * flick-then-hold-D-and-W keeps the drift-school coupe sideways for 5.3 s at
+ * 0.2 against 1.5 s at 0.35. Turning TC off by name still means off.
  */
 export function aidsFor(s = {}) {
   const esc = s.esc !== false;
   return {
     abs: s.abs === false ? 0 : 0.95,
-    tc: s.tc === false ? 0 : esc ? 0.85 : 0.35,
+    tc: s.tc === false ? 0 : esc ? 0.85 : 0.2,
     stability: esc ? 0.8 : 0,
     // Not a setting. Speed-sensitive lock only leaves room to countersteer a
     // slide because the lock is measured from where the car is going once it
@@ -325,6 +326,7 @@ export function createVehicle(opts = {}) {
     // it is giving along (x) and across (y) its own heading. For diagnosis —
     // "why won't it turn" is almost always answered by one of these six.
     axles: { capF: 0, capR: 0, fxF: 0, fyF: 0, fxR: 0, fyR: 0 },
+    yawInertia: 0,           // kg·m², for energy accounting
     odometer: 0,
     time: 0,
   };
@@ -482,6 +484,7 @@ export function createVehicle(opts = {}) {
     const aF = L * (1 - spec.cgBias);           // centre of mass to front axle
     const bR = L * spec.cgBias;                 // centre of mass to rear axle
     const Izz = spec.mass * aF * bR * (spec.yawIndex ?? 0.92);
+    car.yawInertia = Izz;
 
     // ---- Sample the ground under each wheel ------------------------------
     const hw = spec.track / 2;
@@ -548,7 +551,20 @@ export function createVehicle(opts = {}) {
     const lock = clamp(Math.atan(L * muFront * G / v2) + LOCK_SLIP * feel, MIN_LOCK, spec.maxSteer);
     car.steerLock = lock;
     const command = clamp(car.input.steer, -1, 1);
-    const commandAngle = command * lock;
+    // Part-lock means part of the GRIP, not part of the angle. Grip saturates
+    // within a few degrees at speed, so a straight share of the angle put 0.7 g
+    // on a quarter of a stick at 80 km/h and made analogue steering twitchy.
+    // In a steady corner the front and rear tyres slip by nearly the same
+    // angle, so the wheel angle for a given lateral g is essentially the
+    // geometric one; the slip allowance in `lock` is only needed to drive the
+    // front to its peak at the very end of the range. So: the geometric angle
+    // for `ask` of the grip, plus that allowance faded in as ask cubed. Full
+    // input is still exactly `lock`, and at parking speeds the plain share of
+    // the angle is the smaller and wins.
+    const ask = Math.abs(command);
+    const geo1 = Math.atan(L * muFront * G / v2);
+    const byGrip = Math.atan(L * ask * muFront * G / v2) + Math.max(0, lock - geo1) * ask * ask * ask;
+    const commandAngle = Math.sign(command) * Math.min(ask * lock, byGrip);
 
     // See COUNTERSTEER ASSIST at the top. Faded in with speed, because below
     // ~20 km/h nothing slides that a driver would want caught.
@@ -915,6 +931,11 @@ export function createVehicle(opts = {}) {
   car.damage = damage;
   car.reset = reset;
   car.step = step;
+  /** Apply a player's settings (esc, tc, abs, steerFeel) through aidsFor(). */
+  car.setAssists = (s = {}) => {
+    Object.assign(car.aids, aidsFor(s));
+    car.feel.steer = clamp(s.steerFeel ?? 1, 0.5, 2.5);
+  };
   car.forward = () => ({ x: forwardX(), y: 0, z: forwardZ() });
   car.right = () => ({ x: rightX(), y: 0, z: rightZ() });
   return car;

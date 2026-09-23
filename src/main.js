@@ -688,6 +688,14 @@ async function boot() {
     stepFrame(dt);
   }
 
+  // The R key's bookkeeping: a scratch road record and how long the car has
+  // been off the road or stuck, for the one-time hint.
+  const resetHint = { road: {}, offRoad: 0, stuck: 0 };
+  const CAMERA_NAMES = {
+    chase: 'Chase camera', chaseFar: 'Far chase camera', bonnet: 'Hood camera',
+    bumper: 'Bumper camera', orbit: 'Orbit camera',
+  };
+
   /**
    * One frame: input, physics, streaming, camera, render.
    *
@@ -733,16 +741,42 @@ async function boot() {
     }
     // Escape leaves inspection too, rather than opening the pause menu behind it.
     if (input.pause && mode === 'inspect') startDriving();
-    if (input.camera) cameraMode = (cameraMode + 1) % MODES.length;
+    if (input.camera) {
+      cameraMode = (cameraMode + 1) % MODES.length;
+      if (mode === 'driving') hud.toast(CAMERA_NAMES[MODES[cameraMode]] || '', 1.2);
+    }
     if (input.reset && mode === 'driving') {
+      // Back onto the nearest road, FACING THE WAY YOU WERE GOING. The road's
+      // own direction is an accident of how it was drawn, so half of all resets
+      // used to turn the car round and point it back where it had come from.
+      // Flipping also moves it across to the lane for that direction.
+      const wasYaw = car.yaw;
       spawnOnRoad(car.x, car.z);
+      if (Math.cos(car.yaw - wasYaw) < 0) {
+        const rd = ground.roadAt(car.x, car.z, resetHint.road);
+        const across = rd && rd.width ? rd.width * 0.5 : 0;   // one lane over, both lanes' centres
+        car.reset(car.x - Math.cos(car.yaw) * across, car.z + Math.sin(car.yaw) * across, car.yaw + Math.PI);
+      }
       // Respawning repairs. Leaving a wreck wrecked after a reset strands the
       // player with no route back to a working car.
       if (car.damage) car.damage.reset();
       if (carDamage) carDamage.reset();
       damageFx.reset();
       drift.reset();
-      hud.toast('Repaired', 1.6);
+      resetHint.offRoad = 0; resetHint.stuck = 0;
+      hud.toast('Back on the road', 1.6);
+    }
+    // The first time the car is plainly off the road, or going nowhere with the
+    // throttle down, say how to get back. Once: tutorial() remembers. A kid in a
+    // field with no idea R exists is a kid who closes the tab.
+    if (mode === 'driving') {
+      const here = ground.roadAt(car.x, car.z, resetHint.road);
+      resetHint.offRoad = !here.onRoad && car.speed > 2 ? resetHint.offRoad + dt : 0;
+      resetHint.stuck = car.speed < 1.5 && input.throttle > 0.5 ? resetHint.stuck + dt : 0;
+      if (resetHint.offRoad > 2 || resetHint.stuck > 2.5) {
+        tutorial('reset', touch.isTouch ? 'Off the road? Tap Road to get back on it'
+          : 'Off the road? Press R to get back on it', 5);
+      }
     }
     if (input.lights) headlights = !headlights;
     if (input.indLeft) indicator = indicator === -1 ? 0 : -1;
@@ -1301,10 +1335,68 @@ async function boot() {
     return best || 'Open country';
   }
 
+  // ---- the camera ---------------------------------------------------------
+  // State for the chase camera, kept between frames on one object so the frame
+  // path allocates nothing.
+  const chase = {
+    yaw: 0, yawVel: 0,          // azimuth the camera sits behind, and its rate
+    dist: 6, height: 2.2,       // smoothed framing
+    baseY: 0,                   // car height with the suspension's bounce filtered out
+    shakeT: 0,
+    live: false,                // false = snap next frame (first frame, respawn)
+  };
+  const hoodEye = new THREE.Vector3();
+  const hoodAim = new THREE.Vector3();
+  const carUp = new THREE.Vector3();
+  const WORLD_UP = new THREE.Vector3(0, 1, 0);
+  const wrapPi = (a) => a - Math.round(a / (Math.PI * 2)) * Math.PI * 2;
+
+  /** Small smooth wobble, -1..1. Sines, not Math.random: noise at frame rate
+   *  reads as a broken camera, a few hertz reads as a road. */
+  function wobble(t, a, b) { return Math.sin(t * a) * 0.6 + Math.sin(t * b + 1.3) * 0.4; }
+
+  /**
+   * Rotation-only shake, after lookAt (which would overwrite it), so it can
+   * never push the camera into the road or the car. Speed gives a whisper of
+   * it on tarmac; unmade ground gives a lot — that and the drag in
+   * vehicle.js are what make a field feel like a field.
+   */
+  function applyShake(dt, scale) {
+    const v = car.speed;
+    const surf = ground.SURFACES ? ground.SURFACES[car.surface] : null;
+    const rough = surf ? surf.roughness : 0.03;
+    const speedT = Math.min(1, v / 60);
+    let amp = 0.0010 * speedT * speedT +
+      (car.offroad * 0.0055 + rough * 0.0035) * Math.min(1, v / 14);
+    // A landing is a single thump, not a rumble.
+    const sinceLanding = car.time - car.landedAt;
+    if (car.landedAt > 0 && sinceLanding < 0.35) amp += 0.012 * (1 - sinceLanding / 0.35);
+    amp *= scale;
+    chase.shakeT += dt * (5 + v * 0.35);
+    if (amp > 1e-5) {
+      camera.rotateX(wobble(chase.shakeT, 1.7, 3.1) * amp);
+      camera.rotateZ(wobble(chase.shakeT, 2.3, 4.3) * amp * 0.6);
+    }
+    // Blast shake from a nearby explosion.
+    if (boom && boom.shake > 0.001) {
+      const k = boom.shake * boom.shake * 0.05;
+      camera.rotateX((Math.random() * 2 - 1) * k);
+      camera.rotateY((Math.random() * 2 - 1) * k);
+      camera.rotateZ((Math.random() * 2 - 1) * k * 1.4);
+    }
+  }
+
+  function setFov(target, rate, dt) {
+    camera.fov += (target - camera.fov) * Math.min(1, dt * rate);
+    camera.updateProjectionMatrix();
+  }
+
   function updateCamera(dt, driving) {
     const m = MODES[cameraMode];
     const fx = -Math.sin(car.yaw), fz = -Math.cos(car.yaw);
-    const speedT = Math.min(1, car.speed / 62);
+    const rx = Math.cos(car.yaw), rz = -Math.sin(car.yaw);
+    const v = car.speed;
+    const speedT = Math.min(1, v / 55);
 
     if (mode === 'inspect') {
       // Orbit the car itself. Arrow keys work as well as the pointer, because
@@ -1325,8 +1417,8 @@ async function boot() {
       camLook.lerp(camTarget.set(car.x, car.y + 0.45, car.z), 1 - Math.exp(-14 * dt));
       camera.up.set(0, 1, 0);
       camera.lookAt(camLook);
-      camera.fov += (38 - camera.fov) * Math.min(1, dt * 5);
-      camera.updateProjectionMatrix();
+      setFov(38, 5, dt);
+      chase.live = false;
       return;
     }
 
@@ -1337,22 +1429,33 @@ async function boot() {
       camWanted.set(car.x + Math.cos(t) * 11, car.y + 3.4, car.z + Math.sin(t) * 11);
       camLook.set(car.x, car.y + 0.7, car.z);
       camera.position.lerp(camWanted, 1 - Math.exp(-3 * dt));
+      camera.up.set(0, 1, 0);
       camera.lookAt(camLook);
-      camera.fov += (58 - camera.fov) * Math.min(1, dt * 4);
-      camera.updateProjectionMatrix();
+      setFov(58, 4, dt);
+      chase.live = false;
       return;
     }
 
     if (m === 'bonnet' || m === 'bumper') {
+      // Mounted ON the car, so it rides the car's own pitch and roll: the nose
+      // dives under braking and the horizon leans in a corner, which is most of
+      // what makes an in-car view feel fast. The horizon is only half-followed,
+      // because a camera bolted rigidly to a body that rolls 7 degrees reads as
+      // the world tilting, not the car.
       const h = m === 'bonnet' ? 1.14 : 0.62;
       const fwd = m === 'bonnet' ? 0.45 : 1.9;
-      camera.position.set(car.x + fx * fwd, car.y + h, car.z + fz * fwd);
-      camLook.set(car.x + fx * 60, car.y + h - car.pitch * 26, car.z + fz * 60);
-      camera.up.set(0, 1, 0);
-      camera.lookAt(camLook);
-      camera.rotateZ(-car.roll * 0.55);
-      camera.fov += ((62 + speedT * 14) - camera.fov) * Math.min(1, dt * 3);
-      camera.updateProjectionMatrix();
+      carRoot.updateMatrixWorld();
+      hoodEye.set(0, h, -fwd);
+      carRoot.localToWorld(hoodEye);
+      hoodAim.set(0, h - 0.35, -fwd - 40);
+      carRoot.localToWorld(hoodAim);
+      carUp.set(0, 1, 0).transformDirection(carRoot.matrixWorld);
+      camera.position.copy(hoodEye);
+      camera.up.copy(carUp).lerp(WORLD_UP, 0.5).normalize();
+      camera.lookAt(hoodAim);
+      applyShake(dt, m === 'bumper' ? 1.6 : 1.1);
+      setFov((m === 'bumper' ? 68 : 64) + speedT * speedT * 14, 3, dt);
+      chase.live = false;
       return;
     }
 
@@ -1361,50 +1464,84 @@ async function boot() {
       camWanted.set(car.x + Math.cos(t) * 14, car.y + 5.5, car.z + Math.sin(t) * 14);
       camera.position.lerp(camWanted, 1 - Math.exp(-2.4 * dt));
       camLook.set(car.x, car.y + 0.8, car.z);
+      camera.up.set(0, 1, 0);
       camera.lookAt(camLook);
+      setFov(60, 3, dt);
+      chase.live = false;
       return;
     }
 
-    // Chase. The camera trails the car's HEADING, not its velocity: chasing the
-    // velocity vector means the view swings wildly the moment the car steps out
-    // of line, exactly when the player most needs a stable horizon.
+    // ---- chase ----
+    // Lower and closer than it was (7.4 m back and 3.0 m up, a view of the
+    // roof): close enough that the car fills the lower third and you can see
+    // it lean and squat, low enough that the road ahead is the biggest thing
+    // on the screen. Scaled by the car, so a pickup is not framed like a coupe.
     const far = m === 'chaseFar';
-    const back = (far ? 11.5 : 7.4) + speedT * 3.4;
-    const high = (far ? 4.6 : 3.0) + speedT * 0.5;
-    const lookBack = controls.state.lookBack > 0 ? -1 : 1;
+    const size = car.spec.wheelbase, tall = car.spec.rideHeight;
+    const wantDist = (far ? 9.0 : 4.7) + size * 0.62 + speedT * 1.4;
+    const wantHigh = (far ? 3.3 : 1.35) + tall * 1.6 + size * 0.08 + speedT * 0.25;
+    const lookBack = controls.state.lookBack > 0;
 
-    camWanted.set(
-      car.x - fx * back * lookBack,
-      car.y + high,
-      car.z - fz * back * lookBack,
+    // Trails the HEADING, not the velocity: chasing the velocity swings the
+    // view wildly the moment the car steps out, exactly when a stable horizon
+    // matters. But a third of the body slip is let through, so in a slide the
+    // camera eases round to show where the car is actually going.
+    const slip = clampNum(car.bodySlip || 0, -0.6, 0.6);
+    let wantYaw = car.yaw - slip * 0.35 + (lookBack ? Math.PI : 0);
+
+    const jumped = Math.hypot(camera.position.x - car.x, camera.position.z - car.z) > 60;
+    if (!chase.live || jumped) {
+      // First frame, a respawn, or a camera mode change: cut, do not swing.
+      chase.yaw = wantYaw; chase.yawVel = 0;
+      chase.dist = wantDist; chase.height = wantHigh; chase.baseY = car.y;
+      chase.live = true;
+    }
+    // A critically damped angular spring. It swings round the car instead of
+    // cutting the corner through it, and lags just enough to show the turn.
+    const w = lookBack ? 18 : 6.5;
+    const err = wrapPi(wantYaw - chase.yaw);
+    chase.yawVel += (err * w * w - chase.yawVel * 2 * w) * dt;
+    chase.yaw = wrapPi(chase.yaw + chase.yawVel * dt);
+    chase.dist += (wantDist - chase.dist) * (1 - Math.exp(-2.5 * dt));
+    chase.height += (wantHigh - chase.height) * (1 - Math.exp(-2.5 * dt));
+    // The suspension bounces the car at several hertz; the camera should not.
+    chase.baseY += (car.y - chase.baseY) * (1 - Math.exp(-7 * dt));
+
+    const bx = -Math.sin(chase.yaw), bz = -Math.cos(chase.yaw);
+    camWanted.set(car.x - bx * chase.dist, chase.baseY + chase.height, car.z - bz * chase.dist);
+
+    // Never inside the terrain — neither the camera itself nor the line from
+    // it to the car. A chase camera on a hillside otherwise ends up looking at
+    // the back of a slope, or from under it.
+    const ground0 = ground.heightAt(camWanted.x, camWanted.z) + 0.55;
+    if (camWanted.y < ground0) camWanted.y = ground0;
+    const mx = (camWanted.x + car.x) * 0.5, mz = (camWanted.z + car.z) * 0.5;
+    const my = (camWanted.y + car.y + 0.9) * 0.5;
+    const groundMid = ground.heightAt(mx, mz) + 0.4;
+    if (my < groundMid) camWanted.y += (groundMid - my) * 2;
+    camera.position.copy(camWanted);
+
+    // Look where the car is GOING to be. With yaw rate r at speed v the path
+    // bends at r/v per metre, so a point d metres down it sits r*d^2/(2v) to
+    // the side: aim there and the camera leads into a corner rather than
+    // staring at the outside of it.
+    const lookDist = clampNum(7 + v * 0.3, 7, 20) * (lookBack ? -1 : 1);
+    const bend = clampNum(car.yawRate * lookDist * lookDist / (2 * Math.max(6, v)), -Math.abs(lookDist) * 0.35, Math.abs(lookDist) * 0.35);
+    camTarget.set(
+      car.x + fx * lookDist - rx * bend,
+      chase.baseY + 0.75 + tall * 0.6,
+      car.z + fz * lookDist - rz * bend,
     );
-    // Keep the camera above the ground even when the car is in a dip.
-    const gy = ground.heightAt(camWanted.x, camWanted.z) + 1.6;
-    if (camWanted.y < gy) camWanted.y = gy;
-
-    // Critically damped spring rather than a lerp, so the follow distance does
-    // not depend on frame rate.
-    const stiffness = 42, damping = 2 * Math.sqrt(stiffness);
-    tmp.copy(camWanted).sub(camera.position).multiplyScalar(stiffness);
-    camVel.addScaledVector(tmp, dt).multiplyScalar(Math.exp(-damping * dt));
-    camera.position.addScaledVector(camVel, dt);
-
-    camTarget.set(car.x + fx * 9 * lookBack, car.y + 1.25, car.z + fz * 9 * lookBack);
-    camLook.lerp(camTarget, 1 - Math.exp(-11 * dt));
+    camLook.lerp(camTarget, 1 - Math.exp(-9 * dt));
     camera.up.set(0, 1, 0);
     camera.lookAt(camLook);
-    camera.rotateZ(-car.roll * 0.28);
-    // Blast shake. Applied after lookAt, which would otherwise overwrite it,
-    // and as rotation rather than position so it never shoves the camera
-    // through the road or the car.
-    if (boom && boom.shake > 0.001) {
-      const k = boom.shake * boom.shake * 0.05;
-      camera.rotateX((Math.random() * 2 - 1) * k);
-      camera.rotateY((Math.random() * 2 - 1) * k);
-      camera.rotateZ((Math.random() * 2 - 1) * k * 1.4);
-    }
-    camera.fov += ((60 + speedT * 16) - camera.fov) * Math.min(1, dt * 3);
-    camera.updateProjectionMatrix();
+    camera.rotateZ(-car.roll * 0.22);
+    applyShake(dt, far ? 0.6 : 1);
+
+    // Wider as the speed builds, and a little more under hard acceleration:
+    // the cheapest honest way to make 150 km/h look like 150 km/h.
+    const kick = clampNum(car.lonG, 0, 0.8) * 3;
+    setFov(60 + 15 * speedT * speedT + kick, 2.5, dt);
   }
 
   // ---- prime the streaming layers -----------------------------------------
@@ -1520,11 +1657,12 @@ function fallbackSun(scene) {
 }
 
 
+// The numbers live in vehicle.js (aidsFor), shared with the harnesses, so the
+// car the harnesses measure is the car the player gets. They used to be
+// written out here a second time, and had drifted: TC 0.55 here against the
+// vehicle's own default, and no notion that switching ESC off should relax TC.
 function applyAssists(car, s) {
-  car.feel.steer = Math.max(0.5, Math.min(2.5, s.steerFeel ?? 1));
-  car.aids.abs = s.abs === false ? 0 : 0.95;
-  car.aids.tc = s.tc === false ? 0 : 0.55;
-  car.aids.stability = s.esc === false ? 0 : 0.62;
+  car.setAssists(s);
 }
 
 boot().catch((err) => {

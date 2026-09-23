@@ -12,6 +12,7 @@ const CHECKS = [
   ['integration', 'every module loads and exports what main.js expects'],
   ['ground', 'the surface the physics stands on is continuous and total'],
   ['vehicle', 'the car accelerates, stops, corners and steers the right way'],
+  ['handling', 'keys steer like a driver would, and the car straightens itself'],
   ['catalog', 'every car matches the figures the garage quotes'],
   ['collision', 'buildings are solid and can never add energy'],
   ['damage', 'damage only ever takes capability away'],

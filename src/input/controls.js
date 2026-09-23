@@ -47,14 +47,27 @@ export function createControls(opts = {}) {
     map: false, inspect: false, reset: false, pause: false,
     steerDown: false, steerUp: false,
     usingGamepad: false,
+    // Which source is steering this frame: 'key', 'pad', 'touch' or ''. For
+    // diagnosis and the HUD; the vehicle treats every source the same.
+    steerSource: '',
   };
 
+  // Digital steering. A key is full lock or nothing, so the lock is wound on
+  // over STEER_BUILD and let off over STEER_RETURN — faster, because letting
+  // go of a wheel is always quicker than turning it, and because a car that
+  // keeps turning after the key comes up is the single most "unrealistic"
+  // thing a keyboard driver feels. The lock itself falls with speed inside
+  // vehicle.js, so full input is always the most a driver would use there.
   const settings = {
     sensitivity: 1.0,
-    steerSpeed: 5.6,       // rad/s of virtual wheel travel for digital input
-    steerReturn: 9.0,
+    steerSpeed: 6.25,      // full lock per second while a key is held: 0.16 s to full
+    steerReturn: 9.0,      // back toward centre, including the first half of a reversal: 0.11 s
     deadzone: 0.10,
     triggerDeadzone: 0.18,
+    // A stick is linear out of the box, which spends half its travel on the
+    // first half of the lock. A mild curve buys precision round the straight
+    // ahead without giving up full lock. Touch has its own, in touch.js.
+    padExpo: 1.3,
   };
   Object.assign(settings, opts.settings || {});
 
@@ -102,7 +115,8 @@ export function createControls(opts = {}) {
     const tdz = settings.triggerDeadzone;
     const trig = (v) => (v < tdz ? 0 : (v - tdz) / (1 - tdz));
 
-    padSteer = axis(pad.axes[0] || 0);
+    const rawSteer = axis(pad.axes[0] || 0);
+    padSteer = Math.sign(rawSteer) * Math.pow(Math.abs(rawSteer), settings.padExpo);
     const rt = trig(pad.buttons[7] ? pad.buttons[7].value : 0);
     const lt = trig(pad.buttons[6] ? pad.buttons[6].value : 0);
     padThrottle = Math.max(rt, pad.buttons[0] && pad.buttons[0].pressed ? 1 : 0);
@@ -152,15 +166,23 @@ export function createControls(opts = {}) {
     // undriveable, since a key is either full lock or nothing.
     let target = kbSteer;
     let analogue = false;
-    if (Math.abs(tSteer) > Math.abs(target)) { target = tSteer; analogue = true; }
-    if (padActive && Math.abs(padSteer) > Math.abs(target)) { target = padSteer; analogue = true; }
+    state.steerSource = kbSteer !== 0 ? 'key' : '';
+    if (Math.abs(tSteer) > Math.abs(target)) { target = tSteer; analogue = true; state.steerSource = 'touch'; }
+    if (padActive && Math.abs(padSteer) > Math.abs(target)) { target = padSteer; analogue = true; state.steerSource = 'pad'; }
     target = Math.max(-1, Math.min(1, target * settings.sensitivity));
 
     if (analogue) {
       steerSmooth += (target - steerSmooth) * Math.min(1, dt * 22);
     } else {
-      const rate = (target === 0 ? settings.steerReturn : settings.steerSpeed) * dt;
-      steerSmooth += Math.max(-rate, Math.min(rate, target - steerSmooth));
+      // Unwinding — toward centre, or through it on the way to the other lock —
+      // runs at the return rate; only winding lock ON runs at the build rate.
+      // A reversal used to swing the whole way at the build rate, 0.36 s from
+      // one lock to the other, so a flick left-right felt like steering through
+      // treacle. Now it is 0.11 s to centre and 0.18 s on to full.
+      const unwinding = target === 0 || (steerSmooth !== 0 && Math.sign(target) !== Math.sign(steerSmooth));
+      const rate = (unwinding ? settings.steerReturn : settings.steerSpeed) * dt;
+      const goal = unwinding && target !== 0 ? 0 : target;
+      steerSmooth += Math.max(-rate, Math.min(rate, goal - steerSmooth));
     }
     state.steer = Math.max(-1, Math.min(1, steerSmooth));
 
@@ -176,7 +198,7 @@ export function createControls(opts = {}) {
     state.steerDown = anyPressed(KEYMAP.steerDown);
     state.steerUp = anyPressed(KEYMAP.steerUp);
     state.pause = anyPressed(KEYMAP.pause);
-    state.reset = anyPressed(KEYMAP.reset);
+    state.reset = anyPressed(KEYMAP.reset) || !!(touch && touch.reset);
     state.lights = anyPressed(KEYMAP.lights);
     state.indLeft = anyPressed(KEYMAP.indLeft);
     state.indRight = anyPressed(KEYMAP.indRight);
@@ -195,6 +217,7 @@ export function createControls(opts = {}) {
     held.clear();
     pressed.clear();
     steerSmooth = 0;
+    state.steerSource = '';
     padSteer = padThrottle = padBrake = padHandbrake = 0;
     state.throttle = state.brake = state.steer = state.handbrake = 0;
     state.shiftUp = state.shiftDown = state.camera = false;

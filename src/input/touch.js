@@ -81,6 +81,10 @@ for (let i = 0; i <= 200; i++) STEER_STR[i] = ((i - 100) / 100).toFixed(2);
 const PEDAL_STR = new Array(21);
 for (let i = 0; i <= 20; i++) PEDAL_STR[i] = (i / 20).toFixed(2);
 
+// The Road button (back onto the nearest road, the R key's job) sits out of
+// the aux group's flow, just above it: in portrait that group is a 2x2 grid
+// whose fourth cell is deliberately left for the handbrake, and a fourth aux
+// button in the flow lands underneath it.
 const MARKUP = `
 <div class="touch__steer" data-ctl="steer">
   <div class="touch__wheel">
@@ -106,6 +110,8 @@ const MARKUP = `
   <button type="button" tabindex="-1" class="touch__btn" data-ctl="camera" aria-label="Change camera">Cam</button>
   <button type="button" tabindex="-1" class="touch__btn" data-ctl="horn" aria-label="Horn">Horn</button>
   <button type="button" tabindex="-1" class="touch__btn" data-ctl="look" aria-label="Look behind">Look</button>
+  <button type="button" tabindex="-1" class="touch__btn" data-ctl="reset" aria-label="Back to the road"
+    style="position:absolute;right:0;bottom:calc(100% + 0.5rem)">Road</button>
 </div>
 <div class="touch__pads">
   <button type="button" tabindex="-1" class="touch__hand" data-ctl="handbrake" aria-label="Handbrake">Hand<br>brake</button>
@@ -192,7 +198,9 @@ export function createTouchControls(root, opts = {}) {
   const horn = mk('horn');
   const look = mk('look');
   const camera = mk('camera');
-  const ALL = [steer, gas, brake, hand, horn, look, camera];
+  // A phone has no R key, and a car stuck in a field on a phone is a game over.
+  const reset = mk('reset');
+  const ALL = [steer, gas, brake, hand, horn, look, camera, reset];
   const BY_NAME = Object.create(null);
   for (let i = 0; i < ALL.length; i++) BY_NAME[ALL[i].name] = ALL[i];
 
@@ -316,7 +324,7 @@ export function createTouchControls(root, opts = {}) {
       steerRaw = 0;
     } else if (c === gas || c === brake) {
       c.feather = 1;
-    } else if (c === camera) {
+    } else if (c === camera || c === reset) {
       c.edge = true;      // consumed by the next read()
     }
   }
@@ -519,7 +527,7 @@ export function createTouchControls(root, opts = {}) {
   // ---- per-frame ----------------------------------------------------------
   const _state = {
     throttle: 0, brake: 0, steer: 0, handbrake: 0,
-    look: 0, lookBack: 0, camera: false, horn: false,
+    look: 0, lookBack: 0, camera: false, horn: false, reset: false,
   };
   let last = 0;
 
@@ -592,7 +600,7 @@ export function createTouchControls(root, opts = {}) {
 
     if (!visible || disposed) {
       o.throttle = 0; o.brake = 0; o.steer = 0; o.handbrake = 0;
-      o.look = 0; o.lookBack = 0; o.camera = false; o.horn = false;
+      o.look = 0; o.lookBack = 0; o.camera = false; o.horn = false; o.reset = false;
       return o;
     }
 
@@ -605,6 +613,8 @@ export function createTouchControls(root, opts = {}) {
     o.horn = horn.down;
     o.camera = camera.edge;
     camera.edge = false;
+    o.reset = reset.edge;
+    reset.edge = false;
 
     paint(o.steer, o.throttle, o.brake);
     return o;

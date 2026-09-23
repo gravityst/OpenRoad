@@ -23,6 +23,7 @@ const CHECKS = [
   ['traffic', 'the other cars behave like traffic'],
   ['drift', 'sideways scores, straight does not, and the detector never flickers'],
   ['brand', 'every name in the game is invented'],
+  ['nature', 'trees, rocks and grass grow where they should and cost what they say'],
 ];
 
 const results = [];

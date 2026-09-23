@@ -74,9 +74,23 @@
 // converging to it, so distant ground keeps a full-strength wobble that
 // scintillates as the car moves. Hence the explicit distance fade — it exists
 // for the normal term, and the albedo just comes along with it.
+//
+// BETWEEN THE DETAIL AND THE VERTICES there used to be nothing: the maps stop
+// at 3.7 m and the vertex colours at the vertex spacing, and a field is flat in
+// exactly the band between. A third map, `macro`, fills it per pixel at 310 m
+// and 53 m and is NOT faded — it is what keeps a far hillside from being one
+// colour. Slope-driven soil and rock are per pixel too. Land use (fields, the
+// forest floor, the river bed, worn verges and shoulders) is per vertex, from
+// layout.js, so the physics and the paint agree on where things are.
+//
+// ABOVE THE GROUND: instanced grass tufts near the camera (see "Grass tufts"),
+// coloured by this same palette so they melt into the ground they stand on;
+// and the sun's shadow map, received on the rings it covers.
 
 import * as THREE from 'three';
-import { fbm, valueNoise, hash2, clamp, lerp, smoothstep } from '../world/noise.js';
+import { fbm, valueNoise, clamp, lerp, smoothstep, tileNoise, tileFbm, tileCells } from '../world/noise.js';
+import { valleyWeight, woodland, fieldAt } from '../world/layout.js';
+import { paintGrassCard } from './foliage.js';
 
 // rings[l] is the largest Chebyshev chunk distance still drawn at level l;
 // grids[l] is that level's quad count per chunk edge. 128 / grid = vertex
@@ -91,20 +105,46 @@ import { fbm, valueNoise, hash2, clamp, lerp, smoothstep } from '../world/noise.
 // skirt depths and the streaming behaviour out at the horizon are all exactly
 // as they were. Raising level 1 to 48 as well was tried and rejected: another
 // 108 000 triangles spread over forty chunks that are mostly past the fade.
+//
+// `shadowRing` is the last LOD level that receives the sun's shadow map. The
+// ground used to receive none at all, so a car that left the tarmac lost its
+// shadow and floated; medium and high now take it on the rings the shadow map
+// actually covers. `grass` is the tuft field near the camera (see below).
 const QUALITY = {
-  low:    { rings: [0, 2, 4, 6], grids: [48, 24, 12,  6], budgetMs: 2.0, fade: [34,  82] },
-  medium: { rings: [1, 2, 4, 7], grids: [80, 32, 16,  8], budgetMs: 2.5, fade: [55, 132] },
-  high:   { rings: [1, 3, 5, 8], grids: [96, 32, 16,  8], budgetMs: 3.0, fade: [72, 172] },
+  low:    { rings: [0, 2, 4, 6], grids: [48, 24, 12,  6], budgetMs: 2.0, fade: [34,  82], shadowRing: -1,
+            grass: null },
+  medium: { rings: [1, 2, 4, 7], grids: [80, 32, 16,  8], budgetMs: 2.5, fade: [55, 132], shadowRing: 0,
+            grass: { tile: 12, ring: 7, per: 150, fade: [27, 40], shadows: false } },
+  high:   { rings: [1, 3, 5, 8], grids: [96, 32, 16,  8], budgetMs: 3.0, fade: [72, 172], shadowRing: 1,
+            grass: { tile: 12, ring: 9, per: 220, fade: [37, 53], shadows: true } },
 };
 
 // Materials whose colour is stamped on by a road rather than grown by the terrain.
 const PAVED = { asphalt: 1, concrete: 1, sidewalk: 1, gravel: 1 };
 
-// Grass endpoints, hand-picked rather than taken from SURFACES.grass: one flat
-// green over four square kilometres reads as painted plastic at any speed.
-const LUSH = [0.19, 0.33, 0.12];
-const DRY  = [0.47, 0.44, 0.22];
+// Grass, hand-picked rather than taken from SURFACES.grass: one flat green over
+// sixteen square kilometres reads as painted plastic at any speed. Three stops
+// rather than two, because the old lush-to-straw ramp went through nothing in
+// between and the whole map sat at its saturated end — measured from the
+// driver's seat it was the green of a snooker table. Real pasture at eye level
+// is an olive, yellow-leaning green; the lush end is kept for the valley floor.
+const LUSH   = [0.21, 0.28, 0.11];
+const MEADOW = [0.33, 0.35, 0.16];
+const DRY    = [0.52, 0.47, 0.28];
 const SOIL = [0.34, 0.26, 0.16];
+// A verge that tyres and feet have worn: trampled grass over dusty soil.
+const WORN = [0.43, 0.40, 0.29];
+// The outer edge of a gravel shoulder, where grass has grown back through it.
+const GROWN = [0.40, 0.40, 0.30];
+// The dry river bed: pale, grey, gravelly sand rather than beach.
+const WASH = [0.56, 0.53, 0.46];
+// Forest floor: shade, leaf litter and moss, and not much grass.
+const FLOOR = [0.23, 0.25, 0.13];
+// Land use (layout.js fieldAt): mown hay, a grain crop green and ripe, fallow.
+const HAY = [0.45, 0.45, 0.23];
+const CROP_GREEN = [0.38, 0.43, 0.17];
+const CROP_RIPE = [0.62, 0.54, 0.27];
+const FALLOW = [0.39, 0.37, 0.22];
 // Wet churned earth, for the fringe where tyres have dragged a dirt road out
 // onto the verge. Darker than SOIL and much less saturated — mud is soil with
 // the light gone out of it.
@@ -128,9 +168,11 @@ const DETAIL = {
 // Surfaces as small integers, so the mud fringe can test a vertex's neighbours
 // with array lookups instead of string comparisons. 0 means "not sampled".
 const MCODE = { asphalt: 1, concrete: 2, sidewalk: 3, dirt: 4, gravel: 5, grass: 6, sand: 7, rock: 8 };
-// How muddy a neighbour makes you. A dirt road is the real source; the gravel
-// shoulder of a sealed road gets a weaker version of the same treatment.
-const MUDDY = new Float32Array([0, 0, 0, 0, 1.0, 0.35, 0, 0, 0]);
+// How muddy a neighbour makes you. A dirt road is the real source. Gravel
+// shoulders used to get a third of it, which drew a dark sawtooth down both
+// sides of every lane at the vertex spacing; the grass beside a shoulder is
+// dusty, not muddy, and verge wear (fillRows) paints that instead.
+const MUDDY = new Float32Array([0, 0, 0, 0, 1.0, 0, 0, 0, 0]);
 // ...and which surfaces will take mud at all. Tarmac does not.
 const TAKES_MUD = new Float32Array([0, 0, 0, 0, 0, 0, 1, 0.8, 0.5]);
 
@@ -166,65 +208,9 @@ const clock = typeof performance !== 'undefined' && performance.now ? performanc
 // ===========================================================================
 // Tileable noise
 // ===========================================================================
-// noise.js is used everywhere else, but its lattice is infinite and a detail
-// texture has to WRAP — a seam every 1.15 m is the one artefact you would see
-// from the driver's seat before anything else. These are the same quintic value
-// noise and the same hash, with the lattice index taken modulo the period.
-
-// The period is per-axis rather than a single number, because a grass blade is
-// not round: a lattice that is wide in X and short in Z produces features that
-// are long in X and thin in Z, which is the only cheap way to draw something
-// blade-shaped out of value noise.
-
-function quintic(t) { return t * t * t * (t * (t * 6 - 15) + 10); }
-
-function tileHash(ix, iz, px, pz, seed) {
-  ix -= Math.floor(ix / px) * px;
-  iz -= Math.floor(iz / pz) * pz;
-  return hash2(ix, iz, seed);
-}
-
-function tileNoise(x, z, px, pz, seed) {
-  const x0 = Math.floor(x), z0 = Math.floor(z);
-  const u = quintic(x - x0), v = quintic(z - z0);
-  const a = tileHash(x0, z0, px, pz, seed), b = tileHash(x0 + 1, z0, px, pz, seed);
-  const c = tileHash(x0, z0 + 1, px, pz, seed), d = tileHash(x0 + 1, z0 + 1, px, pz, seed);
-  const top = a + (b - a) * u, bot = c + (d - c) * u;
-  return (top + (bot - top) * v) * 2 - 1;
-}
-
-/** Fractal sum in [-1,1]. Periods must be integers; every octave doubles them. */
-function tileFbm(x, z, px, pz, seed, octaves) {
-  let sum = 0, amp = 1, norm = 0, f = 1;
-  for (let o = 0; o < octaves; o++) {
-    sum += tileNoise(x * f, z * f, px * f, pz * f, seed + o * 1013) * amp;
-    norm += amp; amp *= 0.5; f *= 2;
-  }
-  return sum / norm;
-}
-
-// Worley cells, wrapped the same way. d1/d2 give the distance to the nearest
-// and second-nearest feature point; d2 - d1 is small only on the boundary
-// between two cells, which is what draws the dark gap between two gravel chips
-// or the crack between two dried clods. `tone` is the winning cell's own
-// brightness, so no two chips are the same shade.
+// tileNoise, tileFbm and tileCells live in noise.js now, beside the infinite
+// versions, because the props layer paints a rock texture with them too.
 const cellOut = { d1: 0, d2: 0, tone: 0 };
-function tileCells(x, z, p, seed, out) {
-  const xi = Math.floor(x), zi = Math.floor(z);
-  let d1 = 9, d2 = 9, tone = 0;
-  for (let dz = -1; dz <= 1; dz++) {
-    for (let dx = -1; dx <= 1; dx++) {
-      const cx = xi + dx, cz = zi + dz;
-      const ex = cx + tileHash(cx, cz, p, p, seed) * 0.92 + 0.04 - x;
-      const ez = cz + tileHash(cx, cz, p, p, seed + 733) * 0.92 + 0.04 - z;
-      const d = ex * ex + ez * ez;
-      if (d < d1) { d2 = d1; d1 = d; tone = tileHash(cx, cz, p, p, seed + 4441); }
-      else if (d < d2) d2 = d;
-    }
-  }
-  out.d1 = Math.sqrt(d1); out.d2 = Math.sqrt(d2); out.tone = tone;
-  return out;
-}
 
 /**
  * Pack a tiling height field into a texture's B and A channels as a
@@ -378,6 +364,43 @@ function coarseTexture(seed) {
   return px;
 }
 
+/**
+ * Macro variation: four independent smooth noises at different frequencies,
+ * one per channel, each stretched to fill 0..1.
+ *
+ * The detail maps stop at 3.7 m and the vertex colours at the vertex spacing,
+ * so everything between a few metres and a few hundred — clumps, patches,
+ * drainage, the sheep track — used to be missing, and that band is exactly
+ * where a flat field reads as flat. This fills it, per pixel, at every range,
+ * sampled at two incommensurate world scales (310 m and 53 m) so neither
+ * repeat can line up with the other.
+ *
+ *   R  large patches        G  medium patches
+ *   B  small clumps         A  where the grass has dried out
+ */
+function macroTexture(seed) {
+  const W = 256;
+  const px = new Uint8Array(W * W * 4);
+  const ch = [new Float32Array(W * W), new Float32Array(W * W), new Float32Array(W * W), new Float32Array(W * W)];
+  for (let j = 0; j < W; j++) {
+    const v = j / W;
+    for (let i = 0; i < W; i++) {
+      const u = i / W, c = j * W + i;
+      ch[0][c] = tileFbm(u * 4, v * 4, 4, 4, seed + 41, 4);
+      ch[1][c] = tileFbm(u * 7, v * 7, 7, 7, seed + 42, 3);
+      ch[2][c] = tileFbm(u * 19, v * 19, 19, 19, seed + 43, 3);
+      ch[3][c] = tileFbm(u * 9, v * 9, 9, 9, seed + 44, 4);
+    }
+  }
+  for (let k = 0; k < 4; k++) {
+    let lo = Infinity, hi = -Infinity;
+    for (const x of ch[k]) { if (x < lo) lo = x; if (x > hi) hi = x; }
+    const inv = 1 / Math.max(1e-6, hi - lo);
+    for (let c = 0; c < W * W; c++) px[c * 4 + k] = ((ch[k][c] - lo) * inv) * 255 + 0.5;
+  }
+  return { px, W };
+}
+
 // ===========================================================================
 // Shader
 // ===========================================================================
@@ -410,6 +433,8 @@ uniform vec4 orMid;         // each mask's measured mean
 uniform vec4 orContrast;    // albedo swing per mask
 uniform vec2 orRelief;      // normal strength, fine and coarse
 uniform float orWarmth;
+uniform sampler2D orMacro;
+uniform vec2 orMacroTile;   // 1 / macro tile sizes, large and medium
 varying vec4 vOrPos;
 varying vec4 vOrWeight;
 varying vec3 vOrNormal;
@@ -419,6 +444,34 @@ const F_MAIN = `
 {
   float orF = vOrPos.w;
   vec3 orN = normalize( vOrNormal );
+  vec4 orW = vOrWeight;
+
+  // ---- Macro variation, at every range. -----------------------------------
+  // On grass it shifts hue (olive <-> blue-green) and brightness in patches,
+  // and bleaches the patches the A channel marks as dried out; on everything
+  // else it is a gentle brightness mottle. Weighted by the grass mask so a
+  // road shoulder beside a field does not inherit the field's patchwork.
+  vec4 orMa = texture2D( orMacro, vOrPos.xz * orMacroTile.x );
+  vec4 orMb = texture2D( orMacro, vOrPos.xz * orMacroTile.y + vec2( 0.37, 0.61 ) );
+  float orG = clamp( orW.z * 1.06, 0.0, 1.0 );
+  float orPatch = ( orMa.r - 0.5 ) * 1.2 + ( orMb.g - 0.5 ) * 0.7;
+  vec3 orMod = vec3( 1.0 + orPatch * 0.15, 1.0 + orPatch * 0.03, 1.0 - orPatch * 0.24 )
+             * ( 1.0 + ( orMb.b - 0.5 ) * 0.26 + ( orMa.g - 0.5 ) * 0.16 );
+  orMod = mix( orMod, vec3( 1.40, 1.22, 0.86 ), smoothstep( 0.62, 0.80, orMb.a ) * 0.6 );
+  diffuseColor.rgb *= mix( vec3( 1.0 + ( orMb.b - 0.5 ) * 0.16 ), orMod, orG );
+
+  // ---- Slope, per pixel. ---------------------------------------------------
+  // Turf gives way to bare soil past about 22 degrees and to rock past about
+  // 30, with the threshold jittered by the clump noise so the edge is ragged
+  // the way an eroded bank is, not a contour line. Cuttings and embankments
+  // beside the roads are where this mostly shows.
+  float orSl = 1.0 - orN.y + ( orMb.b - 0.5 ) * 0.05;
+  float orBare = smoothstep( 0.075, 0.125, orSl ) * orG;
+  float orRock = smoothstep( 0.125, 0.19, orSl );
+  float orStrata = 0.84 + 0.16 * sin( vOrPos.y * 2.7 + orMa.r * 9.0 );
+  diffuseColor.rgb = mix( diffuseColor.rgb, vec3( 0.095, 0.055, 0.024 ) * ( 0.85 + orMb.b * 0.3 ), orBare );
+  diffuseColor.rgb = mix( diffuseColor.rgb, vec3( 0.18, 0.165, 0.145 ) * orStrata, orRock );
+  orW = vec4( orW.x + orRock * 0.9, orW.y, orW.z * ( 1.0 - max( orBare, orRock ) ), orW.w + orBare * 0.8 );
   // ^4 rather than ^2, so the crossfade between projections is confined to
   // genuinely steep ground: at 20 degrees of slope the up plane still holds 98%
   // of the weight, where ^2 would already have given a side plane 12% and put a
@@ -434,7 +487,6 @@ const F_MAIN = `
   vec4 cT = texture2D( orCoarse, vOrPos.xz * orTile.y );
 
   vec4 orM = vec4( fT.r, fT.g, cT.r, cT.g ) - orMid;
-  vec4 orW = vOrWeight;
   float orL = dot( orM, orW * orContrast ) * orF;
   // Blade tips and ripple crests are sun-dried and read warm; the shade down in
   // a soil crack reads cold. One free tilt out of taps already paid for.
@@ -454,12 +506,85 @@ const F_MAIN = `
 }
 `;
 
+// ---------------------------------------------------------------------------
+// Grass tufts
+// ---------------------------------------------------------------------------
+// A tuft is three crossed vertical cards, each carrying a painted clump of
+// seventy-odd blades (foliage.js, paintGrassCard). An earlier version built
+// tufts from eleven single-triangle blades; at the density a frame can afford
+// that reads as a scatter of dark sticks, where a textured card reads as grass
+// from the first metre. Six triangles a tuft instead of eleven.
+//
+// The card normals point straight up, so a tuft is lit exactly like the ground
+// it stands in and melts into it at the fade instead of sitting on it as a
+// darker or brighter smudge. Its colour comes from the same palette and the
+// same macro texture the ground uses, for the same reason: the texture is only
+// a neutral multiplier.
+
+const GRASS_VERT_PARS = `
+attribute vec4 iPos;      // x y z, blade height (m)
+attribute vec4 iCol;      // linear rgb, heading (rad)
+uniform vec4 orGWind;     // xz direction, strength, time
+uniform vec2 orGFade;     // shrink from, gone by (m)
+uniform sampler2D orMacro;
+uniform vec2 orMacroTile;
+`;
+
+const GRASS_VERT_BEGIN = `
+float orGc = cos( iCol.w ), orGs = sin( iCol.w );
+vec3 transformed = vec3( position.x * orGc + position.z * orGs, position.y, - position.x * orGs + position.z * orGc );
+float orGd = length( iPos.xz - cameraPosition.xz );
+// Past the fade the blades shrink into the ground rather than vanish, so the
+// edge of the field is a gradient in height, which the eye does not notice.
+float orGk = iPos.w * smoothstep( orGFade.y, orGFade.x, orGd );
+transformed *= orGk;
+float orGph = dot( iPos.xz, vec2( 0.23, 0.31 ) );
+float orGsw = ( sin( orGWind.w * 1.9 + orGph ) * 0.6 + sin( orGWind.w * 3.7 + orGph * 1.7 ) * 0.25 + 0.35 ) * orGWind.z;
+transformed.xz += orGWind.xy * ( orGsw * position.y * position.y * orGk * 0.8 );
+transformed += iPos.xyz;
+`;
+
+// The same macro modulation the ground's fragment shader applies to grass.
+const GRASS_VERT_COLOR = `
+{
+  vec4 orMa = texture2D( orMacro, iPos.xz * orMacroTile.x );
+  vec4 orMb = texture2D( orMacro, iPos.xz * orMacroTile.y + vec2( 0.37, 0.61 ) );
+  float orPatch = ( orMa.r - 0.5 ) * 1.2 + ( orMb.g - 0.5 ) * 0.7;
+  vec3 orMod = vec3( 1.0 + orPatch * 0.15, 1.0 + orPatch * 0.03, 1.0 - orPatch * 0.24 )
+             * ( 1.0 + ( orMb.b - 0.5 ) * 0.26 + ( orMa.g - 0.5 ) * 0.16 );
+  orMod = mix( orMod, vec3( 1.40, 1.22, 0.86 ), smoothstep( 0.62, 0.80, orMb.a ) * 0.6 );
+  vColor.rgb *= iCol.rgb * orMod;
+}
+`;
+
+function tuftGeometry(rnd) {
+  const pos = [], col = [], nrm = [], uv = [], idx = [];
+  const phase = rnd() * Math.PI;
+  for (let c = 0; c < 3; c++) {
+    const a = phase + (c / 3) * Math.PI + (rnd() - 0.5) * 0.3;
+    const dx = Math.cos(a) * 0.9, dz = Math.sin(a) * 0.9;   // 1.8 wide, 1 tall
+    const i0 = pos.length / 3;
+    pos.push(-dx, -0.04, -dz, dx, -0.04, dz, dx, 1, dz, -dx, 1, -dz);
+    uv.push(0, 0, 1, 0, 1, 1, 0, 1);
+    // The card texture stores its multiplier at 1/1.6 so it can exceed one.
+    for (let k = 0; k < 4; k++) { col.push(1.6, 1.6, 1.6); nrm.push(0, 1, 0); }
+    idx.push(i0, i0 + 1, i0 + 2, i0, i0 + 2, i0 + 3);
+  }
+  const g = new THREE.InstancedBufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.setIndex(idx);
+  return g;
+}
+
 export function createTerrain(world, ground, opts = {}) {
   const CHUNK = opts.chunk ?? 128;
   const SURFACES = ground.SURFACES;
   const terrain = world.terrain;
   const tintSeed = ((terrain.seed ?? 0) | 0) + 5501;
-  const shadows = opts.shadows ?? false;
+  const shadows = opts.shadows ?? true;
   const managed = !!(THREE.ColorManagement && THREE.ColorManagement.enabled);
 
   const group = new THREE.Group();
@@ -489,11 +614,13 @@ export function createTerrain(world, ground, opts = {}) {
     const contrast = opts.contrast ?? 1;
     const finePx = fineTexture(seed);
     const coarsePx = coarseTexture(seed + 3301);
+    const macro = macroTexture(seed + 6607);
     detail = {
       fine: makeTexture(finePx, TEX),
       coarse: makeTexture(coarsePx, TEX),
+      macro: makeTexture(macro.px, macro.W),
       uniforms: null,
-      bytes: Math.round(2 * TEX * TEX * 4 * 4 / 3),   // both maps, mip chain included
+      bytes: Math.round((2 * TEX * TEX + macro.W * macro.W) * 4 * 4 / 3),   // all maps, mips included
     };
     detail.uniforms = {
       orFine: { value: detail.fine },
@@ -508,6 +635,8 @@ export function createTerrain(world, ground, opts = {}) {
       orRelief: { value: new THREE.Vector2(0.42 * relief, 0.30 * relief) },
       orFade: { value: new THREE.Vector2(QUALITY[quality].fade[0], QUALITY[quality].fade[1]) },
       orWarmth: { value: opts.warmth ?? 0.10 },
+      orMacro: { value: detail.macro },
+      orMacroTile: { value: new THREE.Vector2(1 / 310, 1 / 53) },
     };
 
     const prevCompile = material.onBeforeCompile;
@@ -544,6 +673,7 @@ export function createTerrain(world, ground, opts = {}) {
 
   // Scratch, reused for every vertex of every chunk, forever.
   const gs = { y: 0, nx: 0, ny: 1, nz: 0, surface: 'grass', grip: 0, roughness: 0, rolling: 0, dust: 0 };
+  const roadQ = { onRoad: false, dist: Infinity, edge: null, s: 0, tx: 0, tz: 0, speedLimit: 0, width: 0, kind: '' };
   const rgb = [0, 0, 0], rgb2 = [0, 0, 0];
   let hgrid = new Float32Array(0);   // heights, including the ring outside the chunk
   let mgrid = new Uint8Array(0);     // and their surfaces, for the mud fringe
@@ -562,18 +692,69 @@ export function createTerrain(world, ground, opts = {}) {
    * river valley IS the low corridor — it is cut by makeTerrain as a Gaussian
    * trough down to -18 m and nothing else on the map goes anywhere near that.
    */
-  function palette(surface, x, z, ny, y, crest, out) {
+  // Set by palette() for the grass it has just coloured, and read by weigh()
+  // and the tuft filler for the same point, so the woodland mask — three
+  // fbm calls — is evaluated once a vertex rather than three times.
+  let palWood = 0;
+  const fieldQ = { edge: 0, use: 0, id: 0, dx: 1, dz: 0, ripe: 0 };
+
+  function palette(surface, x, z, ny, y, crest, out, fine = 1) {
+    palWood = 0;
     if (surface === 'grass') {
-      // A slow wet/dry sweep at field scale, pulled toward lush down in the
-      // valley and toward straw on the sunlit brows, then bare soil wherever
-      // the ground is too steep to hold turf.
-      const moist = smoothstep(4, -14, y);
-      const dry = clamp(fbm(x * 0.0042, z * 0.0042, tintSeed, 3) * 0.62 + 0.5
-                        - moist * 0.50 + crest * 0.22, 0, 1);
+      // A slow wet/dry sweep at field scale, pulled toward lush in the valley
+      // and toward straw on the high ground and the sunlit brows, then bare
+      // soil wherever the ground is too steep to hold turf.
+      //
+      // Moisture used to be absolute height (lush below +4 m). The map's
+      // median height is -21 m, so that made nearly all of it the lushest
+      // green there is. It follows the valley itself now.
+      const moist = valleyWeight(x, z, terrain.seed ?? 0);
+      const high = smoothstep(-10, 22, y);
+      const dry = clamp(fbm(x * 0.0042, z * 0.0042, tintSeed, 3) * 0.62 + 0.45
+                        - moist * 0.55 + high * 0.22 + crest * 0.22, 0, 1);
       const bare = smoothstep(0.14, 0.55, 1 - ny) * 0.7;
-      out[0] = lerp(lerp(LUSH[0], DRY[0], dry), SOIL[0], bare);
-      out[1] = lerp(lerp(LUSH[1], DRY[1], dry), SOIL[1], bare);
-      out[2] = lerp(lerp(LUSH[2], DRY[2], dry), SOIL[2], bare);
+      const a = dry < 0.5 ? LUSH : MEADOW, b = dry < 0.5 ? MEADOW : DRY;
+      const t = dry < 0.5 ? dry * 2 : dry * 2 - 1;
+      out[0] = lerp(a[0], b[0], t); out[1] = lerp(a[1], b[1], t); out[2] = lerp(a[2], b[2], t);
+
+      // The patchwork. Fields keep a grassy margin at their boundary and
+      // stay out of the valley floor, which is all grazing. Stripes and
+      // tramlines only on chunks fine enough to draw them without aliasing.
+      const F = fieldAt(x, z, terrain.seed ?? 0, fieldQ);
+      const inField = smoothstep(3, 9, F.edge) * (1 - smoothstep(0.3, 0.65, moist));
+      if (F.use > 0 && inField > 0) {
+        let c0, c1, c2;
+        const u = x * F.dx + z * F.dz;
+        if (F.use === 1) {
+          const stripe = Math.sin(u * (Math.PI * 2 / 7)) * 0.075 * fine;
+          c0 = HAY[0] * (1 + stripe); c1 = HAY[1] * (1 + stripe); c2 = HAY[2] * (1 + stripe);
+        } else if (F.use === 2) {
+          const r = F.ripe;
+          const d = Math.abs((u / 18) - Math.floor(u / 18) - 0.5) * 18;
+          const tram = 1 - smoothstep(7.6, 8.8, d) * 0.22 * fine;
+          c0 = lerp(CROP_GREEN[0], CROP_RIPE[0], r) * tram;
+          c1 = lerp(CROP_GREEN[1], CROP_RIPE[1], r) * tram;
+          c2 = lerp(CROP_GREEN[2], CROP_RIPE[2], r) * tram;
+        } else {
+          const patch = 1 + valueNoise(x * 0.06, z * 0.06, tintSeed + 97) * 0.12;
+          c0 = FALLOW[0] * patch; c1 = FALLOW[1] * patch; c2 = FALLOW[2] * patch;
+        }
+        out[0] = lerp(out[0], c0, inField); out[1] = lerp(out[1], c1, inField); out[2] = lerp(out[2], c2, inField);
+      }
+
+      // Forest floor, but only under closed canopy. The planting mask starts
+      // at 0.08 with scattered margin trees; painting the floor from there
+      // turned every wood's ragged edge into what looked like dead grass.
+      palWood = smoothstep(0.15, 0.3, woodland(x, z, terrain.seed ?? 0));
+      if (palWood > 0) {
+        const k = palWood * 0.72;
+        out[0] = lerp(out[0], FLOOR[0], k); out[1] = lerp(out[1], FLOOR[1], k); out[2] = lerp(out[2], FLOOR[2], k);
+      }
+      out[0] = lerp(out[0], SOIL[0], bare); out[1] = lerp(out[1], SOIL[1], bare); out[2] = lerp(out[2], SOIL[2], bare);
+      return;
+    }
+    if (surface === 'sand') {
+      out[0] = WASH[0]; out[1] = WASH[1]; out[2] = WASH[2];
       return;
     }
     const hex = (SURFACES[surface] || SURFACES.grass).colour;
@@ -595,14 +776,16 @@ export function createTerrain(world, ground, opts = {}) {
    * bleach in the sun too, and a hollow is in shadow whatever is lying in it.
    */
   function tint(surface, x, z, ny, y, crest, fine, roadMix, out) {
-    palette(surface, x, z, ny, y, crest, out);
+    palette(surface, x, z, ny, y, crest, out, fine);
     if (roadMix > 0 && PAVED[surface] === 1) {
       palette(terrain.cover(x, z, ny), x, z, ny, y, crest, rgb2);
       out[0] = lerp(out[0], rgb2[0], roadMix);
       out[1] = lerp(out[1], rgb2[1], roadMix);
       out[2] = lerp(out[2], rgb2[2], roadMix);
     }
-    const amp = PAVED[surface] === 1 ? 0.06 : 0.17;
+    // Tarmac is laid in one go and barely varies; a gravel shoulder is
+    // tipped, spread and washed out in patches and varies a good deal more.
+    const amp = surface === 'gravel' ? 0.11 : PAVED[surface] === 1 ? 0.06 : 0.17;
     const lum = valueNoise(x * 0.0091, z * 0.0091, tintSeed + 7);
     const mot = fine > 0 ? valueNoise(x * 0.029, z * 0.029, tintSeed + 31) : 0;
     const k = 1 + lum * amp * 0.62 + mot * amp * 0.45 * fine;
@@ -630,7 +813,7 @@ export function createTerrain(world, ground, opts = {}) {
     const w = DETAIL[surface] || DETAIL.grass;
     let g = w[0], sa = w[1], gr = w[2], so = w[3];
     if (gr > 0.5) {
-      const bare = smoothstep(0.14, 0.55, 1 - ny) * 0.7;
+      const bare = Math.max(smoothstep(0.14, 0.55, 1 - ny) * 0.7, palWood * 0.6);
       g = lerp(g, 0.30, bare); gr = lerp(gr, 0.08, bare); so = lerp(so, 0.95, bare);
     }
     out[o] = g * 255; out[o + 1] = sa * 255; out[o + 2] = gr * 255; out[o + 3] = so * 255;
@@ -795,8 +978,50 @@ export function createTerrain(world, ground, opts = {}) {
         }
 
         tint(surface, x, z, ny, y, crest, fine, roadMix, rgb);
-        col[o] = rgb[0]; col[o + 1] = rgb[1]; col[o + 2] = rgb[2];
         if (dtl) weigh(surface, ny, v * 4, dtl);
+        // Verge wear. The strip of grass just past a road's shoulder is where
+        // wheels drop off, walkers walk and the mower scalps, so it is shorter,
+        // paler and dustier than the field behind it. Measured from the edge
+        // of the carriageway, and only on chunks fine enough to draw a band a
+        // few metres wide.
+        // Shoulders, graded across their width: loose, clean gravel where it
+        // meets the carriageway, grown over and olive by the outer edge where
+        // nothing drives. A uniform grey band either side of every lane was
+        // the flattest thing left in the picture.
+        if (job.mud > 0 && surface === 'gravel') {
+          ground.roadAt(x, z, roadQ);
+          if (roadQ.edge) {
+            const k = roadQ.kind;
+            const sh = k === 'dirt' || k === 'track' ? 1.6 : k === 'highway' ? 3.5 : 2.4;
+            const f = (roadQ.dist - roadQ.width * 0.5) / sh;
+            if (f > 0) {
+              const t = smoothstep(0.35, 1.05, f) * job.mud;
+              rgb[0] = lerp(rgb[0], GROWN[0], t * 0.6); rgb[1] = lerp(rgb[1], GROWN[1], t * 0.6); rgb[2] = lerp(rgb[2], GROWN[2], t * 0.6);
+              if (dtl) {
+                const o4 = v * 4;
+                dtl[o4 + 2] = Math.max(dtl[o4 + 2], t * 150);
+                dtl[o4] *= 1 - t * 0.35;
+              }
+            }
+          }
+        }
+        if (job.mud > 0 && surface === 'grass') {
+          ground.roadAt(x, z, roadQ);
+          if (roadQ.edge) {
+            const wear = smoothstep(5.5, 1.5, roadQ.dist - roadQ.width * 0.5) * job.mud;
+            if (wear > 0) {
+              const t = wear * 0.62;
+              rgb[0] = lerp(rgb[0], WORN[0], t); rgb[1] = lerp(rgb[1], WORN[1], t); rgb[2] = lerp(rgb[2], WORN[2], t);
+              if (dtl) {
+                const o4 = v * 4;
+                dtl[o4 + 2] *= 1 - wear * 0.55;
+                dtl[o4 + 3] = Math.max(dtl[o4 + 3], wear * 200);
+                dtl[o4] = Math.max(dtl[o4], wear * 60);
+              }
+            }
+          }
+        }
+        col[o] = rgb[0]; col[o + 1] = rgb[1]; col[o + 2] = rgb[2];
         if (y < minY) minY = y;
         if (y > maxY) maxY = y;
       }
@@ -908,14 +1133,245 @@ export function createTerrain(world, ground, opts = {}) {
       group.add(mesh);
       stats.chunks++;
     }
-    // Only the two near rings bother receiving shadows; past ~400 m a cascade
-    // has nothing to say and the extra depth pass is pure cost.
-    rec.mesh.receiveShadow = shadows && rec.want <= 1;
+    // Only the near rings bother receiving shadows; the sun's map covers 110 m
+    // either side of the car, and past that a lookup has nothing to say.
+    rec.mesh.receiveShadow = shadows && rec.want <= QUALITY[quality].shadowRing;
     rec.grid = job.G;
     stats.triangles += trisFor(job.G);
 
     job.active = false; job.rec = null; job.geom = null;
   }
+
+  // =========================================================================
+  // Grass tufts near the camera
+  // =========================================================================
+  // A square ring of `ring` x `ring` tiles, `tile` metres on a side, mapped
+  // toroidally onto a fixed pool of instance slots: the tile at (ti, tj) always
+  // lives in slot (ti mod ring, tj mod ring). Moving one tile east frees
+  // exactly the column that has just fallen off the west edge, and that column
+  // is refilled for the east edge. A slot waiting to be refilled still holds
+  // tufts a full ring away, beyond the fade, where they are already shrunk to
+  // nothing — so a late refill never shows as grass in the wrong place.
+  //
+  // Filling a tile samples the ground on a 3 m lattice for surface, colour and
+  // distance to the nearest road, then places tufts only in lattice cells
+  // whose four corners are all turf at least 2.8 m off a carriageway edge.
+  // That keeps grass off shoulders and out of the worn verge strip without a
+  // per-tuft surface query, and costs about 0.1 ms a tile.
+
+  const grass = (() => {
+    let spec = null, mesh = null, geom = null, mat = null, grassTex = null;
+    let iPos = null, iCol = null, slotTi = null, slotTj = null;
+    const LAT = 3;
+    let latN = 0, latOk = null, latCol = null;
+    let camTi = NaN, camTj = NaN;
+    let pending = [];
+    let windTime = 0;
+    const windU = { value: new THREE.Vector4(0.82, 0.57, opts.wind ?? 0.7, 0) };
+    const fadeU = { value: new THREE.Vector2(37, 53) };
+    const gsq = { y: 0, nx: 0, ny: 1, nz: 0, surface: 'grass', grip: 0, roughness: 0, rolling: 0, dust: 0 };
+    const rq = { onRoad: false, dist: Infinity, edge: null, s: 0, tx: 0, tz: 0, speedLimit: 0, width: 0, kind: '' };
+    const pal = [0, 0, 0];
+    const seedG = ((terrain.seed ?? 0) | 0) + 9173;
+    const stats = { tufts: 0, tiles: 0, triangles: 0, fillMs: 0 };
+
+    function build(q) {
+      dispose();
+      spec = q;
+      if (!spec) return;
+      const tiles = spec.ring * spec.ring;
+      const n = tiles * spec.per;
+      geom = tuftGeometry(mulberryLocal(seedG));
+      iPos = new THREE.InstancedBufferAttribute(new Float32Array(n * 4), 4);
+      iCol = new THREE.InstancedBufferAttribute(new Float32Array(n * 4), 4);
+      iPos.setUsage(THREE.DynamicDrawUsage);
+      iCol.setUsage(THREE.DynamicDrawUsage);
+      geom.setAttribute('iPos', iPos);
+      geom.setAttribute('iCol', iCol);
+      geom.instanceCount = n;
+      if (!grassTex) {
+        const card = paintGrassCard(seedG);
+        grassTex = new THREE.DataTexture(card.px, card.W, card.H, THREE.RGBAFormat);
+        grassTex.colorSpace = THREE.NoColorSpace;   // a multiplier, not a colour
+        grassTex.wrapS = grassTex.wrapT = THREE.ClampToEdgeWrapping;
+        grassTex.magFilter = THREE.LinearFilter;
+        grassTex.minFilter = THREE.LinearMipmapLinearFilter;
+        grassTex.generateMipmaps = true;
+        grassTex.anisotropy = 4;
+        grassTex.needsUpdate = true;
+      }
+      mat = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide, map: grassTex, alphaTest: 0.5 });
+      mat.onBeforeCompile = (shader) => {
+        Object.assign(shader.uniforms, {
+          orGWind: windU, orGFade: fadeU,
+          orMacro: { value: detail ? detail.macro : null },
+          orMacroTile: { value: new THREE.Vector2(1 / 310, 1 / 53) },
+        });
+        let v = shader.vertexShader;
+        if (v.indexOf('#include <begin_vertex>') < 0) return;
+        v = v.replace('#include <common>', `#include <common>\n${GRASS_VERT_PARS}`)
+          .replace('#include <beginnormal_vertex>', 'vec3 objectNormal = vec3( 0.0, 1.0, 0.0 );')
+          .replace('#include <begin_vertex>', GRASS_VERT_BEGIN);
+        if (detail) v = v.replace('#include <color_vertex>', `#include <color_vertex>\n${GRASS_VERT_COLOR}`);
+        else v = v.replace('#include <color_vertex>', '#include <color_vertex>\nvColor.rgb *= iCol.rgb;');
+        shader.vertexShader = v;
+        // Blades are lit as the ground under them: no back-face flip. And the
+        // same alpha-coverage fix as the tree foliage, or the clumps thin to
+        // nothing a few metres out, which is exactly where they are needed.
+        shader.fragmentShader = shader.fragmentShader
+          .replace('#include <normal_fragment_begin>',
+            '#include <normal_fragment_begin>\n#ifdef DOUBLE_SIDED\nnormal *= faceDirection;\n#endif')
+          .replace('#include <map_fragment>', `#include <map_fragment>
+#ifdef USE_MAP
+{
+  vec2 orTs = vec2( textureSize( map, 0 ) );
+  vec2 orDx = dFdx( vMapUv * orTs ), orDy = dFdy( vMapUv * orTs );
+  diffuseColor.a *= 1.0 + max( 0.0, 0.5 * log2( max( dot( orDx, orDx ), dot( orDy, orDy ) ) ) ) * 0.3;
+}
+#endif`);
+      };
+      mat.customProgramCacheKey = () => 'openroad-grass' + (detail ? '-macro' : '');
+      mesh = new THREE.Mesh(geom, mat);
+      mesh.name = 'grass';
+      mesh.frustumCulled = false;
+      mesh.castShadow = false;
+      mesh.receiveShadow = !!spec.shadows && shadows;
+      mesh.matrixAutoUpdate = false;
+      mesh.updateMatrix();
+      group.add(mesh);
+      fadeU.value.set(spec.fade[0], spec.fade[1]);
+      slotTi = new Int32Array(tiles).fill(0x7fffffff);
+      slotTj = new Int32Array(tiles).fill(0x7fffffff);
+      latN = Math.round(spec.tile / LAT) + 1;
+      latOk = new Uint8Array(latN * latN);
+      latCol = new Float32Array(latN * latN * 3);
+      camTi = NaN; camTj = NaN;
+      pending = [];
+      stats.tufts = n; stats.tiles = tiles;
+      stats.triangles = n * (geom.index ? geom.index.count : geom.attributes.position.count) / 3;
+    }
+
+    function mulberryLocal(a) {
+      return function () {
+        a = (a + 0x6D2B79F5) >>> 0;
+        let t = a;
+        t = Math.imul(t ^ (t >>> 15), 1 | t);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+    }
+
+    function fill(slot, ti, tj) {
+      const T = spec.tile, N = spec.per;
+      const x0 = ti * T, z0 = tj * T;
+      for (let b = 0; b < latN; b++) {
+        for (let a = 0; a < latN; a++) {
+          const x = x0 + a * LAT, z = z0 + b * LAT, L = b * latN + a;
+          const g = ground.sample(x, z, gsq);
+          let ok = g.surface === 'grass' && g.ny > 0.92;
+          if (ok) {
+            ground.roadAt(x, z, rq);
+            if (rq.edge && rq.dist - rq.width * 0.5 < 2.8) ok = false;
+          }
+          if (ok) {
+            palette('grass', x, z, g.ny, g.y, 0, pal);
+            latCol[L * 3] = toLinear(pal[0]); latCol[L * 3 + 1] = toLinear(pal[1]); latCol[L * 3 + 2] = toLinear(pal[2]);
+            // Deep in a wood the floor is litter and moss; only the margins
+            // and the rides carry grass.
+            if (palWood > 0.75) ok = false;
+          }
+          latOk[L] = ok ? 1 : 0;
+        }
+      }
+      const rnd = mulberryLocal((Math.imul(ti, 73856093) ^ Math.imul(tj, 19349663) ^ seedG) >>> 0);
+      const P = iPos.array, C = iCol.array;
+      const base = slot * N;
+      const lush = valleyWeight(x0 + T / 2, z0 + T / 2, terrain.seed ?? 0);
+      for (let k = 0; k < N; k++) {
+        const u = rnd() * T, v = rnd() * T;
+        const o = (base + k) * 4;
+        const a = Math.min(latN - 2, Math.floor(u / LAT)), b = Math.min(latN - 2, Math.floor(v / LAT));
+        const L = b * latN + a;
+        const hr = rnd(), cr = rnd(), rr = rnd();
+        if (!latOk[L] || !latOk[L + 1] || !latOk[L + latN] || !latOk[L + latN + 1]) {
+          P[o + 3] = 0;
+          continue;
+        }
+        const x = x0 + u, z = z0 + v;
+        const fu = u / LAT - a, fv = v / LAT - b;
+        const w00 = (1 - fu) * (1 - fv), w10 = fu * (1 - fv), w01 = (1 - fu) * fv, w11 = fu * fv;
+        P[o] = x; P[o + 1] = ground.heightAt(x, z) - 0.03; P[o + 2] = z;
+        // Card height in metres: taller and lusher down in the valley,
+        // shorter on the dry tops.
+        P[o + 3] = (0.20 + hr * hr * 0.30) * (0.85 + lush * 0.45);
+        const k2 = 0.88 + cr * 0.24;
+        for (let c = 0; c < 3; c++) {
+          C[o + c] = (latCol[L * 3 + c] * w00 + latCol[(L + 1) * 3 + c] * w10 +
+                      latCol[(L + latN) * 3 + c] * w01 + latCol[(L + latN + 1) * 3 + c] * w11) * k2;
+        }
+        C[o + 3] = rr * Math.PI * 2;
+      }
+      iPos.addUpdateRange(base * 4, N * 4);
+      iCol.addUpdateRange(base * 4, N * 4);
+      iPos.needsUpdate = true;
+      iCol.needsUpdate = true;
+      slotTi[slot] = ti; slotTj[slot] = tj;
+    }
+
+    function update(cameraPos, dt, budget) {
+      if (!spec) return;
+      windTime += dt > 0 && dt < 0.25 ? dt : 0;
+      if (windTime > 3600) windTime -= 3600;
+      windU.value.w = windTime;
+      const T = spec.tile, R = spec.ring, h = (R - 1) >> 1;
+      const cti = Math.floor(cameraPos.x / T), ctj = Math.floor(cameraPos.z / T);
+      if (cti !== camTi || ctj !== camTj) {
+        camTi = cti; camTj = ctj;
+        pending.length = 0;
+        for (let dj = -h; dj <= h; dj++) {
+          for (let di = -h; di <= h; di++) {
+            const ti = cti + di, tj = ctj + dj;
+            const slot = (((tj % R) + R) % R) * R + (((ti % R) + R) % R);
+            if (slotTi[slot] !== ti || slotTj[slot] !== tj) pending.push(di * di + dj * dj, ti, tj, slot);
+          }
+        }
+        // Nearest first, so the grass under the car is never the grass
+        // missing. Stored farthest-first so the queue pops from the end.
+        const order = [];
+        for (let i = 0; i < pending.length; i += 4) order.push(i);
+        order.sort((a, b) => pending[b] - pending[a]);
+        const sorted = [];
+        for (const i of order) sorted.push(pending[i + 1], pending[i + 2], pending[i + 3]);
+        pending = sorted;
+      }
+      if (!pending.length || budget <= 0) return;
+      iPos.clearUpdateRanges(); iCol.clearUpdateRanges();
+      const t0 = clock.now();
+      const deadline = t0 + budget;
+      let done = 0;
+      while (pending.length && (done === 0 || clock.now() < deadline)) {
+        const slot = pending.pop(), tj = pending.pop(), ti = pending.pop();
+        fill(slot, ti, tj);
+        done++;
+      }
+      stats.fillMs = clock.now() - t0;
+    }
+
+    function dispose(all) {
+      if (mesh) { group.remove(mesh); mesh = null; }
+      if (geom) { geom.dispose(); geom = null; }
+      if (mat) { mat.dispose(); mat = null; }
+      if (all && grassTex) { grassTex.dispose(); grassTex = null; }
+      spec = null;
+      stats.tufts = 0; stats.tiles = 0; stats.triangles = 0; stats.fillMs = 0;
+    }
+
+    return {
+      build, update, dispose, stats,
+      setWind(k) { windU.value.z = clamp(k, 0, 3); },
+      get mesh() { return mesh; },
+    };
+  })();
 
   // =========================================================================
   // Streaming
@@ -960,7 +1416,10 @@ export function createTerrain(world, ground, opts = {}) {
         if (lod < 0) continue;
         const cx = ccx + dx, cz = ccz + dz, key = keyOf(cx, cz);
         let rec = chunks.get(key);
-        if (rec) { rec.d = d; rec.want = lod; rec.seen = stamp; }
+        if (rec) {
+          rec.d = d; rec.want = lod; rec.seen = stamp;
+          if (rec.mesh) rec.mesh.receiveShadow = shadows && lod <= QUALITY[quality].shadowRing;
+        }
         else chunks.set(key, (rec = { key, cx, cz, d, want: lod, grid: 0, mesh: null, seen: stamp }));
         if (rec.grid !== grids[lod]) queue.push(rec);
       }
@@ -974,11 +1433,13 @@ export function createTerrain(world, ground, opts = {}) {
     if (job.active && (!chunks.has(job.rec.key) || grids[job.rec.want] !== job.G)) cancelFill();
   }
 
+  /** Build chunks for up to `ms`; returns the milliseconds actually spent. */
   function drain(ms) {
     // Most frames have nothing to build. Bailing before touching the clock keeps
     // the steady-state cost of this module at literally nothing.
-    if (!job.active && qi >= queue.length) return;
-    const deadline = clock.now() + ms;
+    if (!job.active && qi >= queue.length) return 0;
+    const start = clock.now();
+    const deadline = start + ms;
     for (;;) {
       if (!job.active) {
         let next = null;
@@ -994,6 +1455,7 @@ export function createTerrain(world, ground, opts = {}) {
       if (clock.now() >= deadline) break;
     }
     stats.pending = queue.length - qi + (job.active ? 1 : 0);
+    return clock.now() - start;
   }
 
   function update(cameraPos, dt) {
@@ -1020,12 +1482,19 @@ export function createTerrain(world, ground, opts = {}) {
       // loading screen and the player never watches the world assemble itself.
       primed = true;
       drain(opts.primeMs ?? 520);
+      grass.update(cameraPos, 0, 120);
       return;
     }
     // Streaming stutter is exactly what you notice from a moving car, so frames
     // that are already late get less of the budget, not the same amount.
     const step = dt === undefined ? 1 / 60 : dt;
-    drain(budgetMs * (step > 0.026 ? 0.4 : step < 0.015 ? 1.5 : 1));
+    const k = step > 0.026 ? 0.4 : step < 0.015 ? 1.5 : 1;
+    const spent = drain(budgetMs * k);
+    // Grass gets its own small budget, but yields on a frame that chunk
+    // streaming has already filled: new tiles appear at the far edge of the
+    // ring, fifty metres out and shrunk to nothing by the fade, so a frame's
+    // delay costs nothing visible, where stacking the two cost 0.45 ms of p99.
+    grass.update(cameraPos, step, spent > budgetMs * k * 0.8 ? 0 : 0.5 * k);
   }
 
   /** 'low' | 'medium' | 'high', or a 0..1 number so one knob can drive them all. */
@@ -1042,6 +1511,7 @@ export function createTerrain(world, ground, opts = {}) {
     // The detail has to fade out inside the ring it is drawn on, or a low
     // preset spends its whole texture budget on ground it then fogs out.
     if (detail) detail.uniforms.orFade.value.set(QUALITY[name].fade[0], QUALITY[name].fade[1]);
+    grass.build(QUALITY[name].grass);
     // Pooled geometries at a resolution the new preset never asks for would sit
     // in memory unreachable, so they go back to the driver now.
     for (const [G, pool] of pools) {
@@ -1054,6 +1524,7 @@ export function createTerrain(world, ground, opts = {}) {
 
   function dispose() {
     cancelFill();
+    grass.dispose(true);
     for (const rec of chunks.values()) {
       if (rec.mesh) { group.remove(rec.mesh); rec.mesh.geometry.dispose(); rec.mesh = null; }
     }
@@ -1063,10 +1534,17 @@ export function createTerrain(world, ground, opts = {}) {
     indices.clear();
     queue.length = 0;
     qi = 0;
-    if (detail) { detail.fine.dispose(); detail.coarse.dispose(); }
+    if (detail) { detail.fine.dispose(); detail.coarse.dispose(); detail.macro.dispose(); }
     if (ownsMaterial) material.dispose();
     stats.chunks = 0; stats.triangles = 0; stats.pending = 0;
   }
 
-  return { group, update, setQuality, dispose, stats, material };
+  grass.build(QUALITY[quality].grass);
+  stats.grass = grass.stats;
+
+  return {
+    group, update, setQuality, dispose, stats, material,
+    /** Wind strength for the grass, 0..~2. props.js sways the trees. */
+    setWind: (k) => grass.setWind(k),
+  };
 }

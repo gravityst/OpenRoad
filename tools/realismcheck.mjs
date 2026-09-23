@@ -9,7 +9,11 @@
 //      buried 1-2 m inside a barn passed both. This drives the real vehicle,
 //      with the real collision, into real lots from every side and corner, and
 //      measures the car's drawn outline against the wall city.js draws.
-//   2. THE ROAD PULL. roads.js pulls the road toward the eye in depth; every
+//   2. TRAFFIC DRAW COST. carscheck budgets a traffic car at 'low' detail,
+//      and main.js built every one at the player's detail: the budget passed
+//      against a code path the game never ran. This checks the game's own call
+//      site, then drives the fleet against a real traffic pool and counts.
+//   3. THE ROAD PULL. roads.js pulls the road toward the eye in depth; every
 //      ground decal that must stay visible over it has to be pulled by the
 //      same numbers, or it vanishes. Nothing else can see that headless.
 //
@@ -23,7 +27,8 @@ import { createGround } from '../src/world/ground.js';
 import { createVehicle } from '../src/physics/vehicle.js';
 import { createCollision } from '../src/physics/collision.js';
 import { CARS, specFor } from '../src/vehicles/catalog.js';
-import { createCarModel, ROAD_PULL } from '../src/render/carModel.js';
+import { createCarModel, createFleet, ROAD_PULL } from '../src/render/carModel.js';
+import { createTraffic } from '../src/ai/traffic.js';
 import { drawnSize, SOLID_FRACTION } from '../src/render/city.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -167,7 +172,81 @@ function overlapDepth(a, b) {
 }
 
 // ---------------------------------------------------------------------------
-// 2. The road pull
+// 2. Traffic: the game's own call site, and what the fleet actually draws
+// ---------------------------------------------------------------------------
+{
+  const main = read('src/main.js');
+  const sync = main.slice(main.indexOf('function syncTrafficModels('), main.indexOf('function syncTrafficModels(') + 900);
+  check('main.js draws traffic through the fleet, not at player detail',
+    /createFleet\(/.test(main) && /fleet\.sync\(/.test(sync) && !/createCarModel\(\s*\{\s*\.\.\.t\.spec/.test(main),
+    'syncTrafficModels -> fleet.sync; no per-slot createCarModel(spec) at default detail');
+
+  const traffic = createTraffic(world, ground, { density: 44 });
+  const scene = new THREE.Scene();
+  const fleet = createFleet(scene, { quality: 'medium' });
+  const camera = new THREE.PerspectiveCamera(62, 16 / 9, 0.35, 6000);
+  const px = 0, pz = -1250;
+  for (let i = 0; i < 600; i++) traffic.update(1 / 60, px, pz, 0, 0);
+  // Stand the camera behind the player looking north, the chase view.
+  camera.position.set(px, ground.heightAt(px, pz) + 2.6, pz + 6);
+  camera.lookAt(px, ground.heightAt(px, pz) + 1, pz - 20);
+  camera.updateMatrixWorld(true);
+  fleet.prewarm(traffic.cars);
+  fleet.sync(traffic.cars, camera, 0);
+
+  // Draw calls as the renderer will issue them (colour pass): every visible
+  // mesh under the fleet, an instanced mesh counting once.
+  let calls = 0, casters = 0;
+  fleet.group.traverseVisible((o) => {
+    if (!o.isMesh) return;
+    if (o.isInstancedMesh && o.count === 0) return;
+    if (o.geometry && o.geometry.isInstancedBufferGeometry && o.geometry.instanceCount === 0) return;
+    calls++;
+    if (o.castShadow) casters++;
+  });
+  const st = fleet.stats;
+  const active = traffic.cars.filter((c) => c.active).length;
+  console.log(`  ${active} active cars: ${st.near} near, ${st.far} far in view, ${st.kinds} models; ${calls} fleet draw calls, ${casters} shadow casters`);
+  // Before the fleet: every active car was a full model — 26 calls a car at
+  // player detail, 12 at 'low' — whether it was 20 m away or 300.
+  check('the whole traffic pool costs fewer draw calls than two near cars did', calls <= 2 * 26 + 12,
+    `${calls} calls for ${active} cars (was ${active} x 26 = ${active * 26} before frustum culling)`);
+  check('near cars are capped by the tier', st.near <= 10, `${st.near} near (medium caps at 10)`);
+
+  // Lamps survive the trip to the far side: a braking far car has its brake
+  // value set on its instance.
+  const far = traffic.cars.find((c, i) => c.active && !fleet.model(i));
+  let lampOk = false;
+  if (far) {
+    far.braking = true;
+    fleet.sync(traffic.cars, camera, 0);
+    for (const m of fleet.group.children) {
+      if (!m.isInstancedMesh || !m.count) continue;
+      const L = m.geometry.attributes.aLamp;
+      if (!L) continue;
+      for (let j = 0; j < m.count; j++) if (L.array[j * 4 + 1] === 1) lampOk = true;
+    }
+    far.braking = false;
+  }
+  check('a far car still brakes, indicates and runs its lamps', lampOk, lampOk ? 'brake value reached its instance' : 'no far car had its brake lamp');
+
+  // Next to nothing allocated per frame, and nothing kept: 2000 syncs, day
+  // and night alternating (the flares run at night). Measured 3.1 KB a frame
+  // by day and 7.7 KB at night with --expose-gc: short-lived number boxes,
+  // against the 845 KB a frame the terrain streams at speed.
+  for (let i = 0; i < 200; i++) fleet.sync(traffic.cars, camera, i % 2 ? 0.8 : 0);
+  const heap0 = process.memoryUsage().heapUsed;
+  const t0 = performance.now();
+  for (let i = 0; i < 2000; i++) fleet.sync(traffic.cars, camera, i % 2 ? 0.8 : 0);
+  const ms = (performance.now() - t0) / 2000;
+  const perFrame = (process.memoryUsage().heapUsed - heap0) / 2000;
+  check('fleet.sync is cheap: well under a tenth of a millisecond, a few KB', ms < 0.1 && perFrame < 12000,
+    `${(ms * 1000).toFixed(0)} us and ${(perFrame / 1024).toFixed(1)} KB a frame for ${active} cars`);
+  fleet.dispose();
+}
+
+// ---------------------------------------------------------------------------
+// 3. The road pull
 // ---------------------------------------------------------------------------
 {
   const roads = read('src/render/roads.js');

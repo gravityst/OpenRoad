@@ -3310,3 +3310,579 @@ function defaults(spec) {
     rideHeight: spec.rideHeight ?? 0.28,
   };
 }
+
+// ===========================================================================
+// The fleet: every traffic car, near and far
+// ===========================================================================
+//
+// main.js used to build one createCarModel() per traffic pool slot, at the
+// player's detail: 26 draw calls, 11 shadow casters and ~22k triangles each,
+// for up to 71 slots. The pre-review measured 958 calls and 1.07M triangles
+// for one frame at the spawn point, 718 of the calls traffic, and the LOD
+// switch only ever hid six cosmetic meshes, so a car 300 m away still drew
+// twenty of them. The automatic quality ladder only lowers resolution and the
+// post tier; it can never win that back on a kid's laptop.
+//
+// So traffic is drawn at two distances now:
+//
+//   NEAR  inside a radius set by the quality tier, the real model at 'low'
+//         detail (12 calls, 6 casters, ~5k triangles): lamps with their
+//         graphics, wheels that turn and steer, its own contact shadow. At
+//         most a tier's worth of the nearest cars, so a jam cannot blow it.
+//   FAR   beyond it, every car of one model is ONE instanced draw. The same
+//         low-detail body is baked once into a single vertex-coloured mesh —
+//         same silhouette, so the hand-over is a change of shading, not of
+//         shape — and each instance carries its paint, its paint finish and
+//         its lamp state, so a far car still brakes, indicates and runs its
+//         lights. Contact shadows for every far car are one more draw.
+//
+// And at night, or in rain, every lamp that is lit gets a FLARE: a camera-
+// facing glow sized never to fall below a couple of pixels. A headlight 400 m
+// away is a sub-pixel emissive patch that the bloom cannot find; on a real
+// road at night it is the only thing you can see. All flares are one draw.
+//
+// None of it allocates per frame: every buffer is sized from the pool once.
+
+const FLEET = {
+  low:    { near: 30, maxNear: 6,  flareFar: 450 },
+  medium: { near: 46, maxNear: 10, flareFar: 650 },
+  high:   { near: 64, maxNear: 14, flareFar: 900 },
+};
+// Lamp codes baked per vertex: which of the instance's lamp values lights it.
+const LAMP_CODE = { lHead: 1, lTail: 2, lIndL: 3, lIndR: 4, lBrake: 5, lRev: 6, lSign: 7, lBeacon: 8 };
+// Far shading for everything that is not paint: sRGB colour, roughness,
+// metalness. Glass is opaque and darker than the real (see-through) glass,
+// because behind it is a dark cabin the far body does not have.
+const BAKE = {
+  glass: [0x151c24, 0.08, 0.5], glassDark: [0x0c1015, 0.08, 0.5],
+  plastic: [0x17181b, 0.55, 0], chrome: [0xc9ced4, 0.12, 1], grille: [0x1f2124, 0.5, 0.3],
+  plate: [0xd9dbd4, 0.45, 0], tyre: [0x1b1c1e, 0.9, 0], rim: [0x9ea4aa, 0.3, 0.85],
+};
+
+const FAR_VERT_PARS = /* glsl */`
+attribute vec4 aMat;      // paint flag, roughness, metalness, lamp code
+attribute vec4 aLamp;     // per instance: head, brake, left, right
+attribute vec4 aFinish;   // per instance: paint metalness, paint roughness, beacon, -
+varying vec2 vRM;
+varying vec3 vEmit;
+`;
+const FAR_VERT = /* glsl */`
+vColor.rgb = color.rgb * mix( vec3( 1.0 ), instanceColor.rgb, aMat.x );
+vRM = mix( aMat.yz, aFinish.yx, aMat.x );
+{
+  float lc = aMat.w;
+  vec3 em = vec3( 0.0 );
+  if ( lc > 0.5 ) {
+    if ( lc < 1.5 ) em = vec3( 1.0, 0.89, 0.67 ) * 2.4 * aLamp.x;
+    else if ( lc < 2.5 ) em = vec3( 1.0, 0.018, 0.009 ) * max( 0.45 * aLamp.x, 1.5 * aLamp.y );
+    else if ( lc < 3.5 ) em = vec3( 1.0, 0.32, 0.006 ) * 2.8 * aLamp.z;
+    else if ( lc < 4.5 ) em = vec3( 1.0, 0.32, 0.006 ) * 2.8 * aLamp.w;
+    else if ( lc < 5.5 ) em = vec3( 1.0, 0.024, 0.011 ) * 2.6 * aLamp.y;
+    else if ( lc < 6.5 ) em = vec3( 0.0 );
+    else if ( lc < 7.5 ) em = vec3( 1.0, 0.42, 0.04 ) * 1.4;
+    else em = vec3( 1.0, 0.32, 0.006 ) * 3.4 * aFinish.z;
+  }
+  vEmit = em;
+}
+`;
+
+function patchFar(shader) {
+  envUniforms(shader);
+  shader.vertexShader = shader.vertexShader
+    .replace('#include <common>', '#include <common>\n' + FAR_VERT_PARS)
+    .replace('#include <color_vertex>', '#include <color_vertex>\n' + FAR_VERT);
+  shader.fragmentShader = shader.fragmentShader
+    .replace('#include <common>', '#include <common>\nvarying vec2 vRM;\nvarying vec3 vEmit;')
+    .replace('#include <roughnessmap_fragment>', 'float roughnessFactor = vRM.x;')
+    .replace('#include <metalnessmap_fragment>', 'float metalnessFactor = vRM.y;')
+    .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\ntotalEmissiveRadiance += vEmit;')
+    .replace('#include <lights_fragment_begin>',
+      '#include <lights_fragment_begin>\nreflectedLight.directSpecular = min( reflectedLight.directSpecular, vec3( 1.2 ) );');
+}
+const FAR_KEY = () => 'openroad-car-far-1';
+
+const FLARE_VERT = /* glsl */`
+attribute vec3 aPos;       // world position of the lamp
+attribute vec3 aDir;       // the way it shines, world, unit
+attribute vec3 aCol;       // linear colour x intensity
+uniform float uSize;       // m, the glow's own size up close
+uniform float uMinPx;      // px it never shrinks below
+uniform float uPx;         // m per px at 1 m: 2 tan(fov/2) / viewport height
+uniform float uFar;        // m where the air has taken it
+varying vec3 vCol;
+varying vec2 vUv;
+void main() {
+  vec4 mv = viewMatrix * vec4( aPos, 1.0 );
+  float dist = max( - mv.z, 0.1 );
+  vec3 toCam = normalize( cameraPosition - aPos );
+  // A lamp is seen from in front of it; sideways it narrows to nothing.
+  float facing = smoothstep( -0.1, 0.55, dot( aDir, toCam ) );
+  float size = max( uSize, uMinPx * uPx * dist );
+  // Keep the total light roughly constant as the glow is held at its minimum
+  // size, the way a distant lamp stays a point rather than dimming out.
+  float k = uSize / size;
+  float keep = max( k * k, 0.3 );
+  float air = 1.0 - smoothstep( uFar * 0.35, uFar, dist );
+  vCol = aCol * facing * keep * air;
+  // Nearer the eye than the lens, so the car's own body never hides it.
+  mv.xyz += normalize( - mv.xyz ) * min( 0.7, dist * 0.5 );
+  mv.xy += position.xy * size;
+  vUv = position.xy;
+  gl_Position = projectionMatrix * mv;
+}
+`;
+const FLARE_FRAG = /* glsl */`
+varying vec3 vCol;
+varying vec2 vUv;
+void main() {
+  float r2 = dot( vUv, vUv ) * 4.0;
+  float a = exp( - r2 * 6.0 ) + 0.18 * exp( - r2 * 1.6 );
+  if ( a < 0.004 ) discard;
+  gl_FragColor = vec4( vCol * a, 1.0 );
+  #include <tonemapping_fragment>
+  #include <colorspace_fragment>
+}
+`;
+
+const _fm = new THREE.Matrix4(), _fm2 = new THREE.Matrix4(), _fq = new THREE.Quaternion();
+const _fe = new THREE.Euler(0, 0, 0, 'YXZ'), _fp = new THREE.Vector3(), _fs = new THREE.Vector3();
+const _fv = new THREE.Vector3(), _fn = new THREE.Vector3(), _fnm = new THREE.Matrix3();
+const _frust = new THREE.Frustum(), _pv = new THREE.Matrix4(), _fsph = new THREE.Sphere();
+const _fcol = new THREE.Color();
+
+/**
+ * One model, baked into a single mesh for drawing far away: every visible
+ * body mesh merged, coloured per vertex by what it is, lamps tagged with the
+ * code that lights them. Also returns where the lamps are, for the flares.
+ */
+function bakeModel(model) {
+  const pos = [], nrm = [], col = [], mat = [], idx = [];
+  const lampAt = { head: [[0, 0, 0, 0], [0, 0, 0, 0]], tail: [[0, 0, 0, 0], [0, 0, 0, 0]], beacon: [0, 0, 0, 0] };
+  model.group.updateMatrixWorld(true);
+  const inv = new THREE.Matrix4().copy(model.group.matrixWorld).invert();
+  const m = new THREE.Matrix4();
+  model.group.traverse((o) => {
+    if (!o.isMesh || !o.visible || !o.geometry || !o.geometry.index) return;
+    const name = o.name;
+    if (name === 'contactShadow' || name === 'blur' || name === 'interior' || name === 'caliper') return;
+    if (!o.parent || !o.parent.visible) return;
+    m.multiplyMatrices(inv, o.matrixWorld);
+    _fnm.getNormalMatrix(m);
+    const g = o.geometry;
+    const P = g.attributes.position.array, N = g.attributes.normal.array;
+    const C = g.attributes.color ? g.attributes.color.array : null;
+    const lamp = LAMP_CODE[name] || 0;
+    const custom = o.userData.bake || null;
+    let paint = name === 'paint' || !!(custom && custom.paint) ? 1 : 0;
+    let base = custom ? custom.colour : null, rough = 0.5, metal = 0;
+    if (custom) { rough = custom.rough ?? 0.5; metal = custom.metal ?? 0; }
+    else if (lamp) { base = LAMPS[name] ? LAMPS[name][0] : 0x808080; rough = 0.15; metal = 0.3; }
+    else if (BAKE[name]) [base, rough, metal] = BAKE[name];
+    else if (paint) { base = 0xffffff; rough = 0.25; metal = 0.4; }
+    else if (o.material && o.material.color) { base = o.material.color.getHex(); rough = o.material.roughness ?? 0.5; metal = o.material.metalness ?? 0; }
+    else base = 0x808080;
+    const wheel = name === 'wheel';
+    let rMax = 0;
+    if (wheel) for (let i = 0; i < P.length; i += 3) rMax = Math.max(rMax, Math.hypot(P[i + 1], P[i + 2]));
+    const v0 = pos.length / 3;
+    for (let i = 0; i < P.length; i += 3) {
+      _fv.set(P[i], P[i + 1], P[i + 2]).applyMatrix4(m);
+      _fn.set(N[i], N[i + 1], N[i + 2]).applyMatrix3(_fnm).normalize();
+      pos.push(_fv.x, _fv.y, _fv.z);
+      nrm.push(_fn.x, _fn.y, _fn.z);
+      let hex = base, r = rough, mt = metal;
+      if (wheel) {
+        // The low wheel is one textured mesh; far away it is a dark tyre with
+        // a bright face inside the rim.
+        const rim = Math.abs(N[i]) > 0.6 && Math.hypot(P[i + 1], P[i + 2]) < rMax * 0.66;
+        [hex, r, mt] = rim ? BAKE.rim : BAKE.tyre;
+      }
+      _fcol.setHex(hex);
+      if (C) _fcol.multiply(_c.setRGB(C[i], C[i + 1], C[i + 2]));
+      col.push(_fcol.r, _fcol.g, _fcol.b);
+      mat.push(paint, r, mt, lamp);
+      if (lamp === 1 || lamp === 2) {
+        const acc = lampAt[lamp === 1 ? 'head' : 'tail'][_fv.x < 0 ? 0 : 1];
+        acc[0] += _fv.x; acc[1] += _fv.y; acc[2] += _fv.z; acc[3]++;
+      } else if (lamp === 8) {
+        const acc = lampAt.beacon;
+        acc[0] += _fv.x; acc[1] += _fv.y; acc[2] += _fv.z; acc[3]++;
+      }
+    }
+    const I = g.index.array;
+    for (let i = 0; i < I.length; i++) idx.push(I[i] + v0);
+  });
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  geo.setAttribute('aMat', new THREE.Float32BufferAttribute(mat, 4));
+  geo.setIndex(pos.length / 3 > 65535 ? new THREE.Uint32BufferAttribute(idx, 1) : new THREE.Uint16BufferAttribute(idx, 1));
+  geo.computeBoundingSphere();
+  const avg = (a, fallback) => (a[3] > 0 ? [a[0] / a[3], a[1] / a[3], a[2] / a[3]] : fallback);
+  const d = model.dims;
+  const hy = -d.wheelRadius * 0.2 + 0.25;
+  const lamps = {
+    head: [avg(lampAt.head[0], [-d.width * 0.36, hy, d.front]), avg(lampAt.head[1], [d.width * 0.36, hy, d.front])],
+    tail: [avg(lampAt.tail[0], [-d.width * 0.38, hy + 0.2, d.rear]), avg(lampAt.tail[1], [d.width * 0.38, hy + 0.2, d.rear])],
+    beacon: lampAt.beacon[3] > 0 ? avg(lampAt.beacon, null) : null,
+  };
+  return { geo, lamps, triangles: idx.length / 3 };
+}
+
+/**
+ * The traffic, drawn. `cars` is traffic.js's fixed pool; call sync() once a
+ * frame after traffic.update() and it places everything.
+ */
+export function createFleet(scene, opts = {}) {
+  let tier = FLEET[opts.quality] ? opts.quality : 'medium';
+  let T = { ...FLEET[tier] };
+  const K = acquireKit();
+  const env = K.tex.env;
+
+  const farMat = new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, roughness: 1, metalness: 1, envMap: env });
+  farMat.onBeforeCompile = patchFar;
+  farMat.customProgramCacheKey = FAR_KEY;
+
+  const slots = [];            // per pool slot: { key, model, near, colour, finish, blink }
+  const kinds = new Map();     // key -> { template, bake, mesh, cap, n, lamp, finish, spec }
+  let kindList = [];
+
+  // ---- contact shadows for far cars: one draw -------------------------------
+  const blobGeo = new THREE.PlaneGeometry(1, 1);
+  blobGeo.rotateX(-Math.PI * 0.5);
+  const blobMat = pullToward(new THREE.MeshBasicMaterial({
+    color: 0x000000, map: K.tex.shadow, transparent: true, opacity: 0.62,
+    depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -4,
+  }));
+  let blobs = null;
+
+  // ---- flares: one draw -------------------------------------------------------
+  const flareGeo = new THREE.PlaneGeometry(1, 1);
+  const flareU = {
+    uSize: { value: 0.5 }, uMinPx: { value: 3.2 }, uPx: { value: 0.002 }, uFar: { value: T.flareFar },
+  };
+  const flareMat = new THREE.ShaderMaterial({
+    uniforms: flareU, vertexShader: FLARE_VERT, fragmentShader: FLARE_FRAG,
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  });
+  let flares = null, flarePos = null, flareDir = null, flareCol = null;
+
+  const group = new THREE.Group();
+  group.name = 'fleet';
+  scene.add(group);
+
+  let built = false;
+  const stats = { near: 0, far: 0, flares: 0, kinds: 0, farTriangles: 0 };
+
+  function keyOf(t) {
+    const s = t.spec || {};
+    return `${s.id || t.specId || 'car'}|${t.body || s.body || 'sedan'}`;
+  }
+  function specOf(t) { return { ...(t.spec || {}), body: t.body || (t.spec && t.spec.body), colour: t.colour }; }
+
+  /** Everything sized from the pool, once: bakes, instance buffers, flares. */
+  function build(cars) {
+    built = true;
+    const counts = new Map();
+    for (let i = 0; i < cars.length; i++) {
+      const t = cars[i];
+      const key = keyOf(t);
+      counts.set(key, (counts.get(key) || 0) + 1);
+      const colour = t.colour ?? (t.spec && t.spec.colour) ?? 0xb8bcc0;
+      const fin = new THREE.MeshStandardMaterial();
+      paintFinish(colour, fin);
+      slots[i] = {
+        key, model: null, near: false, colour,
+        metal: fin.metalness, rough: Math.max(0.18, fin.roughness - 0.08),
+        blink: (i * 0.6180339887) % 1,
+      };
+      fin.dispose();
+      if (!kinds.has(key)) kinds.set(key, { spec: specOf(t), template: null, bake: null, mesh: null, cap: 0, n: 0 });
+    }
+    for (const [key, k] of kinds) {
+      k.cap = counts.get(key);
+      k.template = createCarModel(k.spec, { detail: 'low' });
+      k.template.group.visible = false;
+      // Kept in the scene, hidden: compileAsync() compiles hidden objects,
+      // so the near model's programs are ready before anything drives past.
+      group.add(k.template.group);
+      k.bake = bakeModel(k.template);
+      const mesh = new THREE.InstancedMesh(k.bake.geo, farMat, k.cap);
+      mesh.name = `fleet:${key}`;
+      mesh.frustumCulled = false;          // culled per instance below
+      mesh.castShadow = false;             // the contact blob grounds it
+      mesh.receiveShadow = true;
+      mesh.count = 0;
+      mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(k.cap * 3), 3);
+      mesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
+      k.lamp = new THREE.InstancedBufferAttribute(new Float32Array(k.cap * 4), 4);
+      k.finish = new THREE.InstancedBufferAttribute(new Float32Array(k.cap * 4), 4);
+      k.lamp.setUsage(THREE.DynamicDrawUsage);
+      k.finish.setUsage(THREE.DynamicDrawUsage);
+      k.bake.geo.setAttribute('aLamp', k.lamp);
+      k.bake.geo.setAttribute('aFinish', k.finish);
+      k.mesh = mesh;
+      group.add(mesh);
+    }
+    kindList = [...kinds.values()];
+    stats.kinds = kindList.length;
+
+    blobs = new THREE.InstancedMesh(blobGeo, blobMat, cars.length);
+    blobs.name = 'fleet:shadows';
+    blobs.frustumCulled = false;
+    blobs.renderOrder = -1;
+    blobs.count = 0;
+    blobs.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    blobs.visible = !!K.tex.shadow;
+    group.add(blobs);
+
+    // Four lamps a car, plus a beacon.
+    const nf = cars.length * 5;
+    const fg = new THREE.InstancedBufferGeometry();
+    fg.index = flareGeo.index;
+    fg.setAttribute('position', flareGeo.attributes.position);
+    flarePos = new THREE.InstancedBufferAttribute(new Float32Array(nf * 3), 3);
+    flareDir = new THREE.InstancedBufferAttribute(new Float32Array(nf * 3), 3);
+    flareCol = new THREE.InstancedBufferAttribute(new Float32Array(nf * 3), 3);
+    for (const a of [flarePos, flareDir, flareCol]) a.setUsage(THREE.DynamicDrawUsage);
+    fg.setAttribute('aPos', flarePos);
+    fg.setAttribute('aDir', flareDir);
+    fg.setAttribute('aCol', flareCol);
+    fg.instanceCount = 0;
+    flares = new THREE.Mesh(fg, flareMat);
+    flares.name = 'fleet:flares';
+    flares.frustumCulled = false;
+    flares.renderOrder = 5;
+    group.add(flares);
+  }
+
+  function nearModel(i, t) {
+    const s = slots[i];
+    if (!s.model) {
+      s.model = createCarModel(kinds.get(s.key).spec, { detail: 'low', colour: s.colour });
+      group.add(s.model.group);
+    }
+    return s.model;
+  }
+
+  // Scratch for the nearest-N pick.
+  let d2s = new Float64Array(0);
+  let order = new Int32Array(0);
+
+  /** Writes one flare. Returns the next free index. */
+  function flare(n, lx, ly, lz, dirSign, r, g, b) {
+    if (n >= flareCol.count) return n;
+    _fv.set(lx, ly, lz).applyMatrix4(_fm);
+    flarePos.array[n * 3] = _fv.x; flarePos.array[n * 3 + 1] = _fv.y; flarePos.array[n * 3 + 2] = _fv.z;
+    // Local forward is -Z; a tail lamp shines backwards.
+    _fn.set(0, 0, -dirSign).transformDirection(_fm);
+    flareDir.array[n * 3] = _fn.x; flareDir.array[n * 3 + 1] = _fn.y; flareDir.array[n * 3 + 2] = _fn.z;
+    flareCol.array[n * 3] = r; flareCol.array[n * 3 + 1] = g; flareCol.array[n * 3 + 2] = b;
+    return n + 1;
+  }
+
+  /**
+   * `night` is the sky's 0..1 darkness. Headlights come on in the dark, and
+   * in rain — which is when a real driver puts them on.
+   */
+  function sync(cars, camera, night = 0) {
+    if (!cars || !cars.length) return;
+    if (!built) build(cars);
+    if (d2s.length < cars.length) { d2s = new Float64Array(cars.length); order = new Int32Array(cars.length); }
+    const sky = scene.userData ? scene.userData.sky : null;
+    const rain = sky ? (sky.rain || 0) : 0;
+    const lights = night > 0.35 || rain > 0.35;
+    const glow = Math.max(clamp((night - 0.2) / 0.5, 0, 1), clamp((rain - 0.2) / 0.5, 0, 1) * 0.7);
+    const cam = camera.position;
+    _pv.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    _frust.setFromProjectionMatrix(_pv);
+    const H = (typeof window !== 'undefined' && window.innerHeight) || 720;
+    flareU.uPx.value = 2 * Math.tan((camera.fov || 60) * Math.PI / 360) / H;
+    const nearR = T.near, farR = T.near * 1.12;
+    const clock = now();
+
+    // Who is near: inside the radius (with hysteresis), at most maxNear.
+    let cand = 0;
+    for (let i = 0; i < cars.length; i++) {
+      const t = cars[i];
+      if (!t.active) { d2s[i] = Infinity; continue; }
+      const dx = t.x - cam.x, dy = t.y - cam.y, dz = t.z - cam.z;
+      const d2 = dx * dx + dy * dy + dz * dz;
+      d2s[i] = d2;
+      const lim = slots[i].near ? farR : nearR;
+      if (d2 < lim * lim) order[cand++] = i;
+    }
+    if (cand > T.maxNear) {
+      // Insertion sort of a handful of indices by distance.
+      for (let a = 1; a < cand; a++) {
+        const v = order[a], dv = d2s[v];
+        let b = a - 1;
+        while (b >= 0 && d2s[order[b]] > dv) { order[b + 1] = order[b]; b--; }
+        order[b + 1] = v;
+      }
+      cand = T.maxNear;
+    }
+    for (let i = 0; i < cars.length; i++) slots[i].near = false;
+    for (let a = 0; a < cand; a++) slots[order[a]].near = true;
+
+    for (let q = 0; q < kindList.length; q++) kindList[q].n = 0;
+    let nb = 0, nf = 0, nNear = 0, nFar = 0, farTris = 0;
+    for (let i = 0; i < cars.length; i++) {
+      const t = cars[i], s = slots[i];
+      if (!t.active) { if (s.model) s.model.group.visible = false; continue; }
+      const head = lights ? 1 : 0;
+      const brake = t.braking ? 1 : 0;
+      const lit = ((clock + s.blink) % 0.78) < 0.44;
+      const indL = t.indicator === -1 && lit ? 1 : 0;
+      const indR = t.indicator === 1 && lit ? 1 : 0;
+      const beacon = t.beacon ? Math.max(0, Math.sin((clock + s.blink) * 7.5)) : 0;
+
+      _fe.set(t.pitch || 0, t.yaw || 0, -(t.roll || 0), 'YXZ');
+      _fq.setFromEuler(_fe);
+      _fm.compose(_fp.set(t.x, t.y, t.z), _fq, _fs.set(1, 1, 1));
+      const k = kinds.get(s.key);
+      const radius = k.template.dims.length * 0.5 + 4 + Math.sqrt(d2s[i]) * 0.05;
+      const inView = _frust.intersectsSphere(_fsph.set(_fp, radius));
+
+      if (s.near) {
+        nNear++;
+        const m = nearModel(i, t);
+        m.group.visible = true;
+        m.group.position.set(t.x, t.y, t.z);
+        m.group.rotation.set(0, t.yaw, 0);
+        if (t.pitch) m.group.rotateX(t.pitch);
+        if (t.roll) m.group.rotateZ(-t.roll);
+        m.setSteer(t.steerAngle || 0);
+        m.setWheelSpin(t.wheelSpin || 0);
+        m.setBrakeLights(brake);
+        m.setHeadlights(lights);
+        m.setIndicator(t.indicator || 0);
+        if (m.setBeacon) m.setBeacon(beacon);
+      } else {
+        if (s.model) s.model.group.visible = false;
+        if (inView) {
+          nFar++;
+          const j = k.n++;
+          _fm.toArray(k.mesh.instanceMatrix.array, j * 16);
+          _fcol.setHex(s.colour);
+          k.mesh.instanceColor.array[j * 3] = _fcol.r;
+          k.mesh.instanceColor.array[j * 3 + 1] = _fcol.g;
+          k.mesh.instanceColor.array[j * 3 + 2] = _fcol.b;
+          const L = k.lamp.array, F = k.finish.array;
+          L[j * 4] = head; L[j * 4 + 1] = brake; L[j * 4 + 2] = indL; L[j * 4 + 3] = indR;
+          F[j * 4] = s.metal; F[j * 4 + 1] = s.rough; F[j * 4 + 2] = beacon; F[j * 4 + 3] = 0;
+          farTris += k.bake.triangles;
+          // Its contact shadow: under the body, on the ground plane of the car.
+          const dm = k.template.dims;
+          _fm2.compose(_fv.set(0, -(t.rideHeight ?? t.spec?.rideHeight ?? 0.3) + 0.047, (dm.front + dm.rear) * 0.5),
+            _fq.identity(), _fs.set(dm.width + 0.5, 1, dm.length + 0.6));
+          _fm2.premultiply(_fm);
+          _fm2.toArray(blobs.instanceMatrix.array, nb * 16);
+          nb++;
+        }
+      }
+
+      // Flares, near or far, when there is something to see.
+      if (inView && (glow > 0.01 || brake) && d2s[i] < T.flareFar * T.flareFar) {
+        const L = k.bake.lamps;
+        // Linear radiance at the centre of the glow. The bloom threshold is
+        // about 2.1, so a headlight blooms and a running tail lamp does not.
+        const hk = head * glow * 4.2;
+        const tk = Math.max(head * 1.3 * glow, brake * (0.8 + 2.4 * glow));
+        if (hk > 0.01) {
+          nf = flare(nf, L.head[0][0], L.head[0][1], L.head[0][2], 1, hk, hk * 0.88, hk * 0.7);
+          nf = flare(nf, L.head[1][0], L.head[1][1], L.head[1][2], 1, hk, hk * 0.88, hk * 0.7);
+        }
+        if (tk > 0.01) {
+          nf = flare(nf, L.tail[0][0], L.tail[0][1], L.tail[0][2], -1, tk, tk * 0.04, tk * 0.02);
+          nf = flare(nf, L.tail[1][0], L.tail[1][1], L.tail[1][2], -1, tk, tk * 0.04, tk * 0.02);
+        }
+        if (L.beacon && beacon > 0.05) {
+          const bk = beacon * (0.6 + glow * 1.6);
+          // A beacon is seen from everywhere: shine it at the camera.
+          _fv.set(L.beacon[0], L.beacon[1], L.beacon[2]).applyMatrix4(_fm);
+          if (nf < flareCol.count) {
+            flarePos.array[nf * 3] = _fv.x; flarePos.array[nf * 3 + 1] = _fv.y; flarePos.array[nf * 3 + 2] = _fv.z;
+            _fn.subVectors(cam, _fv).normalize();
+            flareDir.array[nf * 3] = _fn.x; flareDir.array[nf * 3 + 1] = _fn.y; flareDir.array[nf * 3 + 2] = _fn.z;
+            flareCol.array[nf * 3] = bk; flareCol.array[nf * 3 + 1] = bk * 0.36; flareCol.array[nf * 3 + 2] = bk * 0.02;
+            nf++;
+          }
+        }
+      }
+    }
+
+    // Whole-buffer uploads. They are a few kilobytes each, and an update
+    // range is an object pushed per attribute per frame — garbage for the
+    // collector to find, for no measurable saving at this size.
+    for (let q = 0; q < kindList.length; q++) {
+      const k = kindList[q], mesh = k.mesh;
+      mesh.count = k.n;
+      mesh.visible = k.n > 0;
+      if (k.n) {
+        mesh.instanceMatrix.needsUpdate = true;
+        mesh.instanceColor.needsUpdate = true;
+        k.lamp.needsUpdate = true;
+        k.finish.needsUpdate = true;
+      }
+    }
+    blobs.count = nb;
+    blobs.visible = nb > 0 && !!K.tex.shadow;
+    if (nb) blobs.instanceMatrix.needsUpdate = true;
+    flares.geometry.instanceCount = nf;
+    flares.visible = nf > 0;
+    if (nf) { flarePos.needsUpdate = true; flareDir.needsUpdate = true; flareCol.needsUpdate = true; }
+    stats.near = nNear; stats.far = nFar; stats.flares = nf; stats.farTriangles = farTris;
+  }
+
+  /**
+   * Build every model the pool will need, now, hidden: the bakes, the
+   * instance buffers and one near model per kind. Called behind the loading
+   * bar, so the programs compile there rather than in the first seconds of
+   * driving (the first-of-style builds were 113-194 ms each, measured).
+   */
+  function prewarm(cars) {
+    if (!built && cars && cars.length) build(cars);
+    // One frame's worth of everything, drawn by the warm-up compile.
+    for (const k of kindList) { k.mesh.count = 1; k.mesh.visible = true; }
+    if (blobs) { blobs.count = 1; }
+    if (flares) { flares.geometry.instanceCount = 1; flares.visible = true; }
+    return kindList.length;
+  }
+
+  function setQuality(q) {
+    if (!FLEET[q]) return tier;
+    tier = q; T = { ...FLEET[q] };
+    flareU.uFar.value = T.flareFar;
+    return tier;
+  }
+
+  /** The near model a pool slot is drawn with, if it has one yet. */
+  function model(i) { return slots[i] ? slots[i].model : null; }
+
+  function dispose() {
+    for (const s of slots) if (s && s.model) s.model.dispose();
+    for (const k of kindList) {
+      if (k.template) k.template.dispose();
+      if (k.bake) k.bake.geo.dispose();
+      if (k.mesh) k.mesh.dispose();
+    }
+    if (blobs) blobs.dispose();
+    if (flares) flares.geometry.dispose();
+    blobGeo.dispose(); flareGeo.dispose();
+    farMat.dispose(); blobMat.dispose(); flareMat.dispose();
+    group.removeFromParent();
+    slots.length = 0; kinds.clear(); kindList = [];
+    releaseKit();
+  }
+
+  const api = {
+    group, sync, prewarm, setQuality, model, dispose, stats,
+    get quality() { return tier; },
+    /** The live radii, for a look from the console: fleet.tune.near = 200. */
+    get tune() { return T; },
+  };
+  return api;
+}

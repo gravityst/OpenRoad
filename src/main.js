@@ -311,13 +311,16 @@ async function boot() {
   }
   fitCarModel(chosenCar, chosenColour);
 
-  // Traffic models: one per POOL SLOT.
+  // Traffic models: the FLEET (render/carModel.js createFleet).
   //
   // traffic.cars is a fixed-length pool, not a live list — a slot keeps the same
   // spec, body and colour for the whole session and is recycled by flipping
-  // `active`. So the mesh is built once per slot and only its visibility is
-  // toggled. Keying models by car object instead (and pruning with `includes`)
-  // never prunes anything, because the objects are never replaced.
+  // `active`. The fleet builds a slot's near model once, at traffic ('low')
+  // detail, and draws every car beyond the tier's near radius as one instanced
+  // draw per model. This used to build every slot at the PLAYER's detail: 26
+  // draw calls and ~22k triangles a car, up to 71 of them.
+  const fleet = mCar ? mCar.createFleet(scene, { quality: settings.quality || 'medium' }) : null;
+  // Each slot's near model, for the damage rig. Filled only with DAMAGE on.
   const trafficModels = [];
   // Visual damage for traffic, one per slot, built on first contact like the
   // damage state itself. Low detail: a traffic car is seen from further away
@@ -504,20 +507,13 @@ async function boot() {
 
   function syncTrafficModels(night, dt) {
     const list = traffic.cars || [];
-    if (!mCar) return;
+    if (!fleet) return;
+    // Places, lights and levels-of-detail every car in the pool.
+    fleet.sync(list, camera, night);
+    if (!DAMAGE) return;
     for (let i = 0; i < list.length; i++) {
       const t = list[i];
-      let m = trafficModels[i];
-      if (m === undefined) {
-        try {
-          m = mCar.createCarModel({ ...t.spec, body: t.body, colour: t.colour });
-          scene.add(m.group);
-        } catch (err) {
-          console.error('[open road] traffic model failed:', err);
-          m = null;
-        }
-        trafficModels[i] = m;
-      }
+      const m = trafficModels[i] = fleet.model(i);
       if (!m) continue;
 
       // A recycled slot is a different car. Without this it drives away wearing
@@ -557,17 +553,6 @@ async function boot() {
         if (t.burning <= 0 && t.damage) t.damage.state.onFire = 0;
       }
 
-      if (!t.active) { m.group.visible = false; continue; }
-      m.group.visible = true;
-      m.group.position.set(t.x, t.y, t.z);
-      m.group.rotation.set(0, t.yaw, 0);
-      if (t.pitch) m.group.rotateX(t.pitch);
-      if (t.roll) m.group.rotateZ(-t.roll);
-      m.setSteer(t.steerAngle || 0);
-      m.setWheelSpin(t.wheelSpin || 0);
-      m.setBrakeLights(t.braking ? 1 : 0);
-      m.setHeadlights(night > 0.35);
-      m.setIndicator(t.indicator ? (indicatorPhase % 0.9 < 0.45 ? t.indicator : 0) : 0);
     }
   }
 
@@ -738,8 +723,21 @@ async function boot() {
   terrain.setQuality(settings.quality || 'medium');
   city.setQuality(settings.quality || 'medium');
   props.setQuality(settings.quality || 'medium');
+  setRealismQuality(settings.quality || 'medium');
   matchFogToTerrain();
   renderer.shadowMap.enabled = settings.shadows !== false;
+
+  /**
+   * The roads' draw distance, anisotropy and relief, every car's level of
+   * detail and the fleet's near radius all follow the tier. Each had a
+   * setQuality nothing called, so every tier drew roads at the constructor's
+   * 4960 m and cars at 'high' — the tiers reached terrain, city and props only.
+   */
+  function setRealismQuality(q) {
+    roads.setQuality(q);
+    if (mCar) mCar.setCarQuality(q);
+    if (fleet) fleet.setQuality(q);
+  }
 
   menus.setCars(CARS);
   menus.on('drive', (payload) => {
@@ -793,6 +791,7 @@ async function boot() {
     terrain.setQuality(settings.quality || 'medium');
     city.setQuality(settings.quality || 'medium');
     props.setQuality(settings.quality || 'medium');
+    setRealismQuality(settings.quality || 'medium');
     matchFogToTerrain();                 // the ring size changes with quality
     renderer.shadowMap.enabled = settings.shadows !== false;
     if (settings.time != null) { clockHours = settings.time; sky.setTime(clockHours); }
@@ -2006,7 +2005,7 @@ async function boot() {
   // which is what happened before it existed, and must not cost the level
   // below or put "Running without" on the screen.
   await stage(0.985, 'warming up the paint shop', async () => {
-    try { syncTrafficModels(0, 0); } catch (err) { console.warn('[open road] traffic warm-up:', err); }
+    try { if (fleet) fleet.prewarm(traffic.cars || []); } catch (err) { console.warn('[open road] traffic warm-up:', err); }
     try {
       if (renderer.compileAsync) {
         await Promise.race([
@@ -2056,7 +2055,7 @@ async function boot() {
       return 'boom';
     },
     layers: { terrain, roads, city, props, particles, effects, sky, traffic, hud, menus, audio, touch,
-              collision, debris, damageFx, drift, models, get carDamage() { return carDamage; } },
+              collision, debris, damageFx, drift, models, fleet, get carDamage() { return carDamage; } },
     /** Wreck the car on demand, for looking at damage without crashing first. */
     wreck: (n = 6, severity = 0.7) => {
       if (!car.damage) return null;          // DAMAGE off: there is nothing to wreck

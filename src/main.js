@@ -576,10 +576,11 @@ async function boot() {
     stub(['update', 'setVisible', 'toast', 'setMinimapZoom', 'dispose']);
 
   const menus = (mMenus && safe(() => mMenus.createMenus(document.getElementById('menus'),
-    // handleEscape, because while a screen is open the menu consumes keys at
-    // capture phase — controls.js is a bubble-phase window listener and never
-    // sees them, so without this Escape opens the pause screen and nothing
-    // closes it. The menu emits 'resume' instead.
+    // handleEscape: while a screen is open the menu consumes Escape at capture
+    // phase (controls.js, a bubble-phase listener, never sees it) and closes
+    // itself, emitting 'resume'. While driving it leaves the key alone, so
+    // stepFrame() below is the one place that pauses — and the one place that
+    // knows Escape in inspect mode means "back to driving", not "pause".
     { world, settings, handleEscape: true }))) ||
     stub(['show', 'hide', 'on', 'setCars', 'dispose'], { current: null });
 
@@ -887,6 +888,11 @@ async function boot() {
     speed: 0, gear: 1, rpm: 0, redline: 7000, surface: 'asphalt', throttle: 0, brake: 0,
     handbrake: 0, time: 12, heading: 0, x: 0, z: 0, district: '', speedLimit: 0,
     airborne: false, slipping: 0, odometer: 0,
+    // Each friend's minimap blip in the colour of their beacon and name tag.
+    // party.colourFor caches per player, so the HUD calling it per blip per
+    // frame allocates nothing; null without multiplayer, and the HUD falls
+    // back to one shared colour.
+    playerColour: colourOf,
   };
   const audioState = {
     rpm: 0, redline: 7000, throttle: 0, load: 0, speed: 0, gear: 1, shifting: false,

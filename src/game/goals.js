@@ -267,10 +267,11 @@ export function createGoals(opts) {
     progress.peak('mult', e.mult);
     // The first link anyone ever makes says what the meter is, once: a
     // number appearing under the compass means nothing to a kid until it
-    // does, and "don't crash" is the whole rule.
+    // does. Said as the thing to do ("keep it clean") rather than the thing
+    // that goes wrong: the kids took "crash and it is gone" as a telling-off.
     if (!progress.flag('chainHint')) {
       progress.setFlag('chainHint');
-      toast('SKILL CHAIN! Near misses, jumps, drifts and speed add to it. Crash and it is gone', 5);
+      toast('Skill chain! Near misses, jumps, drifts and speed all stack up. Keep it clean to bank it', 5);
     }
     if (k === 'near' || k === 'oncoming') {
       progress.track('near', 1);
@@ -1173,7 +1174,7 @@ export function createGoals(opts) {
      * Shows a moment without earning it, for looking at the UI (the way
      * main.js's detonate() shows a blast without a crash). 'chain' adds five
      * links to the real chain, which then counts and pays like any other;
-     * 'bank' and 'lost' end it; 'level', 'trophy',
+     * 'bank' and 'lost' end it; 'medal' shows a race's medal card; 'level', 'trophy',
      * 'daily', 'sweep' and 'welcome' show their card and change nothing in
      * the save. Returns what it did.
      */
@@ -1188,6 +1189,19 @@ export function createGoals(opts) {
       }
       if (what === 'bank') { skills.bank(); return 'banked'; }
       if (what === 'lost') { skills.onCrash(1); return 'lost'; }
+      // The medal card for the first race, as a gold with a new best —
+      // shown only, nothing recorded.
+      if (what === 'medal') {
+        const c = list.find((q) => q.kind === 'race');
+        if (!overlay || !c) return 'no card';
+        overlay.result({
+          kind: c.kind, name: c.name, medal: MEDAL_GOLD, medalName: MEDAL_NAMES[MEDAL_GOLD],
+          score: formatTime(c.targets[MEDAL_GOLD] - 1.3), best: formatTime(c.targets[MEDAL_GOLD] - 1.3),
+          prevBest: formatTime(c.targets[MEDAL_GOLD] + 4.1), newBest: true, first: false,
+          cash: 700, xp: 210, levelUp: 0, levelReward: '', next: '', retry: true,
+        });
+        return 'medal';
+      }
       const n = progress.nextReward();
       const t = progress.trophyList().find((q) => !q.got) || progress.trophyList()[0];
       const d = (progress.daily().list || [])[0];

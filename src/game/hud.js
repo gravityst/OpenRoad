@@ -70,14 +70,20 @@ const HILLSHADE = 192;       // terrain samples per side for the map's relief
 const COMPASS_ARC = 110;     // degrees of heading visible on the strip
 const TAPE_REV_MAX = 4096;   // cap one revolution so the tape canvas stays sane
 
-const FONT_MONO = 'ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace';
+// The canvases draw in the same two faces as the rest of the UI (ui.css): the
+// DIN numerals for anything that is a number, the condensed capitals for
+// anything that is a word. Both are system fonts, so nothing is fetched.
+const FONT_NUM = '"DIN Alternate", "Bahnschrift", "Roboto Condensed", "Avenir Next Condensed", sans-serif';
+const FONT_WORD = '"Avenir Next Condensed", "Bahnschrift", "Roboto Condensed", "Arial Narrow", sans-serif';
 
-const COL_ACCENT = '#ffb648';
-const COL_WARN = '#ff5a48';
-const COL_COOL = '#5fd0e6';
-// Other drivers. Deliberately not the amber your own car and the towns use, and
-// not the cyan of villages — at a glance on a busy map the only question that
-// matters is "is that a person?", so it gets a hue nothing else owns.
+// The palette is ui.css's: signal yellow is YOU (the arrow on the map, the
+// top of the rev band), studio blue is speed, red only at the limiter.
+const COL_ACCENT = '#ffc21f';
+const COL_WARN = '#ff5b4a';
+const COL_COOL = '#7db2ff';
+const COL_VOLT = '#3c8cff';
+// Other drivers, when main.js has no per-player colour to give: a hue
+// nothing else on the map owns, because the question is "is that a person?".
 const COL_PLAYER = '#7ef29a';
 // The goals layer's GPS line and challenge pins. Cyan is the GPS everywhere —
 // the chevrons on the road, the arrow over the car, this line — so the three
@@ -86,28 +92,35 @@ const COL_GPS = '#4fd8f0';
 const COL_TOKEN = '#ffcf3a';
 const MARKER_COL = { race: '#ffb43c', trap: '#ff5a5a', jump: '#4fe38a', drift: '#e45cff' };
 const MEDAL_RING = ['', '#d08a4c', '#e6edf3', '#ffd23f'];
-const COL_GO = '#4ad295';
-const COL_NEEDLE = '#ffe7bd';
-const COL_NEEDLE_SOFT = 'rgba(255,231,189,0.22)';
-const COL_WARN_SOFT = 'rgba(255,90,72,0.28)';
-const COL_TRACK = 'rgba(255,255,255,0.085)';
-const COL_REDBAND = 'rgba(255,90,72,0.28)';
-const COL_TICK = 'rgba(226,236,245,0.46)';
-const COL_TICK_DIM = 'rgba(226,236,245,0.20)';
-const COL_NUM = 'rgba(226,236,245,0.60)';
-const COL_RIM = 'rgba(255,255,255,0.10)';
+const COL_GO = '#3ddc84';
+const COL_NEEDLE = '#eef2f8';
+const COL_TRACK = 'rgba(238,242,248,0.085)';
+const COL_REDBAND = 'rgba(255,91,74,0.30)';
+const COL_NUM = 'rgba(226,236,245,0.62)';
+const COL_RIM = 'rgba(196,212,236,0.22)';
+// The tach's segments when lit, by band: silver through the body of the rev
+// range, yellow from 80% of the limiter, red past it — the colours of a shift
+// light strip, so "change up" reads without looking at a number.
+const COL_SEG = '#e6edf6';
+const COL_SEG_HI = '#ffc21f';
+const COL_SEG_RED = '#ff5b4a';
+const COL_SEG_OFF = 'rgba(238,242,248,0.09)';
+const SEG_STEP = 5 * DEG;           // one segment every 5 degrees: 50 across the sweep
+const SEG_FILL = 0.68;              // of each step, the rest is the gap
 const COL_LABEL = 'rgba(238,244,250,0.94)';
 const COL_LABEL_DIM = 'rgba(214,226,238,0.62)';
 const COL_HALO = 'rgba(4,6,9,0.85)';
 
-// Muted so the roads drawn over them stay the brightest thing on the map.
+// A ladder of greys, brighter and wider for bigger roads, matching the pause
+// map (menus.js). Amber motorways used to swallow the race pins sitting on
+// them; the colours on this disc are kept for things you can drive TO.
 const ROAD_CORE = {
-  highway: '#f0b95e', avenue: '#d9e0e7', link: '#c6cfd8', street: '#8b96a2',
-  rural: '#c0ab84', dirt: '#8d7550', track: '#7d6647',
+  highway: '#eef2f8', avenue: '#cdd6e2', link: '#b4bfcd', street: '#8995a6',
+  rural: '#c2c8bc', dirt: '#8d7550', track: '#7d6647',
 };
 const ROAD_CASE = {
-  highway: '#37281a', avenue: '#1b1f26', link: '#1b1f26', street: '#15181d',
-  rural: '#221f18', dirt: '#1e1a14', track: '#1a1712',
+  highway: '#101626', avenue: '#131a28', link: '#131a28', street: '#121722',
+  rural: '#1c1f1a', dirt: '#1e1a14', track: '#1a1712',
 };
 // Painted smallest first so a highway is never interrupted by a lane crossing it.
 const ROAD_ORDER = ['track', 'dirt', 'street', 'rural', 'link', 'avenue', 'highway'];
@@ -132,7 +145,7 @@ const SURFACE_LABEL = {
 const LOOSE = { dirt: 1, gravel: 1, sand: 1, grass: 1 };
 
 const OPEN_COUNTRY = 'Open Country';
-const RPM_LABEL = '×1000 r/min';
+const RPM_LABEL = 'RPM ×1000';
 
 // Pre-rendered numerals. update() must never build a string, and every number it
 // can show fits in one of these.
@@ -257,17 +270,19 @@ const TEMP_SHOW = 0.60;
 const DRIFT_RATIO_MAX = 1.25;      // full scale, a quarter past the spin line
 const DRIFT_SWEEP = 78;            // degrees of needle travel at full scale
 const DRIFT_BAND = [0.25, 0.75, 1.0];  // loose | scoring | committed | spinning
-const DRIFT_COL = ['rgba(226,236,245,0.42)', '#4ad295', '#ffb648', '#ff5a48'];
+const DRIFT_COL = ['rgba(226,236,245,0.42)', '#3ddc84', '#ffc21f', '#ff5b4a'];
 const DRIFT_TRACK = [
-  'rgba(255,255,255,0.07)', 'rgba(74,210,149,0.20)',
-  'rgba(255,182,72,0.22)', 'rgba(255,90,72,0.26)',
+  'rgba(255,255,255,0.07)', 'rgba(61,220,132,0.20)',
+  'rgba(255,194,31,0.22)', 'rgba(255,91,74,0.26)',
 ];
-// A lost chain says WHY it was lost. drift.js only ever reports these three,
-// and the fallback covers a reason it might learn to report later.
+// A drift that ends early says why, in words that describe rather than
+// scold: a kid who clipped a wall reads BUMPED, not CRASHED. drift.js only
+// ever reports these three, and the fallback covers a reason it might learn
+// to report later.
 const TAG_DRIFT = 'DRIFT';
 const TAG_BANKED = 'BANKED';
-const TAG_LOST = 'LOST';
-const LOST_TAG = { spin: 'SPUN', slow: 'TOO SLOW', crash: 'CRASHED' };
+const TAG_LOST = 'ENDED';
+const LOST_TAG = { spin: 'SPUN OUT', slow: 'TOO SLOW', crash: 'BUMPED' };
 
 // ---- more pre-rendered text ------------------------------------------------
 
@@ -303,8 +318,8 @@ const DRIFT_CLASS = [
 
 function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
 
-function fontFor(px, weight) {
-  return weight + ' ' + Math.max(6, Math.round(px)) + 'px ' + FONT_MONO;
+function fontFor(px, weight, face) {
+  return weight + ' ' + Math.max(6, Math.round(px)) + 'px ' + (face || FONT_NUM);
 }
 
 /**
@@ -458,6 +473,10 @@ export function createHUD(root, opts = {}) {
   const driftCtx = driftCanvas.getContext('2d');
   const dialBase = elem('canvas');            // a cache, deliberately not attached
   const dialBaseCtx = dialBase.getContext('2d');
+  const dialLit = elem('canvas');             // the tach fully lit, in its band colours
+  const dialLitCtx = dialLit.getContext('2d');
+  const dialHot = elem('canvas');             // ...and all red, for the shift light
+  const dialHotCtx = dialHot.getContext('2d');
   const driftBase = elem('canvas');           // likewise: the gauge's baked face
   const driftBaseCtx = driftBase.getContext('2d');
   let tape = null;
@@ -608,7 +627,9 @@ export function createHUD(root, opts = {}) {
   if (world) {
     for (let i = 0; i < world.districts.length; i++) {
       const d = world.districts[i];
-      places.push({ name: d.name, x: d.cx, z: d.cz, village: d.id.startsWith('v_') });
+      // Upper-cased once, here: the minimap labels are set in capitals like
+      // every other label, and doing it per frame would mint a string a frame.
+      places.push({ name: d.name.toUpperCase(), x: d.cx, z: d.cz, village: d.id.startsWith('v_') });
       districtNames.set(d.id, d.name);
     }
   }
@@ -656,7 +677,7 @@ export function createHUD(root, opts = {}) {
       mapCtx.textAlign = 'center';
       mapCtx.textBaseline = 'middle';
       mapCtx.lineJoin = 'round';
-      mapCtx.font = fontFor(mapCanvas.width * 0.062, 700);
+      mapCtx.font = fontFor(mapCanvas.width * 0.066, 700, FONT_WORD);
       mapCtx.strokeStyle = COL_HALO;
     }
 
@@ -671,6 +692,13 @@ export function createHUD(root, opts = {}) {
 
   // ---- the dial ----------------------------------------------------------
 
+  /**
+   * Bakes everything on the dial that does not move, and two copies of the
+   * tach's segments fully lit — one in the band colours, one all red for the
+   * shift light. drawDial() then shows as much of the lit copy as the revs
+   * reach by clipping it to a wedge: one blit, one clipped blit, whatever
+   * the rev count, instead of fifty strokes a frame.
+   */
   function drawDialBase(redline) {
     const w = dialCanvas.width, h = dialCanvas.height;
     if (w < 16) return;
@@ -678,76 +706,75 @@ export function createHUD(root, opts = {}) {
     // Round the scale up past the limiter so the redline band always has room
     // to show, whatever car the player is in — 6900 gives 8000, 14000 gives 15000.
     dialScale = Math.max(1000, Math.ceil(redline * 1.06 / 1000) * 1000);
-    dialBase.width = w;
-    dialBase.height = h;
+    dialBase.width = w; dialBase.height = h;
+    dialLit.width = w; dialLit.height = h;
+    dialHot.width = w; dialHot.height = h;
     const g = dialBaseCtx;
 
-    const glass = g.createRadialGradient(cx, cy - R * 0.28, R * 0.10, cx, cy, R);
-    glass.addColorStop(0, 'rgba(27,33,42,0.62)');
-    glass.addColorStop(1, 'rgba(8,10,14,0.88)');
-    g.fillStyle = glass;
+    const face = g.createRadialGradient(cx, cy - R * 0.3, R * 0.1, cx, cy, R);
+    face.addColorStop(0, 'rgba(18,27,48,0.86)');
+    face.addColorStop(1, 'rgba(5,9,18,0.92)');
+    g.fillStyle = face;
     g.beginPath();
     g.arc(cx, cy, R, 0, TAU);
     g.fill();
     g.strokeStyle = COL_RIM;
-    g.lineWidth = kk * 1.1;
+    g.lineWidth = Math.max(1, kk * 0.8);
     g.beginPath();
-    g.arc(cx, cy, R - kk * 0.6, 0, TAU);
+    g.arc(cx, cy, R - kk * 0.5, 0, TAU);
     g.stroke();
 
+    // The segments: unlit on the base, lit on the two overlays.
     g.lineCap = 'butt';
+    const segs = Math.round(DIAL_SWEEP / SEG_STEP);
+    const lw = kk * 9.5;
+    for (let layer = 0; layer < 3; layer++) {
+      const c = layer === 0 ? g : layer === 1 ? dialLitCtx : dialHotCtx;
+      c.lineCap = 'butt';
+      c.lineWidth = lw;
+      for (let i = 0; i < segs; i++) {
+        const a0 = DIAL_START + i * SEG_STEP;
+        const rpmAt = ((i + 0.5) / segs) * dialScale;
+        c.strokeStyle = layer === 0
+          ? (rpmAt >= redline ? COL_REDBAND : COL_SEG_OFF)
+          : layer === 2 ? COL_SEG_RED
+          : rpmAt >= redline ? COL_SEG_RED : rpmAt >= redline * 0.8 ? COL_SEG_HI : COL_SEG;
+        c.beginPath();
+        c.arc(cx, cy, rTach, a0, a0 + SEG_STEP * SEG_FILL);
+        c.stroke();
+      }
+    }
+
+    // The speed ring and the pedal gap's track.
     g.strokeStyle = COL_TRACK;
-    g.lineWidth = kk * 8.6;
-    g.beginPath();
-    g.arc(cx, cy, rTach, DIAL_START, DIAL_START + DIAL_SWEEP);
-    g.stroke();
-    g.lineWidth = kk * 2.6;
+    g.lineWidth = kk * 2.2;
     g.beginPath();
     g.arc(cx, cy, rSpeed, DIAL_START, DIAL_START + DIAL_SWEEP);
     g.stroke();
-    g.lineCap = 'round';
-    g.lineWidth = kk * 4.4;
+    g.lineWidth = kk * 3.6;
     g.beginPath();
     g.arc(cx, cy, rTach, HALF_PI - PEDAL_GAP, HALF_PI + PEDAL_GAP);
     g.stroke();
 
-    g.lineCap = 'butt';
-    g.strokeStyle = COL_REDBAND;
-    g.lineWidth = kk * 8.6;
-    g.beginPath();
-    g.arc(cx, cy, rTach, DIAL_START + DIAL_SWEEP * clamp(redline / dialScale, 0, 1), DIAL_START + DIAL_SWEEP);
-    g.stroke();
-
+    // Thousands, inside the ring.
     const major = dialScale > 10000 ? 2000 : 1000;
-    const minor = major / 2;
-    g.font = fontFor(R * 0.135, 600);
+    g.font = fontFor(R * 0.13, 700);
     g.textAlign = 'center';
     g.textBaseline = 'middle';
-    for (let v = 0; v <= dialScale; v += minor) {
+    for (let v = 0; v <= dialScale; v += major) {
       const a = DIAL_START + DIAL_SWEEP * (v / dialScale);
-      const ca = Math.cos(a), sa = Math.sin(a);
-      const isMajor = v % major === 0;
-      const r0 = rTach + kk * 5.6;
-      const r1 = rTach + kk * (isMajor ? 11 : 8.2);
-      g.strokeStyle = v >= redline ? COL_WARN : isMajor ? COL_TICK : COL_TICK_DIM;
-      g.lineWidth = kk * (isMajor ? 1.9 : 1.1);
-      g.beginPath();
-      g.moveTo(cx + ca * r0, cy + sa * r0);
-      g.lineTo(cx + ca * r1, cy + sa * r1);
-      g.stroke();
-      if (!isMajor) continue;
-      const rn = rTach - kk * 12;
+      const rn = rTach - kk * 15;
       g.fillStyle = v >= redline ? COL_WARN : COL_NUM;
-      g.fillText(INT_STR[v / 1000], cx + ca * rn, cy + sa * rn);
+      g.fillText(INT_STR[v / 1000], cx + Math.cos(a) * rn, cy + Math.sin(a) * rn);
     }
 
     // Below the readout, not above it. The digital speed, its unit and the gear
     // are centred as one stack about 0.43 R tall, so anything above the middle
     // ends up behind the numerals; underneath there is nothing until the pedal
     // arcs at 0.795 R.
-    g.font = fontFor(R * 0.098, 500);
-    g.fillStyle = 'rgba(226,236,245,0.34)';
-    g.fillText(RPM_LABEL, cx, cy + R * 0.60);
+    g.font = fontFor(R * 0.092, 700, FONT_WORD);
+    g.fillStyle = 'rgba(169,182,201,0.55)';
+    g.fillText(RPM_LABEL, cx, cy + R * 0.61);
   }
 
   function drawDial(rpm, redline, kmh, throttle, brake, hot) {
@@ -759,21 +786,25 @@ export function createHUD(root, opts = {}) {
     g.drawImage(dialBase, 0, 0);
 
     const tr = clamp(rpm / dialScale, 0, 1);
-    g.lineCap = 'butt';
-    g.lineWidth = kk * 8.6;
-    g.strokeStyle = hot ? COL_WARN : COL_ACCENT;
-    g.beginPath();
-    g.arc(cx, cy, rTach, DIAL_START, DIAL_START + DIAL_SWEEP * tr);
-    g.stroke();
+    if (tr > 0.004) {
+      g.save();
+      g.beginPath();
+      g.moveTo(cx, cy);
+      g.arc(cx, cy, R, DIAL_START, DIAL_START + DIAL_SWEEP * tr);
+      g.closePath();
+      g.clip();
+      g.drawImage(hot ? dialHot : dialLit, 0, 0);
+      g.restore();
+    }
 
-    g.lineWidth = kk * 2.6;
-    g.strokeStyle = COL_COOL;
+    g.lineCap = 'butt';
+    g.lineWidth = kk * 2.2;
+    g.strokeStyle = COL_VOLT;
     g.beginPath();
     g.arc(cx, cy, rSpeed, DIAL_START, DIAL_START + DIAL_SWEEP * clamp(kmh / speedScale, 0, 1));
     g.stroke();
 
-    g.lineCap = 'round';
-    g.lineWidth = kk * 4.4;
+    g.lineWidth = kk * 3.6;
     if (throttle > 0.01) {
       g.strokeStyle = COL_GO;
       g.beginPath();
@@ -786,26 +817,6 @@ export function createHUD(root, opts = {}) {
       g.arc(cx, cy, rTach, HALF_PI, HALF_PI + PEDAL_GAP * clamp(brake, 0, 1));
       g.stroke();
     }
-
-    // A short pointer riding the ring rather than a full needle from the hub:
-    // the middle of the dial belongs to the digital readout.
-    const a = DIAL_START + DIAL_SWEEP * tr;
-    const ca = Math.cos(a), sa = Math.sin(a);
-    const n0 = R * 0.66, n1 = R * 0.90;
-    // Two strokes instead of a shadowBlur — a blur costs more than the entire
-    // rest of the HUD on an integrated GPU.
-    g.strokeStyle = hot ? COL_WARN_SOFT : COL_NEEDLE_SOFT;
-    g.lineWidth = kk * 7;
-    g.beginPath();
-    g.moveTo(cx + ca * n0, cy + sa * n0);
-    g.lineTo(cx + ca * n1, cy + sa * n1);
-    g.stroke();
-    g.strokeStyle = hot ? '#fff2ee' : COL_NEEDLE;
-    g.lineWidth = kk * 2.4;
-    g.beginPath();
-    g.moveTo(cx + ca * n0, cy + sa * n0);
-    g.lineTo(cx + ca * n1, cy + sa * n1);
-    g.stroke();
   }
 
   // ---- the compass strip -------------------------------------------------
@@ -833,8 +844,8 @@ export function createHUD(root, opts = {}) {
     const g = tapeCtx;
     g.textAlign = 'center';
     g.textBaseline = 'middle';
-    const bigFont = fontFor(h * 0.40, 700);
-    const smallFont = fontFor(h * 0.28, 600);
+    const bigFont = fontFor(h * 0.46, 700, FONT_WORD);
+    const smallFont = fontFor(h * 0.32, 700, FONT_WORD);
     for (let rep = 0; rep < 3; rep++) {
       const off = rep * tapeRev;
       for (let d = 0; d < 360; d += 15) {
@@ -867,7 +878,7 @@ export function createHUD(root, opts = {}) {
 
   let zoom = clamp(opts.minimapZoom || 1, ZOOM_MIN, ZOOM_MAX);
 
-  function drawMap(px, pz, heading, players, nav) {
+  function drawMap(px, pz, heading, players, nav, colourOf) {
     const w = mapCanvas.width;
     if (!worldMap || w < 16) return;
     const g = mapCtx;
@@ -922,7 +933,7 @@ export function createHUD(root, opts = {}) {
       }
       g.beginPath();
       g.arc(r + sx, r + sy, w * (onRim ? 0.010 : 0.015), 0, TAU);
-      g.fillStyle = p.village ? COL_COOL : COL_ACCENT;
+      g.fillStyle = p.village ? COL_COOL : COL_LABEL;
       g.fill();
       const ly = r + sy + w * 0.056;
       g.strokeText(p.name, r + sx, ly);
@@ -960,8 +971,12 @@ export function createHUD(root, opts = {}) {
         g.lineTo(0, bs * 0.3);
         g.lineTo(-bs * 0.66, bs * 0.72);
         g.closePath();
-        g.fillStyle = off ? 'transparent' : COL_PLAYER;
-        g.strokeStyle = COL_PLAYER;
+        // Their own colour, the one their beacon and name tag wear, when
+        // main.js hands over party.colourFor (cached per player, so this
+        // allocates nothing); one shared green otherwise.
+        const pc = colourOf ? colourOf(q).css : COL_PLAYER;
+        g.fillStyle = off ? 'transparent' : pc;
+        g.strokeStyle = pc;
         if (!off) g.fill();
         g.stroke();
         g.restore();
@@ -970,7 +985,7 @@ export function createHUD(root, opts = {}) {
           g.lineWidth = w * 0.013;
           const ly = r + sy - w * 0.038;
           g.strokeText(q.name, r + sx, ly);
-          g.fillStyle = COL_PLAYER;
+          g.fillStyle = pc;
           g.fillText(q.name, r + sx, ly);
           g.lineWidth = w * 0.011;
         }
@@ -1698,7 +1713,7 @@ export function createHUD(root, opts = {}) {
 
     drawDial(rpm, redline, kmhF, s.throttle || 0, s.brake || 0, shift);
     drawCompass(bearing);
-    drawMap(s.x || 0, s.z || 0, yaw, s.players, s.nav);
+    drawMap(s.x || 0, s.z || 0, yaw, s.players, s.nav, s.playerColour || null);
   }
 
   // ---- the rest of the surface -------------------------------------------
@@ -1738,6 +1753,8 @@ export function createHUD(root, opts = {}) {
     if (worldMap) { worldMap.width = 0; worldMap.height = 0; }
     if (tape) { tape.width = 0; tape.height = 0; }
     dialBase.width = 0; dialBase.height = 0;
+    dialLit.width = 0; dialLit.height = 0;
+    dialHot.width = 0; dialHot.height = 0;
     driftBase.width = 0; driftBase.height = 0;
     mapCanvas.width = 0; mapCanvas.height = 0;
     dialCanvas.width = 0; dialCanvas.height = 0;

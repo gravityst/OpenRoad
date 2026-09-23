@@ -70,7 +70,9 @@ const STAGE_NAMES = [
 ];
 const TRAP_NAMES = ['Long Mile', 'Flat Out Flats', 'Rocket Straight', 'Hawk Lane', 'The Runway', 'Bullet Row', 'Quarry Straight'];
 const JUMP_NAMES = ['Sky Hop', 'Big Air', 'Launch Pad', 'Moon Shot', 'Hang Time', 'Kite Kicker'];
-const DRIFT_NAMES = ['Smoke Show', 'Sideways Snake', 'Tyre Fire Bends', 'Slide Alley', 'The Pendulum'];
+// No fire in any name a kid reads: the game has no fire in it any more
+// (physics/damage.js), and 'Tyre Fire Bends' promised some.
+const DRIFT_NAMES = ['Smoke Show', 'Sideways Snake', 'Hairpin Hustle', 'Slide Alley', 'The Pendulum'];
 
 // ---------------------------------------------------------------------------
 // The reference driver

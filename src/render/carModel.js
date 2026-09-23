@@ -504,8 +504,11 @@ function grilleTexture() {
 }
 
 // Four invented plates in one atlas, picked per car by hash. Every code here
-// is made up and matches no real jurisdiction's format.
-const PLATE_CODES = ['ORV 418', 'KVN 703', 'TSA 962', 'MDR 275'];
+// is made up and matches no real jurisdiction's format — and no real agency or
+// broadcaster's initials either: two of the first four did (an airport
+// security agency and a regional broadcaster), and one car in four wore them
+// straight into the chase camera. tools/brandcheck.mjs now knows both.
+const PLATE_CODES = ['ORV 418', 'KVN 703', 'QEZ 962', 'WYX 275'];
 
 function plateTexture() {
   const c = canvas(256, 256);

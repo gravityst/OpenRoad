@@ -27,6 +27,12 @@ const FORBIDDEN = [
   'coca-cola', 'pepsi', 'mcdonald', 'starbucks', 'walmart', 'shell oil', 'texaco',
   'exxon', 'chevron corp', 'burger king', 'subway sandwich', 'ikea', 'costco',
   '7-eleven', 'google', 'microsoft',
+  // lorry, bus and tractor makers — the traffic now has all three
+  'scania', 'iveco', 'kenworth', 'peterbilt', 'freightliner', 'john deere', 'deere',
+  'kubota', 'fendt', 'massey ferguson', 'new holland', 'claas', 'isuzu', 'setra',
+  'neoplan', 'irizar', 'daf trucks', 'mack trucks',
+  // agencies and broadcasters whose initials read like a number plate
+  'tsa', 'mdr', 'fbi', 'nasa', 'bbc', 'cnn',
   // real places
   'new york', 'los angeles', 'san francisco', 'london', 'paris', 'tokyo', 'berlin',
   'chicago', 'miami', 'seattle', 'boston', 'detroit',

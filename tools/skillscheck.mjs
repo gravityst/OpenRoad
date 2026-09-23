@@ -36,6 +36,15 @@ const check = (name, ok, detail) => {
   if (!ok) fail++;
 };
 
+// This thread's CPU time in microseconds: time the scheduler gave the core to
+// someone else is not in it. process.threadCpuUsage() is Node 23.9 and later;
+// before that the whole process's figure is the nearest there is (it also
+// counts V8's helper threads, so it can only read long, never short).
+const CPU_CLOCK = process.threadCpuUsage ? 'thread CPU' : 'process CPU';
+const cpuRead = process.threadCpuUsage ? () => process.threadCpuUsage() : () => process.cpuUsage();
+const cpuNow = () => { const c = cpuRead(); return c.user + c.system; };
+const cpuSince = (c0) => cpuNow() - c0;
+
 function memoryStorage(seed) {
   const m = new Map(seed ? Object.entries(seed) : []);
   return {
@@ -565,7 +574,8 @@ console.log('\n-- the real car in real traffic --');
   const sk = createSkills();
   const heights = (x, z) => ground.heightAt(x, z);
   const counts = {};
-  let banked = 0, lost = 0, bankedValue = 0, nan = false, frames = 0, crashes = 0, preempted = 0;
+  let banked = 0, lost = 0, bankedValue = 0, nan = false, frames = 0, crashes = 0;
+  let wallSlow = 0, cpuSlow = 0, cpuMax = 0;
   const PH = 1 / 120;
   let skillUs = 0;
   const la = {}, np = {};
@@ -603,15 +613,21 @@ console.log('\n-- the real car in real traffic --');
       if (step % 2 === 1) {
         traffic.update(PH * 2, car.x, car.z, car.speed, car.yaw);
         drift.update(PH * 2, car);
+        const c0 = cpuNow();
         const t0 = performance.now();
         sk.update(PH * 2, car, traffic.cars, drift.state, true);
         const fu = (performance.now() - t0) * 1000;
-        // A single frame over a millisecond is the core being taken away (a
-        // scheduler slice or a GC), not 88 cars' worth of arithmetic: the
-        // detectors average under 2 us here. Those frames are counted, and
-        // held to a check of their own below, instead of being averaged in.
-        if (fu > 1000) preempted++;
-        else skillUs += fu;
+        const cu = cpuSince(c0);
+        // Every frame counts in the mean, however slow: a stall is exactly
+        // what this is here to find. What the wall clock cannot tell apart is
+        // the core being taken away from a stall in the code, so each frame's
+        // own CPU time is read as well. A preempted frame is long on the wall
+        // and short on the CPU; a stall in the detectors burns CPU for as
+        // long as it lasts. Only the CPU-long ones fail the check below.
+        skillUs += fu;
+        if (fu > 1000) wallSlow++;
+        if (cu > 1000) cpuSlow++;
+        if (cu > cpuMax) cpuMax = cu;
         frames++;
         for (let i = 0; i < sk.eventCount; i++) {
           const ev = sk.event(i);
@@ -636,9 +652,26 @@ console.log('\n-- the real car in real traffic --');
   check('driving the real car earns skills of several kinds', links >= 10 && Object.keys(counts).filter((k) => k !== 'bank' && k !== 'lost').length >= 3,
     `${links} links in ${minutes.toFixed(1)} minutes of a cautious autopilot`);
   check('the chain never goes NaN in real traffic', !nan, 'value, timer and points finite every frame');
-  const kept = Math.max(1, frames - preempted);
-  check('the detectors are cheap in real traffic', skillUs / kept < 30 && preempted <= frames * 0.005,
-    `${(skillUs / kept).toFixed(1)} us a frame (budget 30 us); ${preempted} of ${frames} frames over 1 ms set aside (allowed 0.5%)`);
+  // Round two's check, exactly: the mean of EVERY frame under 30 us.
+  // Measured 1.9-3.1 us idle, and 7.7-15.0 us with eighteen or nineteen
+  // processes on twelve cores (the wall clock counts the waits), so it has
+  // room to spare on a busy machine without leaving any frame out.
+  const perFrame = skillUs / Math.max(1, frames);
+  check('the detectors are cheap in real traffic', perFrame < 30,
+    `${perFrame.toFixed(1)} us a frame over all ${frames} (budget 30 us)`);
+  // A stall every few seconds hides in a mean: a mutation that spins 5 ms
+  // on every 1,000th update reads 7.1 us above and passes, yet it is a hitch
+  // a kid feels every seventeen seconds. So no frame may spend a millisecond
+  // of CPU in the detectors (that mutation: 42 frames caught). Measured over
+  // thirteen runs, idle and under that load: the longest frame is 0.18-0.49
+  // ms of CPU, none over 1 ms. The wall clock in the loaded runs had 41-113
+  // frames over 1 ms (27 ms the longest), every one of them short on the CPU.
+  // That is why the line is drawn on CPU time: on the wall clock the same
+  // line fails a busy machine, and an allowance of slow frames lets a real
+  // stall through.
+  check('no frame of the detectors stalls', cpuSlow === 0,
+    `${cpuSlow} frames over 1 ms of ${CPU_CLOCK} time (longest ${(cpuMax / 1000).toFixed(2)} ms); ` +
+    `${wallSlow} over 1 ms on the wall clock`);
   // A kid's twenty minutes: skills at this autopilot's rate, plus a medal a
   // few minutes and some tokens, should see several levels from a new save.
   const p = createProgress({ storage: memoryStorage(), cars: CARS, today: () => '2026-09-23' });

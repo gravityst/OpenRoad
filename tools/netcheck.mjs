@@ -954,6 +954,19 @@ for (const prof of ['stall1', 'stall3']) {
     check(early === null && stillEarly === null && later === 'Speedy Otter' && after === 'Speedy Otter' && Date.now() - t0 > 40000,
       'a name is not a chat line: one change per 20 s (the newest wins), long or rude names refused',
       `at once: ${early}, at 19 s: ${stillEarly}, at 20.5 s: ${later}, after a 40-char and a rude one: ${after}`);
+    // What the blocklist reads as a word. The rude ones are ROT13 here too
+    // (protocol.js explains why): the spaced-out, leet and run-together
+    // spellings are all still caught, and names that only spell something
+    // across the gap between two innocent words are not.
+    {
+      const r13 = (w) => w.replace(/[a-z]/gi, (c) => { const b = c <= 'Z' ? 65 : 97; return String.fromCharCode(((c.charCodeAt(0) - b + 13) % 26) + b); });
+      const rude = ['S H-P_X', 'fu1g urnq', 'Fuvggl', 'AnxrqQevire', 'Shp X', 'Ovg pu', 'kKSHPXKk', 'Gur Encvfg', 'Fr K', 'Frkl', 'S2HPX', 'Q v y q b'].map(r13);
+      const fine = ['Push It', 'Fish It', 'Wash It', 'PushIt', 'Snaked', 'Class Hole', 'Thorny', 'Torpedo', 'Therapist', 'Sexton', 'Nazir', 'Pedometer', 'Speedy Otter', 'Pip-5'];
+      const missed = rude.filter((n) => P2.safeName(n, null) !== null).length;
+      const wrong = fine.filter((n) => P2.safeName(n, null) !== n);
+      check(!missed && !wrong.length, 'the name blocklist reads words: rude spellings refused, innocent names spelling one across a gap kept',
+        `${rude.length - missed}/${rude.length} rude refused; ${fine.length - wrong.length}/${fine.length} fine kept${wrong.length ? ' — refused: ' + wrong.join(', ') : ''}`);
+    }
     const room2 = createRoomCoreFor(2);
     const pad = [];
     for (let k = 0; k < 120; k++) { const sk = { send() {}, close() {} }; room2.open(sk); pad.push(sk); }

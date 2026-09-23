@@ -236,27 +236,56 @@ export function cleanName(s, fallback) {
 
 // Words no name may contain. ROT13, so the source of a kids' game does not
 // read as a list of swearwords; rot13() below turns them back at load.
-// SUB matches anywhere in the name once it is lower-cased, its digits read as
-// the letters they imitate (0=o 1=i 3=e 4=a 5=s 7=t 8=b 9=g) and its spaces,
-// hyphens and underscores removed — so 'F U-C_K' and 'sh1t' are caught.
-// WORD matches only a whole word, for the ones that sit inside real names.
+//
+// A name is read as WORDS: split at anything that is not a letter, and where
+// a lower-case letter meets a capital ('NakedDriver' is two words). Digits
+// read as the letters they imitate (0=o 1=i 3=e 4=a 5=s 7=t 8=b 9=g); any
+// other digit is a gap. Then each list matches in its own way:
+//
+//   SUB    anywhere inside one word ('Shitty', 'sh1t'), or starting at the
+//          start of a word and running on across the next ones — the spaced-
+//          out spellings: 'F U-C_K', 'Fuc K', 'Bit ch'.
+//   START  only where a word starts: these sit inside innocent words.
+//   WORD   only as whole words, or a run of whole words: 'Se X'.
+//
+// A match that starts in the MIDDLE of one word and runs into the next is
+// never one: 'Push It', 'Fish It' and 'Wash It' all spell a swearword across
+// the gap, and the version before this turned all three into 'Driver-7'
+// without a word of explanation.
 const SUB_R13 = 'shpx fuvg ovgpu phag chffl juber fyhg avttre avttn snttbg ergneq cravf intvan cbea ' +
-  'onfgneq jnaxre gjng qvyqb wvmm zbyrfg nffubyr qhzonff wnpxnff frkl ahqr anxrq fhvpvqr';
+  'onfgneq jnaxre gjng qvyqb wvmm zbyrfg nffubyr qhzonff wnpxnff frkl ahqr fhvpvqr';
+// Inside real words: 'Snaked'.
+const START_R13 = 'anxrq';
 // Inside real words: 'Thorny', 'Torpedo', 'Therapist', 'Sexton', 'Nazir'.
 const WORD_R13 = 'anmv uvgyre gvgf cvff frk crqb ubeal encvfg';
 function rot13(w) {
   return w.replace(/[a-z]/g, (c) => String.fromCharCode(((c.charCodeAt(0) - 97 + 13) % 26) + 97));
 }
-const BLOCK_SUB = SUB_R13.split(' ').map(rot13);
-const BLOCK_WORD = new Set(WORD_R13.split(' ').map(rot13));
+const BLOCK = [];
+for (const w of SUB_R13.split(' ')) BLOCK.push({ w: rot13(w), how: 'sub' });
+for (const w of START_R13.split(' ')) BLOCK.push({ w: rot13(w), how: 'start' });
+for (const w of WORD_R13.split(' ')) BLOCK.push({ w: rot13(w), how: 'word' });
 const LEET = { 0: 'o', 1: 'i', 3: 'e', 4: 'a', 5: 's', 7: 't', 8: 'b', 9: 'g' };
 
-/** True when a name reads as one of the blocked words. */
+/** True when a name reads as one of the blocked words (rules above). */
 export function blockedName(s) {
-  const low = String(s).toLowerCase().replace(/[0-9]/g, (d) => LEET[d] || d);
-  const joined = low.replace(/[^a-z]/g, '');
-  for (const w of BLOCK_SUB) if (joined.includes(w)) return true;
-  for (const w of low.split(/[^a-z]+/)) if (BLOCK_WORD.has(w)) return true;
+  const words = String(s).replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase()
+    .replace(/[0-9]/g, (d) => LEET[d] || ' ')
+    .split(/[^a-z]+/).filter(Boolean);
+  const joined = words.join('');
+  // Where each word starts in `joined`, and where the last one ends.
+  const at = [0];
+  for (const w of words) at.push(at[at.length - 1] + w.length);
+  for (const { w, how } of BLOCK) {
+    for (let i = joined.indexOf(w); i >= 0; i = joined.indexOf(w, i + 1)) {
+      const end = i + w.length;
+      let k = 0;
+      while (at[k + 1] <= i) k++;                   // the word the match starts in
+      const atStart = at[k] === i;
+      const inOne = end <= at[k + 1];
+      if (how === 'sub' ? inOne || atStart : how === 'start' ? atStart : atStart && at.includes(end)) return true;
+    }
+  }
   return false;
 }
 

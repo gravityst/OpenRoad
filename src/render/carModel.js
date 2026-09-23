@@ -2919,9 +2919,22 @@ function charFinish(mat) {
 }
 
 const _cam = new THREE.Vector3(), _car = new THREE.Vector3();
-// Past this, the cabin and grille infill cannot be resolved and are hidden.
-// Hysteresis so a car idling at the boundary does not flicker.
-const LOD_FAR = 38, LOD_NEAR = 33;
+// Past LOD.far the cabin, grille infill and calipers cannot be resolved and
+// are hidden; they come back inside LOD.near, the gap being hysteresis so a car
+// idling at the boundary does not flicker. setCarQuality() moves both.
+const LOD = { far: 38, near: 33, blur: true };
+
+/**
+ * Follow the game's quality tier, for every car built and every car to come.
+ * 'low' drops cabins and calipers from 18 m and turns the wheel-blur discs
+ * off; 'medium' draws the cabin to 30 m; 'high' (the default) to 38 m.
+ * Optional — without a call the cars behave as 'high'.
+ */
+export function setCarQuality(tier) {
+  if (tier === 'low') { LOD.far = 18; LOD.near = 15; LOD.blur = false; }
+  else if (tier === 'medium') { LOD.far = 30; LOD.near = 26; LOD.blur = true; }
+  else { LOD.far = 38; LOD.near = 33; LOD.blur = true; }
+}
 
 /**
  * Build one car. `spec` is a physics spec from vehicles/catalog.js — body,
@@ -2978,7 +2991,7 @@ export function createCarModel(spec = {}, opts = {}) {
     _cam.setFromMatrixPosition(camera.matrixWorld);
     _car.setFromMatrixPosition(group.matrixWorld);
     const dist = _cam.distanceTo(_car) / (camera.zoom || 1);
-    const want = near ? dist < LOD_FAR : dist < LOD_NEAR;
+    const want = near ? dist < LOD.far : dist < LOD.near;
     if (want === near) return;
     near = want;
     for (let i = 0; i < cosmetic.length; i++) cosmetic[i].visible = near;
@@ -3120,6 +3133,7 @@ export function createCarModel(spec = {}, opts = {}) {
     // km/h it moves 1.4 rad a frame, more than two spokes' spacing. A smeared
     // face fades in over the spokes instead, and is not drawn at all below it.
     if (!blurs.length) return;
+    if (!LOD.blur) { if (blurs[0].visible) for (let i = 0; i < blurs.length; i++) blurs[i].visible = false; return; }
     if (a === a && lastSpin === lastSpin) spinRate += (Math.min(3, Math.abs(a - lastSpin)) - spinRate) * 0.3;
     lastSpin = a;
     const k = smooth(0.22, 0.6, spinRate);

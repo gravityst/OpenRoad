@@ -26,7 +26,7 @@
 //
 // Headless, so it cannot see the paint. What to LOOK at is listed at the end.
 import * as THREE from 'three';
-import { createCarModel, BODY_STYLES, prewarmCarModels } from '../src/render/carModel.js';
+import { createCarModel, BODY_STYLES, prewarmCarModels, setCarQuality } from '../src/render/carModel.js';
 import { createCarDamage } from '../src/render/carDamage.js';
 import { CARS, specFor } from '../src/vehicles/catalog.js';
 
@@ -357,6 +357,15 @@ for (const k of bad) for (const msg of problems[k]) console.log(`        ${k.pad
   check('far away, only cosmetic meshes are dropped (LOD)',
     lod.isLOD && cosmetic.length >= 6 && hiddenFar && keptFar && cosmetic.every((o) => o.visible),
     `${cosmetic.length} cosmetic meshes: dash and seats, grille infill, 4 calipers`);
+  // The quality tier moves the switch: at 'low' a car 25 m away has already
+  // dropped its cabin, at 'high' it has not.
+  cam.position.set(0, 3, 25); cam.updateMatrixWorld(true);
+  setCarQuality('low'); lod.update(cam);
+  const lowHides = cosmetic.every((o) => !o.visible);
+  setCarQuality('high'); cam.position.set(0, 3, 8); cam.updateMatrixWorld(true); lod.update(cam);
+  cam.position.set(0, 3, 25); cam.updateMatrixWorld(true); lod.update(cam);
+  const highKeeps = cosmetic.every((o) => o.visible);
+  check('the quality tier moves the level of detail', lowHides && highKeeps, 'cabin dropped at 25 m on low, kept on high');
 
   const paint = byName(m, 'paint').material;
   m.setPaint(0xf2f4f6);

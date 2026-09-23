@@ -1820,7 +1820,11 @@ async function boot() {
     const want = a < 1
       ? 2 * Math.atan(Math.tan(target * Math.PI / 360) / Math.pow(a, 0.6)) * 180 / Math.PI
       : target;
-    camera.fov += (want - camera.fov) * Math.min(1, dt * rate);
+    // The exact decay over dt, not its first-order approximation min(1,
+    // dt * rate), which at rate 2.5 closes the gap 3.1% too fast per frame
+    // at 40 fps and 0.9% at 144 Hz — so a ragged frame rate made the field of
+    // view breathe by the difference.
+    camera.fov += (want - camera.fov) * (1 - Math.exp(-rate * dt));
     camera.updateProjectionMatrix();
   }
 

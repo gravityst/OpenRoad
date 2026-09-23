@@ -1093,6 +1093,22 @@ export function valleyWeight(x, z, seed) {
 }
 
 /**
+ * The woodland mask the planting pass uses: above ~0.08 is woodland, rising
+ * to full density by ~0.2. A domain-warped fbm, because plain fbm thresholds
+ * into blobs that all look like each other. Exported so the ground can paint
+ * a forest floor exactly where the forest is.
+ */
+export function woodland(x, z, seed) {
+  const s = seed | 0;
+  const wx = x + fbm(x / 1300, z / 1300, s + 61, 2) * 420;
+  const wz = z + fbm(x / 1300, z / 1300, s + 62, 2) * 420;
+  return fbm(wx / 640, wz / 640, s + 55, 4);
+}
+
+const FIELD = 230;
+const FIELD_SALT = 8123;
+
+/**
  * Land use: which field (x, z) is in, and what is growing in it.
  *
  * Open country is not one continuous lawn; it is a patchwork of fields a few
@@ -1110,23 +1126,8 @@ export function valleyWeight(x, z, seed) {
  * stripes. The surface under the wheels is 'grass' in all of them — this is
  * paint, not physics. Writes into `out` and returns it; allocates nothing.
  */
-const FIELD = 230;
-
-/**
- * The woodland mask the planting pass uses: above ~0.08 is woodland, rising
- * to full density by ~0.2. A domain-warped fbm, because plain fbm thresholds
- * into blobs that all look like each other. Exported so the ground can paint
- * a forest floor exactly where the forest is.
- */
-export function woodland(x, z, seed) {
-  const s = seed | 0;
-  const wx = x + fbm(x / 1300, z / 1300, s + 61, 2) * 420;
-  const wz = z + fbm(x / 1300, z / 1300, s + 62, 2) * 420;
-  return fbm(wx / 640, wz / 640, s + 55, 4);
-}
-
 export function fieldAt(x, z, seed, out) {
-  const s = (seed | 0) + 8123;
+  const s = (seed | 0) + FIELD_SALT;
   const fx = x / FIELD, fz = z / FIELD;
   const ix = Math.floor(fx), iz = Math.floor(fz);
   let d1 = 1e9, d2 = 1e9, bx = 0, bz = 0;
@@ -1152,6 +1153,57 @@ export function fieldAt(x, z, seed, out) {
 }
 
 /**
+ * fieldAt() with its lattice precomputed over [-extent, extent] — the same
+ * answer to the last bit (tools/naturecheck.mjs compares the two), at a
+ * fraction of the cost, because the eighteen hashes a call spends finding its
+ * cell become array reads. The terrain paints every grass vertex through this.
+ * About 1,100 cells at the terrain's reach; outside the extent it simply calls
+ * fieldAt().
+ */
+export function fieldMap(seed, extent) {
+  const s = (seed | 0) + FIELD_SALT;
+  const c0 = Math.floor(-extent / FIELD) - 2;
+  const n = Math.ceil((2 * extent) / FIELD) + 5;
+  const px = new Float64Array(n * n), pz = new Float64Array(n * n);
+  const use = new Uint8Array(n * n), ripe = new Float64Array(n * n);
+  const ux = new Float64Array(n * n), uz = new Float64Array(n * n);
+  for (let j = 0; j < n; j++) {
+    for (let i = 0; i < n; i++) {
+      const cx = c0 + i, cz = c0 + j, k = j * n + i;
+      px[k] = cx + 0.12 + hash2(cx, cz, s) * 0.76;
+      pz[k] = cz + 0.12 + hash2(cx, cz, s + 1) * 0.76;
+      const h = hash2(cx, cz, s + 2);
+      use[k] = h < 0.58 ? 0 : h < 0.76 ? 1 : h < 0.90 ? 2 : 3;
+      const a = hash2(cx, cz, s + 3) * Math.PI;
+      ux[k] = Math.cos(a); uz[k] = Math.sin(a);
+      ripe[k] = hash2(cx, cz, s + 4);
+    }
+  }
+  return function fieldFast(x, z, out) {
+    const fx = x / FIELD, fz = z / FIELD;
+    const i0 = Math.floor(fx) - 1 - c0, j0 = Math.floor(fz) - 1 - c0;
+    if (i0 < 0 || j0 < 0 || i0 + 2 >= n || j0 + 2 >= n) return fieldAt(x, z, seed, out);
+    // Same visiting order and the same strict comparisons as fieldAt, so a
+    // tie resolves to the same cell.
+    let d1 = 1e9, d2 = 1e9, bk = 0;
+    for (let j = 0; j < 3; j++) {
+      for (let i = 0; i < 3; i++) {
+        const k = (j0 + j) * n + i0 + i;
+        const ex = px[k] - fx, ez = pz[k] - fz;
+        const d = ex * ex + ez * ez;
+        if (d < d1) { d2 = d1; d1 = d; bk = k; } else if (d < d2) d2 = d;
+      }
+    }
+    out.edge = (Math.sqrt(d2) - Math.sqrt(d1)) * 0.5 * FIELD;
+    out.use = use[bk];
+    out.id = (c0 + (bk % n)) * 7919 + (c0 + ((bk / n) | 0));
+    out.dx = ux[bk]; out.dz = uz[bk];
+    out.ripe = ripe[bk];
+    return out;
+  };
+}
+
+/**
  * The dry river bed: 0 outside it, rising to 1 along a meandering thalweg in
  * the bottom of the valley makeTerrain cuts. The valley itself is a kilometre
  * wide and was all sand, which read as a desert strip across a green country;
@@ -1165,6 +1217,102 @@ export function riverBed(x, z, seed) {
             + fbm(x / 520, z / 520, s + 409, 3) * 0.055;
   // 0.0013 of `arg` per metre across the valley, so 0.03 is ~23 m either side.
   return smoothstep(0.034, 0.012, Math.abs(arg));
+}
+
+/**
+ * Shoulder width beyond the carriageway edge, in metres. This is ground.js's
+ * figure (the shoulder it stamps in gravel, or in dirt on a dirt road) and must
+ * stay equal to it; tools/naturecheck.mjs reads the stamped surface itself, so
+ * a drift between the two shows up there as shrubs on gravel.
+ */
+export const shoulderOf = (e) => (e.surface === 'dirt' ? 1.6 : e.kind === 'highway' ? 3.5 : 2.4);
+
+// Clear ground a circuit keeps beyond its edge. A tree three metres off a
+// racing line is a wall; this is the run-off area a real circuit would have.
+const RUNOFF = { circuit: 12, rallyx: 12 };
+
+/**
+ * How far (x, z) is from the nearest carriageway EDGE, over every road segment
+ * that could matter — the true nearest, by Euclidean distance.
+ *
+ * Not ground.roadAt(): that answers "which road am I on", so it ranks segments
+ * by distance over half-width, and a narrow lane beside a wide road loses to it
+ * even when its edge is metres nearer. Planting against that metric put a tree
+ * 3.8 m from a dirt road's edge under a 4 m rule, and verge paint measured
+ * from the wrong road. This asks the question those callers actually have.
+ *
+ * `query(x, z, out)` fills and returns `out`:
+ *   edge      metres from the nearest carriageway edge (negative on it)
+ *   clear     the same, less a circuit's run-off — what planting tests against
+ *   shoulder  that nearest road's shoulder width (shoulderOf)
+ *   kind      that nearest road's kind, '' when none is within `reach`
+ * Both are exact wherever they come out under `reach`; beyond it they may read
+ * Infinity, and every caller compares them against thresholds well inside it.
+ * Built once from world.edges as flat arrays and a 32 m cell table; a query
+ * allocates nothing.
+ */
+export function roadEdges(world, reach = 24) {
+  const C = 32;
+  const half = world.half;
+  const lo = -half - reach - C;
+  const n = Math.ceil((2 * (half + reach + C)) / C);
+  let count = 0;
+  for (const e of world.edges) if (e.pts && e.pts.length > 1) count += e.pts.length - 1;
+  // 0 ax 1 az 2 bx 3 bz 4 halfW 5 run-off
+  const seg = new Float64Array(count * 6);
+  const segEdge = new Array(count);
+  const cellCount = new Int32Array(n * n + 1);
+  const cellsOf = (o, fn) => {
+    const pad = seg[o + 4] + seg[o + 5] + reach;
+    const i0 = Math.max(0, Math.floor((Math.min(seg[o], seg[o + 2]) - pad - lo) / C));
+    const i1 = Math.min(n - 1, Math.floor((Math.max(seg[o], seg[o + 2]) + pad - lo) / C));
+    const j0 = Math.max(0, Math.floor((Math.min(seg[o + 1], seg[o + 3]) - pad - lo) / C));
+    const j1 = Math.min(n - 1, Math.floor((Math.max(seg[o + 1], seg[o + 3]) + pad - lo) / C));
+    for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) fn(j * n + i);
+  };
+  let k = 0;
+  for (const e of world.edges) {
+    if (!e.pts || e.pts.length < 2) continue;
+    for (let p = 0; p < e.pts.length - 1; p++, k++) {
+      const a = e.pts[p], b = e.pts[p + 1], o = k * 6;
+      seg[o] = a.x; seg[o + 1] = a.z; seg[o + 2] = b.x; seg[o + 3] = b.z;
+      seg[o + 4] = e.width * 0.5; seg[o + 5] = RUNOFF[e.kind] || 0;
+      segEdge[k] = e;
+      cellsOf(o, (c) => cellCount[c + 1]++);
+    }
+  }
+  // Compressed rows: cell c owns list[start[c] .. start[c + 1]).
+  const start = cellCount;
+  for (let c = 0; c < n * n; c++) start[c + 1] += start[c];
+  const list = new Int32Array(start[n * n]);
+  const fillAt = Int32Array.from(start.subarray(0, n * n));
+  for (let s = 0; s < count; s++) cellsOf(s * 6, (c) => { list[fillAt[c]++] = s; });
+
+  function query(x, z, out) {
+    out.edge = Infinity; out.clear = Infinity; out.shoulder = 0; out.kind = '';
+    const i = Math.floor((x - lo) / C), j = Math.floor((z - lo) / C);
+    if (i < 0 || j < 0 || i >= n || j >= n) return out;
+    const c = j * n + i;
+    let best = -1;
+    for (let q = start[c], end = start[c + 1]; q < end; q++) {
+      const s = list[q], o = s * 6;
+      const ax = seg[o], az = seg[o + 1], dx = seg[o + 2] - ax, dz = seg[o + 3] - az;
+      const len2 = dx * dx + dz * dz;
+      let t = len2 > 1e-9 ? ((x - ax) * dx + (z - az) * dz) / len2 : 0;
+      t = t < 0 ? 0 : t > 1 ? 1 : t;
+      const ex = x - (ax + dx * t), ez = z - (az + dz * t);
+      const d = Math.sqrt(ex * ex + ez * ez) - seg[o + 4];
+      if (d < out.edge) { out.edge = d; best = s; }
+      if (d - seg[o + 5] < out.clear) out.clear = d - seg[o + 5];
+    }
+    if (best >= 0) {
+      const e = segEdge[best];
+      out.kind = e.kind; out.shoulder = shoulderOf(e);
+    }
+    return out;
+  }
+
+  return { query, reach, segments: count };
 }
 
 /**
@@ -1185,8 +1333,9 @@ export function riverBed(x, z, seed) {
  *   rock       outcrops where the ground is steep or crests, as clusters of
  *              boulders with stones around them, in one rock type per area.
  *
- * Nothing is planted on a carriageway, within reach of a circuit's run-off, in
- * a building footprint or on a garage forecourt.
+ * Nothing is planted on a carriageway or on anything else a road laid down
+ * (shoulder, pavement), within a circuit's run-off, in a building footprint
+ * or on a garage forecourt.
  */
 function buildProps(world, rnd, ground) {
   const terrain = world.terrain;
@@ -1252,19 +1401,32 @@ function buildProps(world, rnd, ground) {
     return false;
   };
 
-  // Clearance from the edge of the nearest road, in metres. Circuits keep a
-  // run-off area clear; a tree three metres off a racing line is a wall.
-  const road = { onRoad: false, dist: Infinity, edge: null, s: 0, tx: 0, tz: 0, speedLimit: 0, width: 0, kind: '' };
-  const clearance = (x, z) => {
-    ground.roadAt(x, z, road);
-    if (!road.edge) return Infinity;
-    const edge = road.dist - road.width * 0.5;
-    const k = road.kind;
-    return k === 'circuit' || k === 'rallyx' ? edge - 12 : edge;
-  };
+  // Clearance from the edge of the nearest road, in metres, less a circuit's
+  // run-off (see roadEdges for why this is not ground.roadAt).
+  const edges = roadEdges(world);
+  const rq = { edge: 0, clear: 0, shoulder: 0, kind: '' };
+  const clearance = (x, z) => edges.query(x, z, rq).clear;
 
   const g = { y: 0, nx: 0, ny: 1, nz: 0, surface: 'grass', grip: 0, roughness: 0, rolling: 0, dust: 0 };
+  const gt = { y: 0, nx: 0, ny: 1, nz: 0, surface: 'grass', grip: 0, roughness: 0, rolling: 0, dust: 0 };
   const inBounds = (x, z) => Math.abs(x) < half - 6 && Math.abs(z) < half - 6;
+
+  // Nothing grows on anything a road laid down. Distance alone cannot say
+  // where that is: the ground stamps its materials on a grid (3 m) and reads
+  // the nearest cell, so a 2.4 m shoulder shows as gravel out to 4.5 m in
+  // places, and a 2.4 m clearance put 203 shrubs on it. So near a road the
+  // surface is asked directly — stamped if it differs from the natural cover
+  // at that point — and the shoulder is kept as well, for a dirt road whose
+  // stamped dirt matches dirt cover. Beyond the widest stamp (a city pavement,
+  // 4.2 m, plus the grid's half-diagonal) there is nothing to ask.
+  const stampReach = 4.2 + (ground.field ? ground.field.res : 3) * Math.SQRT1_2 + 0.3;
+  const onTurf = (x, z) => {
+    const q = edges.query(x, z, rq);
+    if (q.edge < q.shoulder + 0.5) return false;
+    if (q.edge > stampReach) return true;
+    ground.sample(x, z, gt);
+    return gt.surface === terrain.cover(x, z, gt.ny);
+  };
 
   // ---- Masks --------------------------------------------------------------
   // Woodland: a warped fbm, thresholded (see woodland()).
@@ -1288,12 +1450,14 @@ function buildProps(world, rnd, ground) {
     return q < 0.60 ? TREE.beech : TREE.oak;
   }
 
-  // The one door everything is planted through, so the map edge is enforced
-  // once rather than remembered at every call site — clusters are placed
-  // around a checked centre, and their members were landing past the edge.
+  // The one door everything is planted through, so the map edge and the road
+  // surfaces are enforced once rather than remembered at every call site —
+  // clusters are placed around a checked centre, and their members were
+  // landing past the edge. The rotation is drawn first either way, so a
+  // refusal here never shifts the random stream for the plants after it.
   const plant = (type, variant, x, z, y, scale) => {
     const r = rnd() * 6.2832;
-    if (!inBounds(x, z)) return;
+    if (!inBounds(x, z) || !onTurf(x, z)) return;
     props.push({ type, x, z, y, rot: r, scale, variant });
   };
 

@@ -15,23 +15,50 @@
  *
  * Outgoing messages are free; incoming are metered. That is why the client
  * sends 31 bytes and the server fans out 6 + 26N.
+ *
+ * TWO ROOMS, ONE CLASS. The URL's `v` picks the protocol generation and the
+ * generation picks the Durable Object (protocol.js, roomName()). A page cached
+ * from before generation 2 sends no `v`, so it lands in 'open-road-main' —
+ * the object it has always used, speaking exactly what it always spoke — and
+ * never shares a world with a newer page whose records it would misread. The
+ * logic for both lives in roomcore.js; this file is only the Cloudflare glue.
  */
 
-import { encodeSnapshot, decodeState, cleanName, REC } from '../src/net/protocol.js';
-
-const TICK_MS = 50;             // 20 Hz downstream
-const MAX_PLAYERS = 16;
-const STALE_MS = 8000;
+import { protoFromUrl, roomName } from '../src/net/protocol.js';
+import { createRoomCore, TICK_MS, MAX_PLAYERS } from './roomcore.js';
 
 export class Room {
   constructor(ctx, env) {
     this.ctx = ctx;
     this.env = env;
     this.timer = null;
-    this.epoch = Date.now();
-    this.nextId = 1;
-    this.peers = new Map();     // ws -> {id, name, rec, last}
-    this.scratch = [];
+    this.core = null;
+  }
+
+  /** Built on first use, because the generation comes from the first URL —
+   *  or, after hibernation, from what was attached to a surviving socket. */
+  coreFor(proto) {
+    if (!this.core) {
+      this.core = createRoomCore({
+        proto, now: () => Date.now(), maxPlayers: MAX_PLAYERS,
+        persist: (ws, info) => ws.serializeAttachment(info),
+      });
+    }
+    return this.core;
+  }
+
+  /** The core for a socket that may have outlived the object's memory. */
+  wake(ws) {
+    let att = null;
+    try { att = ws.deserializeAttachment(); } catch { att = null; }
+    const core = this.coreFor(att && att.proto);
+    if (!core.has(ws) && att) core.restore(ws, att);
+    this.startTimer();
+    return core;
+  }
+
+  startTimer() {
+    if (!this.timer) this.timer = setInterval(() => this.tick(), TICK_MS);
   }
 
   async fetch(req) {
@@ -41,104 +68,37 @@ export class Room {
     if (this.ctx.getWebSockets().length >= MAX_PLAYERS) {
       return new Response('room full', { status: 503 });
     }
+    const core = this.coreFor(protoFromUrl(req.url));
     const pair = new WebSocketPair();
     const [client, server] = [pair[0], pair[1]];
     this.ctx.acceptWebSocket(server);
-    const id = this.nextId++ & 0xff;
-    this.peers.set(server, { id, name: 'Driver-' + id, rec: null, last: Date.now() });
-    if (!this.timer) this.timer = setInterval(() => this.tick(), TICK_MS);
+    if (core.open(server) < 0) {
+      try { server.close(1013, 'room full'); } catch { /* gone */ }
+    }
+    this.startTimer();
     return new Response(null, { status: 101, webSocket: client });
   }
 
   webSocketMessage(ws, data) {
-    const p = this.peers.get(ws);
-    if (!p) return;
-    p.last = Date.now();
-
-    if (typeof data === 'string') return this.control(ws, p, data);
-
-    const buf = data instanceof ArrayBuffer ? data : data.buffer;
-    const st = decodeState(buf);
-    if (!st) return;
-    // The id on the wire is ignored. A client does not get to say who it is —
-    // otherwise anyone can drive someone else's car by editing one byte.
-    st.car.id = p.id;
-    p.rec = st.car;
+    this.wake(ws).message(ws, data);
   }
-
-  control(ws, p, text) {
-    let m;
-    try { m = JSON.parse(text); } catch { return; }
-    if (!m) return;
-
-    if (m.t === 'join') {
-      p.name = this.unique(cleanName(m.name, 'Driver-' + p.id), p.id);
-      const players = [];
-      for (const q of this.peers.values()) players.push({ id: q.id, name: q.name });
-      ws.send(JSON.stringify({
-        t: 'welcome', id: p.id, sendHz: this.rate(), serverMs: this.ms(), players,
-      }));
-      this.broadcastJSON({ t: 'joined', id: p.id, name: p.name }, ws);
-    } else if (m.t === 'name') {
-      p.name = this.unique(cleanName(m.name, p.name), p.id);
-      this.broadcastJSON({ t: 'joined', id: p.id, name: p.name });
-    } else if (m.t === 'ping') {
-      ws.send(JSON.stringify({ t: 'pong', c: m.c, s: this.ms() }));
-    }
-  }
-
-  /** Two players called "Ace" is confusing at 200 km/h; disambiguate server-side. */
-  unique(name, id) {
-    let taken = false;
-    for (const q of this.peers.values()) if (q.id !== id && q.name === name) taken = true;
-    return taken ? (name.slice(0, 13) + '-' + id) : name;
-  }
-
-  /** Throttle as the room fills, so a busy room degrades smoothly instead of
-   *  hitting the request ceiling and dying outright. */
-  rate() {
-    const n = this.peers.size;
-    return n <= 6 ? 20 : n <= 10 ? 15 : 10;
-  }
-
-  ms() { return (Date.now() - this.epoch) | 0; }
 
   webSocketClose(ws) { this.drop(ws); }
   webSocketError(ws) { this.drop(ws); }
 
   drop(ws) {
-    const p = this.peers.get(ws);
-    if (!p) return;
-    this.peers.delete(ws);
-    this.broadcastJSON({ t: 'left', id: p.id });
-    if (this.peers.size === 0 && this.timer) {
+    if (!this.core) return;
+    this.core.close(ws);
+    if (this.core.size === 0 && this.timer) {
       clearInterval(this.timer);
       this.timer = null;
     }
   }
 
-  broadcastJSON(obj, except) {
-    const s = JSON.stringify(obj);
-    for (const ws of this.ctx.getWebSockets()) {
-      if (ws === except) continue;
-      try { ws.send(s); } catch { /* closing; drop() will clean up */ }
-    }
-  }
-
   tick() {
     const socks = this.ctx.getWebSockets();
-    if (!socks.length) { clearInterval(this.timer); this.timer = null; return; }
-    const nowT = Date.now();
-    this.scratch.length = 0;
-    for (const ws of socks) {
-      const p = this.peers.get(ws);
-      if (!p) continue;
-      if (nowT - p.last > STALE_MS) { try { ws.close(1000, 'idle'); } catch { /* gone */ } continue; }
-      if (p.rec) this.scratch.push(p.rec);
-    }
-    if (!this.scratch.length) return;
-    const frame = encodeSnapshot(this.scratch, this.ms());
-    for (const ws of socks) { try { ws.send(frame); } catch { /* gone */ } }
+    if (!socks.length || !this.core) { clearInterval(this.timer); this.timer = null; return; }
+    this.core.tick(socks, (ws) => { try { return ws.deserializeAttachment(); } catch { return null; } });
   }
 }
 
@@ -148,7 +108,7 @@ export default {
     if (url.pathname === '/health') {
       return new Response('ok', { headers: { 'access-control-allow-origin': '*' } });
     }
-    const id = env.ROOM.idFromName('open-road-main');
+    const id = env.ROOM.idFromName(roomName(protoFromUrl(req.url)));
     // Pinned to western North America. Without the hint the object is placed
     // near whoever connects FIRST, so one player on another continent would
     // anchor the room there for everyone for the rest of the day.

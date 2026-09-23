@@ -12,7 +12,7 @@
  * hosting tier worth using. If you are tempted to add a field, delete one.
  */
 
-export const PROTO = 1;          // the binary record's layout — unchanged since launch
+export const PROTO = 1;
 export const REC = 26;          // bytes per car
 export const HDR = 6;           // snapshot header: type + count + serverMs
 export const UP = 5 + REC;      // client -> server: type + clientMs + own record
@@ -29,64 +29,6 @@ export const F_LIGHTS = 1 << 4;
 export const F_AIR = 1 << 5;
 export const F_TELEPORT = 1 << 6;
 export const F_HORN = 1 << 7;
-
-/**
- * Protocol generations, and why a room only ever holds one of them.
- *
- * Generation 1 is what shipped: a snapshot says where each car IS at the
- * server's tick. Generation 2 keeps every byte of the 26-byte record in the
- * same place but changes what two things mean, so the two must never share
- * a room:
- *
- *   - byte 23 was `integrity`. Nothing can be damaged any more, so in a
- *     generation-2 room it carries the record's AGE: how many milliseconds
- *     before the snapshot's own timestamp the car was actually sampled
- *     (AGE_STALE = that long or longer). A tick carries whatever arrived last,
- *     and the gap between when that was sampled and when the tick ran wanders
- *     by up to a whole send interval — 50 ms, which is 1.5 m at 100 km/h. Read
- *     as "this is where the car is now", that is the stutter.
- *   - one snapshot may hold the same car more than once, oldest first — every
- *     sample that arrived since the last tick, not just the newest. A 20 Hz
- *     sender and a 20 Hz tick drift in and out of phase, and without this one
- *     tick in a few carries nothing new and the next throws a sample away.
- *
- * A generation-1 client reads either of those as nonsense, so the Worker puts
- * each generation in its own Durable Object, named from the `v` in the URL —
- * roomName() below. Old cached pages never send one and land exactly where
- * they always have.
- */
-export const PROTO_V2 = 2;
-export const PROTO_LATEST = PROTO_V2;
-export const AGE_STALE = 255;
-/** Samples of one car one snapshot may carry — enough to bridge a stall. */
-export const MAX_BURST = 4;
-
-/** The Durable Object a client's generation lives in. Generation 1's name is
- *  the one the live room has always had; never change it. */
-export function roomName(proto) {
-  return proto === PROTO_V2 ? 'open-road-v2' : 'open-road-main';
-}
-
-/** Which generation a connection URL asks for. Anything unrecognised is 1. */
-export function protoFromUrl(url) {
-  const m = /[?&]v=(\d{1,3})(?:&|$)/.exec(String(url || ''));
-  return m && Number(m[1]) === PROTO_V2 ? PROTO_V2 : 1;
-}
-
-/**
- * A car is named by its catalogue id and a paint index, never by free text:
- * the id only ever LOOKS UP a car the client already has, and an unknown one
- * falls back to the starter. Nothing a player types reaches another screen
- * this way.
- */
-export const CAR_ID_RE = /^[a-z0-9][a-z0-9_-]{0,23}$/;
-export function cleanCarId(s) {
-  return typeof s === 'string' && CAR_ID_RE.test(s) ? s : '';
-}
-export function cleanColour(n) {
-  const v = Number(n);
-  return Number.isInteger(v) && v >= 0 && v < 32 ? v : 0;
-}
 
 const TAU = Math.PI * 2;
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
@@ -120,10 +62,7 @@ export function writeCar(dv, off, c) {
   dv.setInt16(off + 19, clamp(Math.round((c.yawRate || 0) * 1000), -32767, 32767), true);
   dv.setInt8(off + 21, clamp(Math.round((c.steer || 0) * 127), -127, 127));
   dv.setUint8(off + 22, Math.round((((c.wheelSpin || 0) % TAU) + TAU) % TAU * 256 / TAU) & 0xff);
-  // Byte 23: integrity in a generation-1 room, age in a generation-2 one (the
-  // server sets `age` on the records it forwards; clients never do).
-  dv.setUint8(off + 23, c.age != null ? clamp(c.age | 0, 0, 255)
-    : clamp(Math.round((c.integrity == null ? 1 : c.integrity) * 255), 0, 255));
+  dv.setUint8(off + 23, clamp(Math.round((c.integrity == null ? 1 : c.integrity) * 255), 0, 255));
   dv.setUint8(off + 24, c.flags & 0xff);
   dv.setUint8(off + 25, c.respawnSeq & 0xff);
   return off + REC;
@@ -143,8 +82,7 @@ export function readCar(dv, off, out) {
   out.yawRate = dv.getInt16(off + 19, true) / 1000;
   out.steer = dv.getInt8(off + 21) / 127;
   out.wheelSpin = dv.getUint8(off + 22) * TAU / 256;
-  out.age = dv.getUint8(off + 23);
-  out.integrity = out.age / 255;
+  out.integrity = dv.getUint8(off + 23) / 255;
   out.flags = dv.getUint8(off + 24);
   out.respawnSeq = dv.getUint8(off + 25);
   return off + REC;

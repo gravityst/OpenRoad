@@ -65,7 +65,9 @@
 //        vsync, so a frame whose script alone takes 24 ms cannot come round in
 //        less than 2 x 16.7 = 33.3 ms however few pixels it draws. If the
 //        frames are already that fast, the CPU is the limit. Every browser can
-//        measure this.
+//        measure this — but the draw call inside it can also be the GPU
+//        making the page wait, so without a GPU timer only the script OUTSIDE
+//        the draw is taken as proof (see judge()).
 //   GPU  with a GPU timer (effects.gpuMs; Chrome has one, Safari and Firefox
 //        do not), a frame that is slow while the GPU is idle for half of it is
 //        not waiting on pixels. And it predicts what the next level up would
@@ -175,11 +177,12 @@ export function createAdaptiveQuality(opts = {}) {
   let level = clampLevel(opts.level | 0);
   let displayMs = validPeriod(opts.displayMs);
 
-  // One window of frame intervals, and of the script time of those frames,
-  // each sorted in place when it closes.
+  // One window of frame intervals, of the script time of those frames, and
+  // of the part of it outside the draw call, each sorted when it closes.
   const buf = new Float64Array(1024);
   const cpuBuf = new Float64Array(1024);
-  let n = 0, cpuN = 0, windowMs = 0;
+  const logicBuf = new Float64Array(1024);
+  let n = 0, cpuN = 0, logicN = 0, windowMs = 0;
   let ignoreMs = cfg.warmupSec * 1000;
 
   let slowStreak = 0, goodStreak = 0, idleStreak = 0;
@@ -196,7 +199,9 @@ export function createAdaptiveQuality(opts = {}) {
   let holdMs = 0;                  // cpu-bound: no stepping down until this runs out
   let holdNext = cfg.cpuBoundHoldSec * 1000;   // ...and it doubles every time
   let changes = 0;
-  const last = { p50: NaN, p75: NaN, p90: NaN, gpuMs: NaN, cpuMs: NaN, displayMs, verdict: 'warming up' };
+  const last = {
+    p50: NaN, p75: NaN, p90: NaN, gpuMs: NaN, cpuMs: NaN, logicMs: NaN, displayMs, verdict: 'warming up',
+  };
 
   function clampLevel(l) { return Math.max(0, Math.min(rungs.length - 1, l)); }
 
@@ -207,7 +212,7 @@ export function createAdaptiveQuality(opts = {}) {
     changes++;
     last.verdict = why;
     ignoreMs = cfg.settleSec * 1000;
-    n = 0; cpuN = 0; windowMs = 0;
+    n = 0; cpuN = 0; logicN = 0; windowMs = 0;
     return true;
   }
 
@@ -245,8 +250,9 @@ export function createAdaptiveQuality(opts = {}) {
     const p25 = pct(w, n, 0.25), p50 = pct(w, n, 0.5), p75 = pct(w, n, 0.75), p90 = pct(w, n, 0.9);
     // Script time is only trusted when most of the window's frames had one.
     const cpu50 = cpuN >= n >> 1 ? pct(cpuBuf.subarray(0, cpuN).sort(), cpuN, 0.5) : NaN;
-    last.p50 = p50; last.p75 = p75; last.p90 = p90; last.gpuMs = gpuMs; last.cpuMs = cpu50;
-    n = 0; cpuN = 0; windowMs = 0;
+    const logic50 = logicN >= n >> 1 ? pct(logicBuf.subarray(0, logicN).sort(), logicN, 0.5) : NaN;
+    last.p50 = p50; last.p75 = p75; last.p90 = p90; last.gpuMs = gpuMs; last.cpuMs = cpu50; last.logicMs = logic50;
+    n = 0; cpuN = 0; logicN = 0; windowMs = 0;
 
     // A quarter of the frames came faster than the screen supposedly can:
     // the measured period was wrong, so go back to assuming 60 Hz.
@@ -279,7 +285,18 @@ export function createAdaptiveQuality(opts = {}) {
 
       // Not the pixels, measured: the script alone fills the frame (rounded
       // up to the vsync it can make), or the GPU is idle for half of it.
-      const cpuBound = cpu50 > 0 && p50 <= Math.ceil(cpu50 * 1.05 / vsync) * vsync + 1.5;
+      //
+      // Which script time is evidence depends on what else is known. The
+      // draw call can block while the GPU catches up, so on a GPU-bound
+      // machine the WHOLE script time can fill the frame too. With a GPU
+      // timer that is visible (the GPU busy for 80% of the frame) and the
+      // whole script counts otherwise. Without one, only the part outside
+      // the draw counts, which no GPU can inflate: a machine whose CPU goes
+      // on draw calls then has to try the ladder once (see "with neither").
+      // A GPU-bound laptop on Safari that never stepped down would be far
+      // worse than a CPU-bound one blurred for ten seconds.
+      const cpuSure = gpuMs > 0 ? (gpuMs < 0.8 * p50 ? cpu50 : NaN) : logic50;
+      const cpuBound = cpuSure > 0 && p50 <= Math.ceil(cpuSure * 1.05 / vsync) * vsync + 1.5;
       const gpuIdle = gpuMs > 0 && gpuMs < 0.5 * p50;
       if (cpuBound || gpuIdle) {
         slowStreak = 0;
@@ -354,16 +371,18 @@ export function createAdaptiveQuality(opts = {}) {
   /**
    * One frame. `frameMs` is the time since the previous frame; `gpuMs` the
    * GPU's time for a frame if known; `cpuMs` how long the page's own script
-   * took for the frame that interval contained, if known. Returns true when
-   * the level changed.
+   * took for the frame that interval contained, and `drawMs` how much of that
+   * was the draw call (effects.render), if known. Returns true when the level
+   * changed.
    */
-  function sample(frameMs, gpuMs, cpuMs) {
+  function sample(frameMs, gpuMs, cpuMs, drawMs) {
     if (!(frameMs > 0)) return false;
-    if (frameMs > cfg.maxGapMs) { n = 0; cpuN = 0; windowMs = 0; return false; }
+    if (frameMs > cfg.maxGapMs) { n = 0; cpuN = 0; logicN = 0; windowMs = 0; return false; }
     if (holdMs > 0) holdMs -= frameMs;
     if (ignoreMs > 0) { ignoreMs -= frameMs; return false; }
     if (n < buf.length) buf[n++] = frameMs;
     if (cpuMs > 0 && cpuN < cpuBuf.length) cpuBuf[cpuN++] = cpuMs;
+    if (cpuMs > drawMs && drawMs >= 0 && logicN < logicBuf.length) logicBuf[logicN++] = cpuMs - drawMs;
     windowMs += frameMs;
     if (windowMs < cfg.windowSec * 1000 || n < cfg.minFrames) return false;
     return judge(gpuMs);
@@ -374,7 +393,7 @@ export function createAdaptiveQuality(opts = {}) {
     dpr = pixelRatio > 0 ? pixelRatio : 1;
     rungs = ladderFor(post || 'medium', dpr);
     level = clampLevel(startLevel | 0);
-    n = 0; cpuN = 0; windowMs = 0;
+    n = 0; cpuN = 0; logicN = 0; windowMs = 0;
     ignoreMs = cfg.warmupSec * 1000;
     slowStreak = 0; goodStreak = 0; idleStreak = 0;
     probeNeed = cfg.probeWindows; sinceUp = Infinity; probeP50 = NaN;

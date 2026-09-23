@@ -912,9 +912,10 @@ async function boot() {
   let accumulator = 0;
   let last = performance.now();
   let fpsSmooth = 60;
-  // How long the previous frame's script ran, for telling a CPU-bound machine
-  // from a GPU-bound one (core/adaptive.js, "is it the pixels?").
-  let scriptMs = NaN;
+  // How long the previous frame's script ran, and how much of that was the
+  // draw call, for telling a CPU-bound machine from a GPU-bound one
+  // (core/adaptive.js, "is it the pixels?").
+  let scriptMs = NaN, drawMs = NaN;
 
   function frame(now) {
     requestAnimationFrame(frame);
@@ -931,7 +932,7 @@ async function boot() {
     // frame() directly is not a frame rate at all. BEFORE the frame is drawn:
     // the interval being judged is the previous frame's either way, and a
     // quality change then lands on this frame rather than after it.
-    if (mode === 'driving' && autoOn() && auto.sample(raw * 1000, effects.gpuMs, scriptMs)) applyAuto(true);
+    if (mode === 'driving' && autoOn() && auto.sample(raw * 1000, effects.gpuMs, scriptMs, drawMs)) applyAuto(true);
     stepFrame(dt);
     scriptMs = performance.now() - t0;
   }
@@ -1351,7 +1352,9 @@ async function boot() {
     // its own limit rather than never triggering the effect at all.
     const vMax = Math.max(30, (car.spec.power / 700) ** 0.5 * 9);
     effects.setSpeedBlur(Math.min(1, Math.max(0, (car.speed / vMax - 0.35) / 0.65)));
+    const drawAt = performance.now();
     effects.render(dt);
+    drawMs = performance.now() - drawAt;
   }
 
   // --- helpers used by the loop, defined here so they close over the world ---

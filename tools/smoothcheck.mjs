@@ -350,8 +350,9 @@ function makeLoop(car, physics) {
     const sampleAt = fr.indexOf('auto.sample('), drawAt = fr.indexOf('stepFrame(dt);');
     need(sampleAt >= 0 && drawAt > sampleAt && fr.indexOf('applyAuto(', drawAt) < 0,
       'quality is judged and applied before the frame is drawn, never after');
-    need(/auto\.sample\(raw \* 1000, effects\.gpuMs, scriptMs\)/.test(fr) && /scriptMs = performance\.now\(\) - t0;/.test(fr),
-      'the frame\'s own script time reaches the judge');
+    need(/auto\.sample\(raw \* 1000, effects\.gpuMs, scriptMs, drawMs\)/.test(fr) && /scriptMs = performance\.now\(\) - t0;/.test(fr) &&
+      /const drawAt = performance\.now\(\);\s*effects\.render\(dt\);\s*drawMs = performance\.now\(\) - drawAt;/.test(step),
+      'the frame\'s own script time, and the draw call\'s share of it, reach the judge');
     need(/applyRung\(effects, autoOn\(\) \? auto\.rung : AUTO_FULL, autoPost\)/.test(s),
       'a rung is applied as a fraction of the CHOSEN tier\'s pixel ratio');
     return bad;
@@ -380,7 +381,8 @@ function makeLoop(car, physics) {
     ['camera rolls with the physics', swap('camera.rotateZ(-p.roll * 0.22);', 'camera.rotateZ(-car.roll * 0.22);')],
     ['camera pitches with the physics', swap('const p = pose;', 'const p = pose; void car.pitch;')],
     ['camera updated twice', swap('updateCamera(dt, driving);', 'updateCamera(dt, driving);\n    updateCamera(dt, driving);')],
-    ['quality applied after the draw', move('\n    if (mode === \'driving\' && autoOn() && auto.sample(raw * 1000, effects.gpuMs, scriptMs)) applyAuto(true);', '\n    stepFrame(dt);')],
+    ['quality applied after the draw', move('\n    if (mode === \'driving\' && autoOn() && auto.sample(raw * 1000, effects.gpuMs, scriptMs, drawMs)) applyAuto(true);', '\n    stepFrame(dt);')],
+    ['draw time not measured', swap('drawMs = performance.now() - drawAt;', '')],
     ['capture after the step', swap('carPose.capture(car);', '/* moved */')],
     ['post drop cuts the resolution', swap('applyRung(effects, autoOn() ? auto.rung : AUTO_FULL, autoPost);', 'applyRung(effects, autoOn() ? auto.rung : AUTO_FULL, null);')],
   ];
@@ -513,7 +515,7 @@ function effectsOn(dpr, quality, log = []) {
   const HZ60 = 1000 / 60;
   function machine({
     cpu, gpu, chosen = 'medium', dpr = 1, screenMs = HZ60, hitches = true, timing = true,
-    scriptTimed = true, screenKnown = true, level = 0,
+    scriptTimed = true, screenKnown = true, level = 0, drawShare = 0.6, drawWaits = false,
   }) {
     const { fx } = effectsOn(dpr, chosen);
     const q = createAdaptiveQuality({
@@ -534,14 +536,21 @@ function effectsOn(dpr, quality, log = []) {
           const r = q.rung;
           const g = gpu * (0.15 + 0.85 * px[q.level] / full) * POST[r.post] / POST[chosen];
           const c = cpu * (0.98 + rnd() * 0.04);
-          let ms = Math.max(c, g * (0.98 + rnd() * 0.04));
-          let script = c;
+          const gg = g * (0.98 + rnd() * 0.04);
+          let ms = Math.max(c, gg);
+          // The draw call's share of the script. A draw that waits for the
+          // GPU runs until the GPU is done, so the script then fills the frame
+          // on a GPU-bound machine too — what a GPU-bound Safari laptop might do.
+          const wait = drawWaits && gg > c ? gg - c : 0;
+          const draw = c * drawShare + wait;
+          let script = c + wait;
           if (hitches && frame % 300 === 150) { ms += 180; script += 180; }
           if (hitches && frame % 900 === 450) { ms += 300; script += 300; }
           if (hitches && frame % 600 >= 400 && frame % 600 < 410) { ms += 22; script += 22; }
           ms = Math.ceil(ms / screenMs - 0.02) * screenMs;
           const w = (rnd() * 2 - 1) * 1.5;
-          q.sample(ms + w - wobble, timing ? g * (0.97 + rnd() * 0.06) : NaN, scriptTimed ? script : NaN);
+          q.sample(ms + w - wobble, timing ? g * (0.97 + rnd() * 0.06) : NaN,
+            scriptTimed ? script : NaN, scriptTimed ? draw : NaN);
           wobble = w;
           t += ms; frame++;
           if (t > 15000) {             // judged after the first 15 s
@@ -606,14 +615,39 @@ function effectsOn(dpr, quality, log = []) {
       m.changes <= (timing ? 3 : 6) && m.slowShare < 0.05,
       `${m.changes} changes in 10 min, ${(m.slowShare * 100).toFixed(1)}% slow frames: ${cut(trace(m))}`);
   }
-  for (const timing of [true, false]) {
-    // Slow because of the CPU, which main.js measures on every browser.
-    // Fewer pixels would only blur the picture.
-    const m = machine({ cpu: 24, gpu: 6, timing });
+  {
+    // Slow because of the CPU, which main.js measures on every browser. The
+    // model's script is 60% draw call, as measured in the game (render 57-75%
+    // of the frame's script). With a GPU timer the whole script is evidence;
+    // without one only the part outside the draw is, and a machine whose CPU
+    // time goes on the logic, not the draw, is still recognised at once.
+    const out = [];
+    let ok = true;
+    for (const [label, opts] of [
+      ['GPU timer', { timing: true }],
+      ['no timer, busy outside the draw', { timing: false, drawShare: 0.25 }],
+    ]) {
+      const m = machine({ cpu: 24, gpu: 6, ...opts });
+      m.run(600);
+      ok = ok && m.changes === 0 && m.belowShare === 0;
+      out.push(`${label}: ${m.changes} changes, ${(m.belowShare * 100).toFixed(0)}% blurred`);
+    }
+    check('a CPU-bound machine is never blurred for nothing', ok, `${out.join('; ')} (was 16 changes without a timer)`);
+  }
+  {
+    // Without a timer, a machine whose CPU goes on draw calls looks, from
+    // inside the page, like one waiting on the GPU: it tries the ladder once.
+    // And the case that rule exists for: a GPU-bound laptop with no timer
+    // whose draw call waits for the GPU, so the script fills every frame. It
+    // must still step down — never mistake it for a CPU-bound one.
+    const m = machine({ cpu: 24, gpu: 6, timing: false });
     m.run(600);
-    check(`a CPU-bound machine is never blurred for nothing (GPU timing ${timing ? 'on' : 'off'})`,
-      m.changes === 0 && m.belowShare === 0,
-      `${m.changes} changes, ${(m.belowShare * 100).toFixed(0)}% of 10 min below full quality${timing ? '' : ' (was 16 changes)'}`);
+    const g = machine({ cpu: 7, gpu: 28, timing: false, drawWaits: true });
+    g.run(300);
+    check('...and a GPU-bound one whose draw call waits is never mistaken for one',
+      m.changes <= 6 && m.belowShare < 0.05 && g.q.level > 0 && g.slowShare < 0.03,
+      `CPU-bound in the draw: ${m.changes} changes, ${(m.belowShare * 100).toFixed(1)}% blurred; ` +
+      `GPU-bound, draw waiting: level ${g.q.level}, ${(g.slowShare * 100).toFixed(1)}% slow frames (${trace(g)})`);
   }
   {
     // Slow for a reason neither the script time nor a GPU timer can see — a

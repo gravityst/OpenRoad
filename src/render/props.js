@@ -52,7 +52,9 @@
 
 import * as THREE from 'three';
 import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
-import { mulberry, clamp, lerp, smoothstep, valueNoise, valueNoise3 } from '../world/noise.js';
+import {
+  mulberry, clamp, lerp, smoothstep, valueNoise, valueNoise3, tileFbm, tileCells,
+} from '../world/noise.js';
 import {
   paintAtlas, buildSpecies, meshFrom, rasterImpostors, SPECIES, ATLAS_W, ATLAS_H,
 } from './foliage.js';
@@ -225,6 +227,95 @@ function canopyLambert() {
     '\tvec3 irradiance = ( dotNL + orBack ) * directLight.color;');
 }
 
+// Rock surface: grain and cracks from a tiling detail map, sampled three ways
+// in world space so every boulder shares one texture without a single UV —
+// the shape is noise-displaced, and any UV layout would stretch across the
+// displaced faces. 1.9 m a tile; the map's R is grain, G is cracks, BA a
+// tangent-space normal of both.
+const ROCK_FRAG_PARS = `
+uniform sampler2D orRockTex;
+varying vec3 vRkPos;
+varying vec3 vRkN;
+vec3 orRkW;
+vec4 orRkT;
+`;
+const ROCK_FRAG_ALBEDO = `
+{
+  vec3 n = normalize( vRkN );
+  orRkW = abs( n ); orRkW *= orRkW; orRkW *= orRkW;
+  orRkW /= ( orRkW.x + orRkW.y + orRkW.z );
+  vec3 p = vRkPos * ( 1.0 / 1.9 );
+  orRkT = texture2D( orRockTex, p.zy ) * orRkW.x + texture2D( orRockTex, p.xz ) * orRkW.y + texture2D( orRockTex, p.xy ) * orRkW.z;
+  diffuseColor.rgb *= ( 0.62 + 0.76 * orRkT.r ) * ( 1.0 - orRkT.g * 0.6 );
+}
+`;
+const ROCK_FRAG_NORMAL = `
+{
+  vec2 d = ( orRkT.ba - 0.5 ) * 0.9;
+  vec3 pw = vec3( 0.0, d.y, d.x ) * orRkW.x + vec3( d.x, 0.0, d.y ) * orRkW.y + vec3( d.x, d.y, 0.0 ) * orRkW.z;
+  normal = normalize( normal + ( viewMatrix * vec4( pw, 0.0 ) ).xyz );
+}
+`;
+
+/**
+ * Rock detail: grain, weathering blotches, and fracture lines, packed with
+ * their normal. Tiles every 256 texels.
+ *
+ * Fractures are the zero-crossings of a domain-warped noise — thin, long,
+ * wandering lines — and only where a second noise says so, so most of the
+ * surface is unbroken. The first version drew them along Worley cell borders,
+ * which closes every crack into a polygon; on a boulder that reads as a
+ * tortoise shell, or a football.
+ */
+function rockTexture(seed) {
+  const W = 256;
+  const px = new Uint8Array(W * W * 4);
+  const h = new Float32Array(W * W);
+  const cell = { d1: 0, d2: 0, tone: 0 };
+  for (let j = 0; j < W; j++) {
+    for (let i = 0; i < W; i++) {
+      const u = i / W, v = j / W, c = j * W + i;
+      const grain = tileFbm(u * 32, v * 32, 32, 32, seed + 1, 3) * 0.5 + 0.5;
+      const blotch = tileFbm(u * 5, v * 5, 5, 5, seed + 2, 3) * 0.5 + 0.5;
+      const wu = u + tileFbm(u * 3, v * 3, 3, 3, seed + 4, 2) * 0.12;
+      const wv = v + tileFbm(u * 3, v * 3, 3, 3, seed + 5, 2) * 0.12;
+      const line = Math.abs(tileFbm(wu * 4, wv * 4, 4, 4, seed + 6, 3));
+      const mask = smoothstep(0.05, 0.35, tileFbm(u * 3, v * 3, 3, 3, seed + 8, 2) * 0.5 + 0.5);
+      const crack = (1 - smoothstep(0.0, 0.035, line)) * mask;
+      const pit = tileCells(u * 21, v * 21, 21, seed + 7, cell);
+      const pits = (1 - smoothstep(0.0, 0.12, pit.d1)) * 0.35;
+      px[c * 4] = clamp(grain * 0.55 + blotch * 0.45, 0, 1) * 255;
+      px[c * 4 + 1] = clamp(crack + pits * 0.4, 0, 1) * 255;
+      h[c] = grain * 0.35 + blotch * 0.25 - crack * 0.9 - pits * 0.3;
+    }
+  }
+  // Tangent-space normal from the height, wrapping.
+  let acc = 0;
+  const gx = new Float32Array(W * W), gz = new Float32Array(W * W);
+  for (let j = 0; j < W; j++) {
+    for (let i = 0; i < W; i++) {
+      const c = j * W + i;
+      gx[c] = h[j * W + ((i + W - 1) % W)] - h[j * W + ((i + 1) % W)];
+      gz[c] = h[((j + W - 1) % W) * W + i] - h[((j + 1) % W) * W + i];
+      acc += gx[c] * gx[c] + gz[c] * gz[c];
+    }
+  }
+  const k = 0.35 / (Math.sqrt(acc / (W * W * 2)) || 1);
+  for (let c = 0; c < W * W; c++) {
+    px[c * 4 + 2] = (clamp(gx[c] * k, -1, 1) * 0.5 + 0.5) * 255;
+    px[c * 4 + 3] = (clamp(gz[c] * k, -1, 1) * 0.5 + 0.5) * 255;
+  }
+  const t = new THREE.DataTexture(px, W, W, THREE.RGBAFormat);
+  t.colorSpace = THREE.NoColorSpace;
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.magFilter = THREE.LinearFilter;
+  t.minFilter = THREE.LinearMipmapLinearFilter;
+  t.generateMipmaps = true;
+  t.anisotropy = 4;
+  t.needsUpdate = true;
+  return t;
+}
+
 /**
  * Patch a Lambert material. `kind` is 'canopy' (leaf cards: wind, LOD, alpha
  * mip fix, canopy normals and lighting), 'impostor' (billboards) or 'rock'
@@ -279,11 +370,15 @@ ${LOD_COLLAPSE}`);
 }`)
         .replace('#include <lights_lambert_pars_fragment>', canopyLambert());
     } else {
-      v = v.replace('#include <common>', `#include <common>\n${LOD_PARS}`)
+      v = v.replace('#include <common>', `#include <common>\n${LOD_PARS}\nvarying vec3 vRkPos;\nvarying vec3 vRkN;`)
         .replace('#include <begin_vertex>', `#include <begin_vertex>\n${LOD_VERT}`)
-        .replace('#include <project_vertex>', `#include <project_vertex>\n${LOD_COLLAPSE}`);
-      f = f.replace('#include <common>', `#include <common>\n${LOD_FRAG_PARS}`)
-        .replace('#include <color_fragment>', `#include <color_fragment>\n${LOD_FRAG}`);
+        .replace('#include <project_vertex>', `#include <project_vertex>
+${LOD_COLLAPSE}
+vRkPos = ( modelMatrix * instanceMatrix * vec4( transformed, 1.0 ) ).xyz;
+vRkN = normalize( mat3( modelMatrix ) * mat3( instanceMatrix ) * objectNormal );`);
+      f = f.replace('#include <common>', `#include <common>\n${LOD_FRAG_PARS}\n${ROCK_FRAG_PARS}`)
+        .replace('#include <color_fragment>', `#include <color_fragment>\n${LOD_FRAG}\n${ROCK_FRAG_ALBEDO}`)
+        .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>\n${ROCK_FRAG_NORMAL}`);
     }
     shader.vertexShader = v;
     shader.fragmentShader = f;
@@ -858,7 +953,10 @@ export function createProps(world, ground, opts = {}) {
   const impostorMat = (lod) => inject(new THREE.MeshLambertMaterial({
     map: impAlbedo, alphaTest: 0.5, side: THREE.DoubleSide,
   }), 'impostor', { orLod: lod, orNormalMap: { value: impNormal }, orFocus: focusU });
-  const rockMat = (lod) => inject(new THREE.MeshLambertMaterial({ vertexColors: true }), 'rock', { orLod: lod, orFocus: focusU });
+  const rockTex = rockTexture((seed | 0) + 77);
+  disposables.push(rockTex);
+  const rockMat = (lod) => inject(new THREE.MeshLambertMaterial({ vertexColors: true }), 'rock',
+    { orLod: lod, orFocus: focusU, orRockTex: { value: rockTex } });
 
   const mats = {
     near: canopyMat(U.near), mid: canopyMat(U.mid), far: impostorMat(U.far),

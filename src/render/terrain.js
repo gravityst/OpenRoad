@@ -76,7 +76,7 @@
 // for the normal term, and the albedo just comes along with it.
 
 import * as THREE from 'three';
-import { fbm, valueNoise, hash2, clamp, lerp, smoothstep } from '../world/noise.js';
+import { fbm, valueNoise, clamp, lerp, smoothstep, tileNoise, tileFbm, tileCells } from '../world/noise.js';
 import { valleyWeight } from '../world/layout.js';
 import { paintGrassCard } from './foliage.js';
 
@@ -185,65 +185,9 @@ const clock = typeof performance !== 'undefined' && performance.now ? performanc
 // ===========================================================================
 // Tileable noise
 // ===========================================================================
-// noise.js is used everywhere else, but its lattice is infinite and a detail
-// texture has to WRAP — a seam every 1.15 m is the one artefact you would see
-// from the driver's seat before anything else. These are the same quintic value
-// noise and the same hash, with the lattice index taken modulo the period.
-
-// The period is per-axis rather than a single number, because a grass blade is
-// not round: a lattice that is wide in X and short in Z produces features that
-// are long in X and thin in Z, which is the only cheap way to draw something
-// blade-shaped out of value noise.
-
-function quintic(t) { return t * t * t * (t * (t * 6 - 15) + 10); }
-
-function tileHash(ix, iz, px, pz, seed) {
-  ix -= Math.floor(ix / px) * px;
-  iz -= Math.floor(iz / pz) * pz;
-  return hash2(ix, iz, seed);
-}
-
-function tileNoise(x, z, px, pz, seed) {
-  const x0 = Math.floor(x), z0 = Math.floor(z);
-  const u = quintic(x - x0), v = quintic(z - z0);
-  const a = tileHash(x0, z0, px, pz, seed), b = tileHash(x0 + 1, z0, px, pz, seed);
-  const c = tileHash(x0, z0 + 1, px, pz, seed), d = tileHash(x0 + 1, z0 + 1, px, pz, seed);
-  const top = a + (b - a) * u, bot = c + (d - c) * u;
-  return (top + (bot - top) * v) * 2 - 1;
-}
-
-/** Fractal sum in [-1,1]. Periods must be integers; every octave doubles them. */
-function tileFbm(x, z, px, pz, seed, octaves) {
-  let sum = 0, amp = 1, norm = 0, f = 1;
-  for (let o = 0; o < octaves; o++) {
-    sum += tileNoise(x * f, z * f, px * f, pz * f, seed + o * 1013) * amp;
-    norm += amp; amp *= 0.5; f *= 2;
-  }
-  return sum / norm;
-}
-
-// Worley cells, wrapped the same way. d1/d2 give the distance to the nearest
-// and second-nearest feature point; d2 - d1 is small only on the boundary
-// between two cells, which is what draws the dark gap between two gravel chips
-// or the crack between two dried clods. `tone` is the winning cell's own
-// brightness, so no two chips are the same shade.
+// tileNoise, tileFbm and tileCells live in noise.js now, beside the infinite
+// versions, because the props layer paints a rock texture with them too.
 const cellOut = { d1: 0, d2: 0, tone: 0 };
-function tileCells(x, z, p, seed, out) {
-  const xi = Math.floor(x), zi = Math.floor(z);
-  let d1 = 9, d2 = 9, tone = 0;
-  for (let dz = -1; dz <= 1; dz++) {
-    for (let dx = -1; dx <= 1; dx++) {
-      const cx = xi + dx, cz = zi + dz;
-      const ex = cx + tileHash(cx, cz, p, p, seed) * 0.92 + 0.04 - x;
-      const ez = cz + tileHash(cx, cz, p, p, seed + 733) * 0.92 + 0.04 - z;
-      const d = ex * ex + ez * ez;
-      if (d < d1) { d2 = d1; d1 = d; tone = tileHash(cx, cz, p, p, seed + 4441); }
-      else if (d < d2) d2 = d;
-    }
-  }
-  out.d1 = Math.sqrt(d1); out.d2 = Math.sqrt(d2); out.tone = tone;
-  return out;
-}
 
 /**
  * Pack a tiling height field into a texture's B and A channels as a

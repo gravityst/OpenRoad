@@ -168,17 +168,25 @@ const FN = Math.round((2 * EXT) / FC) + 1;
 // How far the relief stays off a road, measured from the carriageway EDGE.
 // tools/groundcheck.mjs samples the verge out to 40 m from the centreline and
 // ground.js blends the carriageway into the terrain over 3 + 26 m beyond the
-// shoulder, so nothing inside 38 m of an edge may move. The ramps differ by
-// feature: a canyon wall wants to be steep (40 m of rock over 32 m), a
-// mountain flank must not be (a 170 m peak over 32 m would be an overhang).
+// shoulder, so nothing inside 38 m of an edge may move. Past that the ramps
+// differ by feature. A mountain flank is faded in over 150 m (a 190 m peak
+// over less would be an overhang). A canyon wall is not faded at all but
+// CAPPED: the rock may rise at most WALL metres per metre of distance from
+// the road, so where a mesa meets a road it stands as a straight wall at
+// that slope — 62 degrees — instead of the mesa's own cliff and a fade
+// adding up to something steeper than the ground can hold (a fade over 34 m
+// did exactly that: normal y 0.248 against the 0.25 floor).
 const KEEP = 38;
-const RAMP_CANYON = 34;
+const WALL = 1.9;
 const RAMP_COAST = 100;
 const RAMP_PEAK = 150;
 const REACH = KEEP + RAMP_PEAK + 8;
+const RAMP_CANYON = 0;   // (capped, see WALL)
 
-// Mesas and buttes: one candidate per 300 m cell.
+// Mesas and buttes: one candidate per 300 m cell. Tablelands, the big flat
+// tops a canyon is cut through: one candidate per 650 m cell.
 const MESA_CELL = 300;
+const TABLE_CELL = 650;
 
 /**
  * Build the field for a world whose roads are laid (XZ) but not yet graded.
@@ -363,13 +371,14 @@ export function buildBiomes(world, terrain) {
 
   /**
    * A mesa's section: a flat cap, a cliff of caprock, and a talus apron.
-   * `t` is distance over radius. The cliff is held under 66 degrees and the
-   * talus under 25, so the steepest ground on the map stays well inside what
-   * ground.sample()'s normals and the groundcheck bound (ny > 0.25) allow.
+   * `t` is distance over radius. The cliff is designed to 1.7:1 (60 degrees)
+   * and the talus to 0.45:1, and the ragged rim below can steepen either by
+   * at most half as much again — so the steepest ground on the map stays
+   * inside what ground.sample()'s normals and groundcheck (ny > 0.25) allow.
    */
   function mesaProfile(t, R, H) {
     const t1 = 0.8;
-    const wc = Math.max(0.1 * R, (0.62 * H * 1.5) / 2.2);
+    const wc = Math.max(0.1 * R, (0.62 * H * 1.5) / 1.7);
     const t2 = t1 + wc / R;
     if (t <= t1) return H;
     if (t <= t2) return H - 0.62 * H * smoothstep(t1, t2, t);
@@ -380,51 +389,96 @@ export function buildBiomes(world, terrain) {
     return 0.38 * H * (1 - u) * (1 - u);
   }
 
-  // One candidate mesa per 300 m cell, drawn once: centre, radius, height, or
-  // radius 0 for an empty cell. Looked up rather than re-hashed, because the
-  // bake asks nine cells for every one of 180,000 desert points.
-  const MN = Math.ceil((2 * EXT) / MESA_CELL) + 4;
-  const M0 = Math.floor(-EXT / MESA_CELL) - 2;
-  const mesa = new Float32Array(MN * MN * 4);
-  for (let j = 0; j < MN; j++) {
-    for (let i = 0; i < MN; i++) {
-      const cx = M0 + i, cz = M0 + j, o = (j * MN + i) * 4;
-      if (hash2(cx, cz, s + 451) > 0.6) continue;
-      const R = 42 + hash2(cx, cz, s + 454) * 120;
-      mesa[o] = (cx + 0.2 + hash2(cx, cz, s + 452) * 0.6) * MESA_CELL;
-      mesa[o + 1] = (cz + 0.2 + hash2(cx, cz, s + 453) * 0.6) * MESA_CELL;
-      mesa[o + 2] = R;
-      mesa[o + 3] = 20 + hash2(cx, cz, s + 455) * 26 + (R < 80 ? 20 : 0);
+  // One candidate mesa per cell, drawn once: centre, radius, height, or radius
+  // 0 for an empty cell. Looked up rather than re-hashed, because the bake
+  // asks nine cells for every one of 180,000 desert points. Two tables: mesas
+  // and buttes (42-162 m across the top, 20-66 m high), and tablelands
+  // (150-260 m, 32-46 m) — built the same way, so every cliff in the canyon
+  // country is held to the same slope by the same profile.
+  function mesaTable(cell, salt, occupancy, r0, r1, h0, h1, buttes) {
+    const n = Math.ceil((2 * EXT) / cell) + 4;
+    const o0 = Math.floor(-EXT / cell) - 2;
+    const t = new Float32Array(n * n * 4);
+    for (let j = 0; j < n; j++) {
+      for (let i = 0; i < n; i++) {
+        const cx = o0 + i, cz = o0 + j, o = (j * n + i) * 4;
+        if (hash2(cx, cz, s + salt) > occupancy) continue;
+        const R = r0 + hash2(cx, cz, s + salt + 3) * (r1 - r0);
+        t[o] = (cx + 0.2 + hash2(cx, cz, s + salt + 1) * 0.6) * cell;
+        t[o + 1] = (cz + 0.2 + hash2(cx, cz, s + salt + 2) * 0.6) * cell;
+        t[o + 2] = R;
+        t[o + 3] = h0 + hash2(cx, cz, s + salt + 4) * (h1 - h0) + (buttes && R < 80 ? 20 : 0);
+      }
     }
+    return { t, n, o0, cell };
+  }
+  const MESAS = mesaTable(MESA_CELL, 451, 0.6, 42, 162, 20, 46, true);
+  const TABLES = mesaTable(TABLE_CELL, 471, 0.55, 150, 260, 32, 46, false);
+
+  // The canyon a kid will actually drive: tablelands centred ON the desert's
+  // own rural roads, a few hundred metres apart. The road mask then cuts each
+  // one down to the carriageway, so the road runs along a canyon floor 76 m
+  // wide between 40 m walls — Red Canyon, in so many words. Chosen in edge
+  // order from the seed's own road graph, so every client picks the same.
+  const anchors = [];
+  {
+    const aw = new Float64Array(BIOME_COUNT);
+    for (const e of world.edges) {
+      if (e.kind !== 'rural' || anchors.length >= 16) continue;
+      for (let k = 0; k < e.pts.length; k += 6) {
+        const p = e.pts[k];
+        biomeWeights(p.x, p.z, seed, aw);
+        if (aw[BIOME.desert] < 0.93) continue;
+        let clear = true;
+        for (let a = 0; a < anchors.length; a += 4) {
+          const dx = anchors[a] - p.x, dz = anchors[a + 1] - p.z;
+          if (dx * dx + dz * dz < 520 * 520) { clear = false; break; }
+        }
+        if (!clear) continue;
+        anchors.push(p.x, p.z, 185 + hash2(anchors.length, 7, s + 491) * 50, 38 + hash2(anchors.length, 9, s + 492) * 8);
+        if (anchors.length >= 16) break;
+      }
+    }
+  }
+
+  function mesaMax(tab, x, z, h) {
+    const { t, n, o0, cell } = tab;
+    const ix = Math.floor(x / cell) - o0, iz = Math.floor(z / cell) - o0;
+    for (let j = -1; j <= 1; j++) {
+      const jj = iz + j;
+      if (jj < 0 || jj >= n) continue;
+      for (let i = -1; i <= 1; i++) {
+        const ii = ix + i;
+        if (ii < 0 || ii >= n) continue;
+        const o = (jj * n + ii) * 4;
+        const R = t[o + 2];
+        if (R === 0) continue;
+        const m = mesaAt(x, z, t[o], t[o + 1], R, t[o + 3]);
+        if (m > h) h = m;
+      }
+    }
+    return h;
+  }
+  function mesaAt(x, z, px, pz, R, H) {
+    const dx = x - px, dz = z - pz;
+    const d0 = Math.sqrt(dx * dx + dz * dz);
+    if (d0 > R * 2.4 + 60) return 0;
+    // A ragged rim: no mesa is a circle. The wobble is measured in metres, not
+    // in radii, and kept slow: its gradient adds straight onto the distance's,
+    // and the first version (R x 0.14 at 42 m) stretched it up to fourfold,
+    // which is a cliff four times as steep as the profile meant.
+    const d = d0 + valueNoise(x / 130, z / 130, s + 456) * Math.min(R * 0.13, 18)
+                 + valueNoise(x / 34, z / 34, s + 457) * 2.2;
+    return mesaProfile(d / R, R, H);
   }
 
   /** Tablelands, mesas and buttes, masked off the roads with a steep ramp. */
   function desertRelief(x, z) {
-    // Tablelands: a third of the desert stands on a plateau 40-odd metres
-    // up, its edge a band of cliff. Masked off the roads, a plateau that a
-    // road crosses becomes a canyon.
-    const pn = fbm(x / 950, z / 950, s + 441, 3) + fbm(x / 170, z / 170, s + 442, 2) * 0.05;
-    let h = smoothstep(0.10, 0.17, pn) * (40 + fbm(x / 300, z / 300, s + 443, 2) * 6);
-    const ix = Math.floor(x / MESA_CELL) - M0, iz = Math.floor(z / MESA_CELL) - M0;
-    for (let j = -1; j <= 1; j++) {
-      const jj = iz + j;
-      if (jj < 0 || jj >= MN) continue;
-      for (let i = -1; i <= 1; i++) {
-        const ii = ix + i;
-        if (ii < 0 || ii >= MN) continue;
-        const o = (jj * MN + ii) * 4;
-        const R = mesa[o + 2];
-        if (R === 0) continue;
-        const H = mesa[o + 3];
-        const dx = x - mesa[o], dz = z - mesa[o + 1];
-        const d0 = Math.sqrt(dx * dx + dz * dz);
-        if (d0 > R * 2.4 + 60) continue;
-        // A ragged rim: no mesa is a circle.
-        const d = d0 + valueNoise(x / 42, z / 42, s + 456) * R * 0.14
-                     + valueNoise(x / 13, z / 13, s + 457) * R * 0.035;
-        const m = mesaProfile(d / R, R, H);
-        if (m > h) h = m;
-      }
+    let h = mesaMax(TABLES, x, z, 0);
+    h = mesaMax(MESAS, x, z, h);
+    for (let a = 0; a < anchors.length; a += 4) {
+      const m = mesaAt(x, z, anchors[a], anchors[a + 1], anchors[a + 2], anchors[a + 3]);
+      if (m > h) h = m;
     }
     return h;
   }
@@ -471,9 +525,10 @@ export function buildBiomes(world, terrain) {
       const m = smoothstep(KEEP, KEEP + RAMP_PEAK, dRoad) * clearK;
       F += wa * (alpineUplift(x, z) + (m > 0 ? m * alpinePeaks(x, z) : 0));
     }
-    if (wd > 1e-3) {
-      const m = smoothstep(KEEP, KEEP + RAMP_CANYON, dRoad) * clearK;
-      if (m > 0) F += wd * m * desertRelief(x, z);
+    if (wd > 1e-3 && dRoad > KEEP && clearK > 0) {
+      const cap = (dRoad - KEEP) * WALL;
+      const d = desertRelief(x, z);
+      F += wd * clearK * (d < cap ? d : cap);
     }
     if (wc > 1e-3) {
       const m = smoothstep(KEEP, KEEP + RAMP_COAST, dRoad) * clearK;
@@ -597,6 +652,23 @@ export function buildBiomes(world, terrain) {
            (seaMask[c + FN] * (1 - tx) + seaMask[c + FN + 1] * tx) * tz;
   }
 
+  /**
+   * Metres from the sea surface down to the TRUE bed, bilinear; 0 on land.
+   * The physics stands on the 45 cm floor instead, but the terrain mesh draws
+   * this, so the sea looks as deep as it is and the far bed never z-fights
+   * the water.
+   */
+  function seaDepthAt(x, z) {
+    const fz = (z + EXT) / FC - sj0;
+    if (fz < 0) return 0;
+    const fx = (x + EXT) / FC;
+    if (fx < 0 || fx > FN - 1.001 || fz > SR - 1.001) return 30;
+    const i = fx | 0, r = fz | 0, tx = fx - i, tz = fz - r;
+    const c = r * FN + i;
+    return (seaDepth[c] * (1 - tx) + seaDepth[c + 1] * tx) * (1 - tz) +
+           (seaDepth[c + FN] * (1 - tx) + seaDepth[c + FN + 1] * tx) * tz;
+  }
+
   // ---- surfaces ---------------------------------------------------------------
   const wc2 = new Float64Array(BIOME_COUNT);
   /**
@@ -619,7 +691,10 @@ export function buildBiomes(world, terrain) {
     if (wAlp > 0.02 && snowAmount(wAlp, x, z, h, s) > 0.5) return 'snow';
     if (wDes > 0.5) {
       // Hardpan most of the way, which grips like a dirt road and throws a
-      // red plume; soft sand in the dune fields, which does not.
+      // plume; soft sand in the dune fields on the canyon floor, which does
+      // not. The mesas themselves are hardpan, and rock where they are steep
+      // (the base rule, above).
+      if (relief(x, z) > 4) return 'dirt';
       return fbm(x / 210, z / 210, s + 495, 2) > 0.18 ? 'sand' : 'dirt';
     }
     return '';
@@ -702,7 +777,7 @@ export function buildBiomes(world, terrain) {
 
   return {
     seed, seaLevel, floorY,
-    weightsAt, dominant, relief, seaAt, surfaceAt, track, bake, seaTexture,
+    weightsAt, dominant, relief, seaAt, seaDepthAt, surfaceAt, track, bake, seaTexture,
     snowAt: (x, z, h, wAlpine) => snowAmount(wAlpine, x, z, h, s),
     roadDist,
     /** The sea's rough extent, so the water mesh knows when it can be seen. */
@@ -711,6 +786,7 @@ export function buildBiomes(world, terrain) {
       buildMs: Math.round(t1 - t0),
       seaKm2: Math.round(seaCells * FC * FC / 1e4) / 100,
       reliefCells: FN * FN, weightCells: WN * WN,
+      canyons: anchors.length / 4,
     },
   };
 }

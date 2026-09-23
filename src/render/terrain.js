@@ -90,6 +90,7 @@
 import * as THREE from 'three';
 import { fbm, valueNoise, clamp, lerp, smoothstep, tileNoise, tileFbm, tileCells } from '../world/noise.js';
 import { valleyWeight, woodland, fieldAt } from '../world/layout.js';
+import { BIOME } from '../world/biomes.js';
 import { paintGrassCard } from './foliage.js';
 
 // rings[l] is the largest Chebyshev chunk distance still drawn at level l;
@@ -150,6 +151,46 @@ const FALLOW = [0.39, 0.37, 0.22];
 // the light gone out of it.
 const MUD  = [0.23, 0.175, 0.125];
 
+// The biomes (world/biomes.js), sRGB like everything above. Each is picked to
+// be recognised from the driver's seat in the first second — a kid should know
+// they have arrived somewhere before the HUD says so — and each biome's grass
+// is pulled toward its neighbour's ground where the two meet, so a border is
+// a change of country rather than a seam.
+//
+// Red Canyon: sunburnt hardpan, orange dune sand, rust-red rock, and on the
+// odd patch of grass at its edge, dry red straw.
+const HARDPAN = [0.70, 0.40, 0.24];
+const DUNE = [0.84, 0.54, 0.32];
+const RED_ROCK = [0.66, 0.33, 0.19];
+const SCRUB = [0.60, 0.46, 0.29];
+// Frostpeak Pass: snow a touch blue in its hollows, grey granite, and a dark
+// meadow green below the snow line. Snow's albedo is really 0.8-0.9, but under
+// this sun (4.6) and tone curve anything past about 0.8 sRGB clips to paper
+// white and a snowfield loses every fold in it; 0.76 keeps the shading.
+const SNOW = [0.76, 0.79, 0.84];
+const SNOW_SHADE = [0.60, 0.67, 0.79];
+const GRANITE = [0.43, 0.43, 0.45];
+const MEADOW_ALP = [0.27, 0.34, 0.19];
+// Sunspray Bay: pale beach sand, wet sand at the waterline, bright coastal
+// turf and bleached marram on the dunes.
+const BEACH = [0.90, 0.83, 0.64];
+const WET_SAND = [0.60, 0.53, 0.39];
+const COAST_TURF = [0.37, 0.45, 0.17];
+const MARRAM = [0.62, 0.58, 0.35];
+// Amberleaf Woods: golden grass, russet patches, and an orange carpet of
+// fallen leaves under the trees — the ground has to be autumn too, or the
+// canopies look painted on.
+const AUT_GRASS = [0.54, 0.46, 0.20];
+const AUT_RUSSET = [0.58, 0.35, 0.15];
+const LITTER = [0.55, 0.29, 0.11];
+
+// The per-pixel rock the shader draws on steep ground, as LINEAR colour (the
+// shader's own default, F_MAIN, is the farmland one). Carried per vertex in
+// `rockTint`, doubled so a byte holds 0..0.5 at 0.002 steps.
+const ROCK_L = [0.18, 0.165, 0.145];
+const RED_ROCK_L = [0.30, 0.10, 0.045];
+const GRANITE_L = [0.14, 0.145, 0.155];
+
 // How much of each packed detail mask a surface shows, in the attribute's own
 // order: (gravel chips, sand ripple, grass blades, soil clods). These do NOT
 // sum to one — the sum is the strength, which is why asphalt gets a little
@@ -163,18 +204,22 @@ const DETAIL = {
   grass:    [0.05, 0.00, 0.95, 0.20],
   sand:     [0.14, 0.95, 0.00, 0.10],
   rock:     [0.90, 0.00, 0.04, 0.16],
+  // Snow takes the sand ripple at low strength: wind-drift, not grain.
+  snow:     [0.04, 0.40, 0.00, 0.04],
+  water:    [0.10, 0.80, 0.00, 0.10],
 };
 
 // Surfaces as small integers, so the mud fringe can test a vertex's neighbours
 // with array lookups instead of string comparisons. 0 means "not sampled".
-const MCODE = { asphalt: 1, concrete: 2, sidewalk: 3, dirt: 4, gravel: 5, grass: 6, sand: 7, rock: 8 };
+const MCODE = { asphalt: 1, concrete: 2, sidewalk: 3, dirt: 4, gravel: 5, grass: 6, sand: 7, rock: 8, snow: 9, water: 10 };
 // How muddy a neighbour makes you. A dirt road is the real source. Gravel
 // shoulders used to get a third of it, which drew a dark sawtooth down both
 // sides of every lane at the vertex spacing; the grass beside a shoulder is
 // dusty, not muddy, and verge wear (fillRows) paints that instead.
-const MUDDY = new Float32Array([0, 0, 0, 0, 1.0, 0, 0, 0, 0]);
-// ...and which surfaces will take mud at all. Tarmac does not.
-const TAKES_MUD = new Float32Array([0, 0, 0, 0, 0, 0, 1, 0.8, 0.5]);
+const MUDDY = new Float32Array([0, 0, 0, 0, 1.0, 0, 0, 0, 0, 0, 0]);
+// ...and which surfaces will take mud at all. Tarmac does not; snow takes a
+// little, as brown slush along a dirt track.
+const TAKES_MUD = new Float32Array([0, 0, 0, 0, 0, 0, 1, 0.8, 0.5, 0.45, 0]);
 
 // Detail texture geometry. 512 square at a 1.15 m tile is 2.2 mm per texel,
 // which is finer than a screen pixel at the closest the bonnet camera ever gets
@@ -412,10 +457,12 @@ function macroTexture(seed) {
 
 const V_PARS = `
 attribute vec4 detailWeight;
+attribute vec4 rockTint;  // rgb: this biome's rock, linear, halved; a: how desert
 uniform vec2 orFade;
 varying vec4 vOrPos;      // xyz world position, w detail fade
 varying vec4 vOrWeight;
 varying vec3 vOrNormal;
+varying vec4 vOrRock;
 `;
 
 const V_MAIN = `
@@ -423,6 +470,7 @@ vec4 orWorld = modelMatrix * vec4( transformed, 1.0 );
 vOrPos = vec4( orWorld.xyz, 1.0 - smoothstep( orFade.x, orFade.y, length( mvPosition.xyz ) ) );
 vOrNormal = normalize( mat3( modelMatrix ) * objectNormal );
 vOrWeight = detailWeight;
+vOrRock = rockTint;
 `;
 
 const F_PARS = `
@@ -438,6 +486,7 @@ uniform vec2 orMacroTile;   // 1 / macro tile sizes, large and medium
 varying vec4 vOrPos;
 varying vec4 vOrWeight;
 varying vec3 vOrNormal;
+varying vec4 vOrRock;
 `;
 
 const F_MAIN = `
@@ -466,11 +515,23 @@ const F_MAIN = `
   // the way an eroded bank is, not a contour line. Cuttings and embankments
   // beside the roads are where this mostly shows.
   float orSl = 1.0 - orN.y + ( orMb.b - 0.5 ) * 0.05;
+  // Snow is the only ground that is both bright and bluer than it is red
+  // (beach sand is as bright, but warm), so it can be told from here without
+  // another attribute. It holds on steeper ground than turf does before the
+  // rock shows through, which is what leaves a mountainside white with dark
+  // crags rather than grey with white flecks.
+  float orSnowy = smoothstep( 0.22, 0.34, min( min( diffuseColor.r, diffuseColor.g ), diffuseColor.b ) )
+                * smoothstep( -0.01, 0.04, diffuseColor.b - diffuseColor.r );
   float orBare = smoothstep( 0.075, 0.125, orSl ) * orG;
-  float orRock = smoothstep( 0.125, 0.19, orSl );
-  float orStrata = 0.84 + 0.16 * sin( vOrPos.y * 2.7 + orMa.r * 9.0 );
-  diffuseColor.rgb = mix( diffuseColor.rgb, vec3( 0.095, 0.055, 0.024 ) * ( 0.85 + orMb.b * 0.3 ), orBare );
-  diffuseColor.rgb = mix( diffuseColor.rgb, vec3( 0.18, 0.165, 0.145 ) * orStrata, orRock );
+  // In the canyon country rock shows on gentler ground (from ~23 degrees),
+  // because a mesa's flank IS rock; elsewhere turf holds to ~30.
+  float orRock = smoothstep( mix( mix( 0.125, 0.075, vOrRock.a ), 0.22, orSnowy ),
+                             mix( mix( 0.19, 0.13, vOrRock.a ), 0.34, orSnowy ), orSl );
+  // Red rock is banded coarsely, the way sandstone beds are.
+  float orStrata = 0.84 + 0.16 * sin( vOrPos.y * mix( 2.7, 0.9, vOrRock.a ) + orMa.r * 9.0 );
+  vec3 orBareCol = mix( vec3( 0.095, 0.055, 0.024 ), vec3( 0.24, 0.085, 0.034 ), vOrRock.a );
+  diffuseColor.rgb = mix( diffuseColor.rgb, orBareCol * ( 0.85 + orMb.b * 0.3 ), orBare );
+  diffuseColor.rgb = mix( diffuseColor.rgb, vOrRock.rgb * 2.0 * orStrata, orRock );
   orW = vec4( orW.x + orRock * 0.9, orW.y, orW.z * ( 1.0 - max( orBare, orRock ) ), orW.w + orBare * 0.8 );
   // ^4 rather than ^2, so the crossfade between projections is confined to
   // genuinely steep ground: at 20 degrees of slope the up plane still holds 98%
@@ -697,9 +758,18 @@ export function createTerrain(world, ground, opts = {}) {
   // fbm calls — is evaluated once a vertex rather than three times.
   let palWood = 0;
   const fieldQ = { edge: 0, use: 0, id: 0, dx: 1, dz: 0, ripe: 0 };
+  // The biome weights of the point palette() has just coloured, read again by
+  // the rock tint in fillRows. Farmland only when the world has no biomes.
+  const bio = world.biomes || null;
+  const seaLevel = bio ? bio.seaLevel : -Infinity;
+  const bw = new Float64Array(5);
+  bw[BIOME.farm] = 1;
 
   function palette(surface, x, z, ny, y, crest, out, fine = 1) {
     palWood = 0;
+    if (bio) bio.weightsAt(x, z, bw);
+    const wF = bw[BIOME.farm], wD = bw[BIOME.desert], wA = bw[BIOME.alpine];
+    const wC = bw[BIOME.coast], wU = bw[BIOME.autumn];
     if (surface === 'grass') {
       // A slow wet/dry sweep at field scale, pulled toward lush in the valley
       // and toward straw on the high ground and the sunlit brows, then bare
@@ -720,8 +790,13 @@ export function createTerrain(world, ground, opts = {}) {
       // The patchwork. Fields keep a grassy margin at their boundary and
       // stay out of the valley floor, which is all grazing. Stripes and
       // tramlines only on chunks fine enough to draw them without aliasing.
-      const F = fieldAt(x, z, terrain.seed ?? 0, fieldQ);
-      const inField = smoothstep(3, 9, F.edge) * (1 - smoothstep(0.3, 0.65, moist));
+      // Farmland's, and the autumn woods' harvest fields; nobody ploughs a
+      // snowfield, a dune or a canyon floor.
+      const farmed = wF + wU * 0.6;
+      const inField = farmed > 0.02
+        ? smoothstep(3, 9, fieldAt(x, z, terrain.seed ?? 0, fieldQ).edge) * (1 - smoothstep(0.3, 0.65, moist)) * farmed
+        : 0;
+      const F = fieldQ;
       if (F.use > 0 && inField > 0) {
         let c0, c1, c2;
         const u = x * F.dx + z * F.dz;
@@ -742,25 +817,91 @@ export function createTerrain(world, ground, opts = {}) {
         out[0] = lerp(out[0], c0, inField); out[1] = lerp(out[1], c1, inField); out[2] = lerp(out[2], c2, inField);
       }
 
+      // Each biome's own turf, by weight, over the farmland's.
+      if (wF < 0.999) {
+        let r = out[0] * wF, g = out[1] * wF, bl = out[2] * wF;
+        if (wU > 0) {
+          const russet = smoothstep(-0.1, 0.35, valueNoise(x / 47, z / 47, tintSeed + 131)) * 0.55;
+          r += lerp(AUT_GRASS[0], AUT_RUSSET[0], russet) * wU;
+          g += lerp(AUT_GRASS[1], AUT_RUSSET[1], russet) * wU;
+          bl += lerp(AUT_GRASS[2], AUT_RUSSET[2], russet) * wU;
+        }
+        if (wC > 0) {
+          // Marram on the low dunes behind the beach, turf above them.
+          const dune = smoothstep(seaLevel + 12, seaLevel + 4, y);
+          r += lerp(COAST_TURF[0], MARRAM[0], dune) * wC;
+          g += lerp(COAST_TURF[1], MARRAM[1], dune) * wC;
+          bl += lerp(COAST_TURF[2], MARRAM[2], dune) * wC;
+        }
+        if (wD > 0) { r += SCRUB[0] * wD; g += SCRUB[1] * wD; bl += SCRUB[2] * wD; }
+        if (wA > 0) { r += MEADOW_ALP[0] * wA; g += MEADOW_ALP[1] * wA; bl += MEADOW_ALP[2] * wA; }
+        out[0] = r; out[1] = g; out[2] = bl;
+      }
+
       // Forest floor, but only under closed canopy. The planting mask starts
       // at 0.08 with scattered margin trees; painting the floor from there
       // turned every wood's ragged edge into what looked like dead grass.
+      // In the autumn woods it is a carpet of fallen leaves.
       palWood = smoothstep(0.15, 0.3, woodland(x, z, terrain.seed ?? 0));
       if (palWood > 0) {
         const k = palWood * 0.72;
-        out[0] = lerp(out[0], FLOOR[0], k); out[1] = lerp(out[1], FLOOR[1], k); out[2] = lerp(out[2], FLOOR[2], k);
+        const fr = lerp(FLOOR[0], LITTER[0], wU), fg = lerp(FLOOR[1], LITTER[1], wU), fb = lerp(FLOOR[2], LITTER[2], wU);
+        out[0] = lerp(out[0], fr, k); out[1] = lerp(out[1], fg, k); out[2] = lerp(out[2], fb, k);
       }
       out[0] = lerp(out[0], SOIL[0], bare); out[1] = lerp(out[1], SOIL[1], bare); out[2] = lerp(out[2], SOIL[2], bare);
+
+      // A dusting below the snow line, rising to meet the snow itself: the
+      // ground turns white by degrees rather than at a contour.
+      if (wA > 0.02) {
+        const k = smoothstep(0.12, 0.5, bio.snowAt(x, z, y, wA)) * 0.75;
+        if (k > 0) { out[0] = lerp(out[0], SNOW[0], k); out[1] = lerp(out[1], SNOW[1], k); out[2] = lerp(out[2], SNOW[2], k); }
+      }
       return;
     }
-    if (surface === 'sand') {
-      out[0] = WASH[0]; out[1] = WASH[1]; out[2] = WASH[2];
+    if (surface === 'snow') {
+      // Blue in the hollows, where it is lit by the sky and not the sun.
+      const k = clamp(-crest * 1.4, 0, 1) * 0.7;
+      out[0] = lerp(SNOW[0], SNOW_SHADE[0], k); out[1] = lerp(SNOW[1], SNOW_SHADE[1], k); out[2] = lerp(SNOW[2], SNOW_SHADE[2], k);
+      return;
+    }
+    if (surface === 'sand' || surface === 'water') {
+      // The farmland's river wash, the canyon's orange dunes and the bay's
+      // pale beach, by weight; darker where the sea has just been.
+      const wash = 1 - wD - wC;
+      out[0] = WASH[0] * wash + DUNE[0] * wD + BEACH[0] * wC;
+      out[1] = WASH[1] * wash + DUNE[1] * wD + BEACH[1] * wC;
+      out[2] = WASH[2] * wash + DUNE[2] * wD + BEACH[2] * wC;
+      const wet = surface === 'water' ? 1 : smoothstep(seaLevel + 1.0, seaLevel + 0.1, y);
+      if (wet > 0) { out[0] = lerp(out[0], WET_SAND[0], wet); out[1] = lerp(out[1], WET_SAND[1], wet); out[2] = lerp(out[2], WET_SAND[2], wet); }
       return;
     }
     const hex = (SURFACES[surface] || SURFACES.grass).colour;
     out[0] = ((hex >> 16) & 255) / 255;
     out[1] = ((hex >> 8) & 255) / 255;
     out[2] = (hex & 255) / 255;
+    if (surface === 'dirt' && wD > 0) {
+      // Hardpan, in sun-baked plates of slightly different red.
+      const k = 1 + valueNoise(x / 23, z / 23, tintSeed + 141) * 0.1 * wD;
+      out[0] = lerp(out[0], HARDPAN[0], wD) * k; out[1] = lerp(out[1], HARDPAN[1], wD) * k;
+      out[2] = lerp(out[2], HARDPAN[2], wD) * k;
+    } else if (surface === 'rock' && wD + wA > 0) {
+      const base = 1 - wD - wA;
+      out[0] = out[0] * base + RED_ROCK[0] * wD + GRANITE[0] * wA;
+      out[1] = out[1] * base + RED_ROCK[1] * wD + GRANITE[1] * wA;
+      out[2] = out[2] * base + RED_ROCK[2] * wD + GRANITE[2] * wA;
+    }
+  }
+
+  /**
+   * The height the MESH is drawn at. Under the sea the physics stands on a
+   * shelf 45 cm down (biomes.js), so a wading car never sinks; the mesh draws
+   * the true bed instead, so the sea looks as deep as it is and a flat shelf
+   * a few decimetres under the water can never z-fight it at a kilometre.
+   */
+  function seaBed(x, z, y) {
+    if (y > seaLevel - 0.3) return y;
+    const d = bio.seaDepthAt(x, z);
+    return d > 0 ? Math.min(y, seaLevel - d) : y;
   }
 
   /**
@@ -785,7 +926,7 @@ export function createTerrain(world, ground, opts = {}) {
     }
     // Tarmac is laid in one go and barely varies; a gravel shoulder is
     // tipped, spread and washed out in patches and varies a good deal more.
-    const amp = surface === 'gravel' ? 0.11 : PAVED[surface] === 1 ? 0.06 : 0.17;
+    const amp = surface === 'gravel' ? 0.11 : PAVED[surface] === 1 || surface === 'snow' ? 0.06 : 0.17;
     const lum = valueNoise(x * 0.0091, z * 0.0091, tintSeed + 7);
     const mot = fine > 0 ? valueNoise(x * 0.029, z * 0.029, tintSeed + 31) : 0;
     const k = 1 + lum * amp * 0.62 + mot * amp * 0.45 * fine;
@@ -860,6 +1001,7 @@ export function createTerrain(world, ground, opts = {}) {
     // Normalised bytes: four weights need a quarter of the bandwidth of four
     // floats, and a mask blend has nothing like 24 bits of meaning in it.
     if (detail) geom.setAttribute('detailWeight', new THREE.BufferAttribute(new Uint8Array(V * 4), 4, true));
+    if (detail) geom.setAttribute('rockTint', new THREE.BufferAttribute(new Uint8Array(V * 4), 4, true));
     geom.setIndex(indexFor(G));
     geom.boundingSphere = new THREE.Sphere();
     return geom;
@@ -932,6 +1074,7 @@ export function createTerrain(world, ground, opts = {}) {
     const nrm = job.geom.attributes.normal.array;
     const col = job.geom.attributes.color.array;
     const dtl = detail ? job.geom.attributes.detailWeight.array : null;
+    const rkt = detail ? job.geom.attributes.rockTint.array : null;
     let minY = job.minY, maxY = job.maxY;
     do {
       const a = job.row;
@@ -945,14 +1088,14 @@ export function createTerrain(world, ground, opts = {}) {
           // vertices a neighbour, so height and material are all anyone reads.
           if (ringMat) {
             const s = ground.sample(x, z, gs);
-            hgrid[v] = s.y; mgrid[v] = MCODE[s.surface] || 0;
+            hgrid[v] = seaBed(x, z, s.y); mgrid[v] = MCODE[s.surface] || 0;
           } else {
-            hgrid[v] = ground.heightAt(x, z); mgrid[v] = 0;
+            hgrid[v] = seaBed(x, z, ground.heightAt(x, z)); mgrid[v] = 0;
           }
           continue;
         }
         const s = ground.sample(x, z, gs);
-        const y = s.y, nx = s.nx, ny = s.ny, nz = s.nz, surface = s.surface;
+        const y = seaBed(x, z, s.y), nx = s.nx, ny = s.ny, nz = s.nz, surface = s.surface;
         hgrid[v] = y; mgrid[v] = MCODE[surface] || 0;
         const o = v * 3;
         pos[o] = lx; pos[o + 1] = y; pos[o + 2] = lz;
@@ -979,6 +1122,14 @@ export function createTerrain(world, ground, opts = {}) {
 
         tint(surface, x, z, ny, y, crest, fine, roadMix, rgb);
         if (dtl) weigh(surface, ny, v * 4, dtl);
+        if (rkt) {
+          // bw still holds this vertex's weights: tint() just asked palette().
+          const wD = bw[BIOME.desert], wA = bw[BIOME.alpine], wR = 1 - wD - wA, o4 = v * 4;
+          rkt[o4] = (ROCK_L[0] * wR + RED_ROCK_L[0] * wD + GRANITE_L[0] * wA) * 510;
+          rkt[o4 + 1] = (ROCK_L[1] * wR + RED_ROCK_L[1] * wD + GRANITE_L[1] * wA) * 510;
+          rkt[o4 + 2] = (ROCK_L[2] * wR + RED_ROCK_L[2] * wD + GRANITE_L[2] * wA) * 510;
+          rkt[o4 + 3] = wD * 255;
+        }
         // Verge wear. The strip of grass just past a road's shoulder is where
         // wheels drop off, walkers walk and the mower scalps, so it is shorter,
         // paler and dustier than the field behind it. Measured from the edge
@@ -1040,6 +1191,7 @@ export function createTerrain(world, ground, opts = {}) {
     const nrm = geom.attributes.normal.array;
     const col = geom.attributes.color.array;
     const dtl = detail ? geom.attributes.detailWeight.array : null;
+    const rkt = detail ? geom.attributes.rockTint.array : null;
 
     // Creases, then mud, then the colour space.
     //
@@ -1105,6 +1257,8 @@ export function createTerrain(world, ground, opts = {}) {
           const s4 = (ca * D + cb) * 4, d4 = (a * D + b) * 4;
           dtl[d4] = dtl[s4]; dtl[d4 + 1] = dtl[s4 + 1];
           dtl[d4 + 2] = dtl[s4 + 2]; dtl[d4 + 3] = dtl[s4 + 3];
+          rkt[d4] = rkt[s4]; rkt[d4 + 1] = rkt[s4 + 1];
+          rkt[d4 + 2] = rkt[s4 + 2]; rkt[d4 + 3] = rkt[s4 + 3];
         }
       }
     }
@@ -1113,6 +1267,7 @@ export function createTerrain(world, ground, opts = {}) {
     geom.attributes.normal.needsUpdate = true;
     geom.attributes.color.needsUpdate = true;
     if (dtl) geom.attributes.detailWeight.needsUpdate = true;
+    if (rkt) geom.attributes.rockTint.needsUpdate = true;
 
     // Set by hand rather than computeBoundingSphere(): the extents are already
     // known from the sampling pass, and this runs for every chunk built.
@@ -1373,6 +1528,169 @@ export function createTerrain(world, ground, opts = {}) {
     };
   })();
 
+
+  // =========================================================================
+  // The sea
+  // =========================================================================
+  // One plane at sea level that follows the camera, drawn only where the
+  // biome field says there is CONNECTED sea (so an inland hollow below sea
+  // level stays dry land), coloured by the true depth under it: turquoise in
+  // the shallows, near-black blue past ten metres, a foam line at the water's
+  // edge that breathes in and out with the swell. The surface is Phong — the
+  // sun's glitter is a specular highlight on a wave normal built from two
+  // scrolling tiles — with a Fresnel mix toward the sky colours sky.js
+  // publishes on the scene, so a grazing view is a mirror and a steep one is
+  // water. Two triangles and one draw call, and only while the camera is
+  // within a view distance of the coast; fog and haze come from three's own
+  // chunks, which sky.js has already replaced.
+
+  const WATER_V_PARS = `
+varying vec3 vOrW;
+`;
+  const WATER_V_MAIN = `
+vOrW = ( modelMatrix * vec4( transformed, 1.0 ) ).xyz;
+`;
+  const WATER_F_PARS = `
+uniform sampler2D orSea;
+uniform vec4 orSeaBox;     // x0, z0, 1/width, 1/depth (m)
+uniform sampler2D orWave;
+uniform float orWTime;
+uniform vec3 orSkyZ;
+uniform vec3 orSkyH;
+varying vec3 vOrW;
+`;
+  const WATER_F_COLOUR = `
+vec4 orS = texture2D( orSea, ( vOrW.xz - orSeaBox.xy ) * orSeaBox.zw );
+if ( orS.g < 0.5 ) discard;
+float orD = orS.r * orS.r * 30.0;
+float orT = orWTime;
+diffuseColor.rgb = mix( vec3( 0.075, 0.36, 0.38 ), vec3( 0.010, 0.058, 0.110 ), smoothstep( 0.4, 11.0, orD ) );
+// The foam line breathes with the swell, and is broken by the same tile the
+// waves are made of, so it is lacy rather than a painted stripe.
+float orLap = 0.45 + 0.30 * sin( orT * 0.9 + dot( vOrW.xz, vec2( 0.021, 0.034 ) ) );
+float orFn = texture2D( orWave, vOrW.xz / 17.0 + vec2( orT * 0.011, orT * 0.006 ) ).r;
+float orFoam = ( 1.0 - smoothstep( 0.0, orLap, orD ) ) * smoothstep( 0.30, 0.62, orFn + 0.2 );
+diffuseColor.rgb = mix( diffuseColor.rgb, vec3( 0.90, 0.94, 0.95 ), orFoam * 0.9 );
+diffuseColor.a = clamp( smoothstep( 0.02, 0.5, orD ) * 0.96 + orFoam * 0.4, 0.0, 1.0 );
+`;
+  const WATER_F_NORMAL = `
+vec2 orG = ( texture2D( orWave, vOrW.xz / 23.0 + vec2( orT * 0.013, orT * 0.008 ) ).ba - 0.5 ) * 0.9
+         + ( texture2D( orWave, vOrW.xz / 7.3 - vec2( orT * 0.019, - orT * 0.011 ) ).ba - 0.5 ) * 0.5;
+// Calmer with distance: the tiles alias into glitter-noise long before they
+// fade in the mip chain, and a far sea is flat to the eye anyway.
+orG *= 1.0 - 0.75 * smoothstep( 60.0, 650.0, length( vOrW - cameraPosition ) );
+vec3 orNW = normalize( vec3( orG.x, 1.0, orG.y ) );
+normal = normalize( ( viewMatrix * vec4( orNW, 0.0 ) ).xyz );
+`;
+  const WATER_F_REFLECT = `
+{
+  vec3 orV = normalize( cameraPosition - vOrW );
+  float orFr = 0.03 + 0.97 * pow( 1.0 - clamp( dot( orV, orNW ), 0.0, 1.0 ), 5.0 );
+  vec3 orR = reflect( - orV, orNW );
+  vec3 orSky = mix( orSkyH, orSkyZ, smoothstep( 0.0, 0.55, orR.y ) );
+  outgoingLight = mix( outgoingLight, orSky, orFr * 0.8 * ( 1.0 - orFoam ) );
+}
+`;
+
+  const water = (() => {
+    if (!bio || !bio.seaTexture) return null;
+    const st = bio.seaTexture();
+    const seaTex = new THREE.DataTexture(st.px, st.width, st.height, THREE.RGBAFormat);
+    seaTex.colorSpace = THREE.NoColorSpace;
+    seaTex.wrapS = seaTex.wrapT = THREE.ClampToEdgeWrapping;
+    seaTex.magFilter = THREE.LinearFilter;
+    seaTex.minFilter = THREE.LinearMipmapLinearFilter;
+    seaTex.generateMipmaps = true;
+    seaTex.needsUpdate = true;
+
+    // Waves: a tiling height field packed as a normal in B and A, and a
+    // separate tiling noise in R for the foam.
+    const WW = 256;
+    const wseed = ((terrain.seed ?? 0) | 0) + 7717;
+    const wpx = new Uint8Array(WW * WW * 4);
+    const wh = new Float32Array(WW * WW);
+    for (let j = 0; j < WW; j++) {
+      const v = j / WW;
+      for (let i = 0; i < WW; i++) {
+        const u = i / WW, c = j * WW + i;
+        wh[c] = tileFbm(u * 6, v * 6, 6, 6, wseed, 4) + tileNoise(u * 21, v * 13, 21, 13, wseed + 3) * 0.18;
+        wpx[c * 4] = clamp(tileFbm(u * 11, v * 11, 11, 11, wseed + 5, 3) * 0.5 + 0.5, 0, 1) * 255;
+        wpx[c * 4 + 1] = 128;
+      }
+    }
+    packNormal(wh, WW, wpx, 0.55);
+    const waveTex = makeTexture(wpx, WW);
+
+    const uniforms = {
+      orSea: { value: seaTex },
+      orSeaBox: { value: new THREE.Vector4(st.x0, st.z0, 1 / (st.x1 - st.x0), 1 / (st.z1 - st.z0)) },
+      orWave: { value: waveTex },
+      orWTime: { value: 0 },
+      orSkyZ: { value: new THREE.Color(0.22, 0.40, 0.70) },
+      orSkyH: { value: new THREE.Color(0.55, 0.66, 0.78) },
+    };
+    const mat = new THREE.MeshPhongMaterial({
+      color: 0xffffff, specular: 0xfff1d8, shininess: 160, transparent: true,
+    });
+    mat.onBeforeCompile = (shader) => {
+      Object.assign(shader.uniforms, uniforms);
+      const v = shader.vertexShader, f = shader.fragmentShader;
+      if (v.indexOf('#include <project_vertex>') < 0 || f.indexOf('#include <color_fragment>') < 0 ||
+          f.indexOf('#include <normal_fragment_maps>') < 0 || f.indexOf('#include <opaque_fragment>') < 0) return;
+      shader.vertexShader = v
+        .replace('#include <common>', `#include <common>\n${WATER_V_PARS}`)
+        .replace('#include <project_vertex>', `#include <project_vertex>\n${WATER_V_MAIN}`);
+      shader.fragmentShader = f
+        .replace('#include <common>', `#include <common>\n${WATER_F_PARS}`)
+        .replace('#include <color_fragment>', `#include <color_fragment>\n${WATER_F_COLOUR}`)
+        .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>\n${WATER_F_NORMAL}`)
+        .replace('#include <opaque_fragment>', `${WATER_F_REFLECT}\n#include <opaque_fragment>`);
+    };
+    mat.customProgramCacheKey = () => 'openroad-sea';
+
+    const geom = new THREE.PlaneGeometry(1, 1);
+    geom.rotateX(-Math.PI / 2);
+    const mesh = new THREE.Mesh(geom, mat);
+    mesh.name = 'sea';
+    mesh.frustumCulled = false;
+    mesh.castShadow = false;
+    mesh.receiveShadow = false;
+    // First of the transparent pass, so smoke, dust and splash drawn after
+    // it blend over the water instead of being painted out by it.
+    mesh.renderOrder = -1;
+    mesh.visible = false;
+    mesh.onBeforeRender = (r, scene) => {
+      const sky = scene && scene.userData ? scene.userData.sky : null;
+      if (sky && sky.zenith && sky.horizon) {
+        uniforms.orSkyZ.value.copy(sky.zenith);
+        uniforms.orSkyH.value.copy(sky.horizon);
+      }
+    };
+    group.add(mesh);
+
+    let time = 0;
+    const coast = bio.seaBounds.zMin + 380;   // no sea north of here
+    function update(cameraPos, dt) {
+      time += dt > 0 && dt < 0.25 ? dt : 0;
+      if (time > 3600) time -= 3600;
+      uniforms.orWTime.value = time;
+      const R = stats.viewDistance + 300;
+      mesh.visible = cameraPos.z + R > coast;
+      if (!mesh.visible) return;
+      // Snapped, so the plane's own vertices never swim; everything drawn on
+      // it is in world coordinates anyway.
+      mesh.position.set(Math.round(cameraPos.x / 64) * 64, bio.seaLevel, Math.round(cameraPos.z / 64) * 64);
+      mesh.scale.set(R * 2, 1, R * 2);
+      mesh.updateMatrix();
+    }
+    mesh.matrixAutoUpdate = false;
+    function dispose() {
+      group.remove(mesh);
+      geom.dispose(); mat.dispose(); seaTex.dispose(); waveTex.dispose();
+    }
+    return { mesh, update, dispose, material: mat };
+  })();
+
   // =========================================================================
   // Streaming
   // =========================================================================
@@ -1483,6 +1801,7 @@ export function createTerrain(world, ground, opts = {}) {
       primed = true;
       drain(opts.primeMs ?? 520);
       grass.update(cameraPos, 0, 120);
+      if (water) water.update(cameraPos, 0);
       return;
     }
     // Streaming stutter is exactly what you notice from a moving car, so frames
@@ -1490,6 +1809,7 @@ export function createTerrain(world, ground, opts = {}) {
     const step = dt === undefined ? 1 / 60 : dt;
     const k = step > 0.026 ? 0.4 : step < 0.015 ? 1.5 : 1;
     const spent = drain(budgetMs * k);
+    if (water) water.update(cameraPos, step);
     // Grass gets its own small budget, but yields on a frame that chunk
     // streaming has already filled: new tiles appear at the far edge of the
     // ring, fifty metres out and shrunk to nothing by the fade, so a frame's
@@ -1525,6 +1845,7 @@ export function createTerrain(world, ground, opts = {}) {
   function dispose() {
     cancelFill();
     grass.dispose(true);
+    if (water) water.dispose();
     for (const rec of chunks.values()) {
       if (rec.mesh) { group.remove(rec.mesh); rec.mesh.geometry.dispose(); rec.mesh = null; }
     }
@@ -1542,8 +1863,12 @@ export function createTerrain(world, ground, opts = {}) {
   grass.build(QUALITY[quality].grass);
   stats.grass = grass.stats;
 
+  stats.sea = !!water;
+
   return {
     group, update, setQuality, dispose, stats, material,
+    /** The sea surface, or null on a world with no coast. */
+    water: water ? water.mesh : null,
     /** Wind strength for the grass, 0..~2. props.js sways the trees. */
     setWind: (k) => grass.setWind(k),
   };

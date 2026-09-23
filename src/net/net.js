@@ -14,7 +14,7 @@
  * generation-1 behaviour: no ages, no car bodies, nothing it would misread.
  */
 
-import { encodeState, MSG_SNAPSHOT, cleanName, cleanCarId, cleanColour, PROTO_V2 } from './protocol.js';
+import { encodeState, MSG_SNAPSHOT, safeName, cleanCarId, cleanColour, PROTO_V2 } from './protocol.js';
 import { createRoom } from './room.js';
 
 const BACKOFF = [500, 1000, 2000, 4000, 8000, 15000];
@@ -24,8 +24,15 @@ const PING_FAST = 250, PING_FAST_N = 6, PING_SLOW = 2000;
 // While the game loop is not running (a background tab: no rAF) the server
 // would drop us after 8 s of silence, and everyone else would see a "left"
 // and a "joined" every time someone looked at another tab. A timer keeps the
-// socket known to be alive; browsers throttle it to 1 Hz, which is plenty.
+// socket known to be alive; browsers throttle it to 1 Hz, which is plenty —
+// until the tab has been hidden five minutes, when Chrome's intensive
+// throttling runs chained timers once a MINUTE. So the snapshots that keep
+// arriving 20 times a second carry a keepalive too (see onmessage).
 const KEEPALIVE_MS = 2500;
+// The settings field reports every keystroke. A name goes on the wire only
+// once it has stopped changing for this long, so a half-typed name never
+// reaches anybody (and the server allows one change per 20 s on top).
+const NAME_SETTLE_MS = 1500;
 
 /** The URL with this client's generation on it, unless it already has one. */
 export function withProto(url) {
@@ -52,14 +59,22 @@ export function createNet(opts = {}) {
   let welcomed = false;
   let pingsSent = 0, nextPing = 0;
   let lastUpdate = 0;
+  let lastKeep = 0;
   let carId = cleanCarId(opts.carId);
   let colour = cleanColour(opts.colour);
-  let name = cleanName(opts.name, 'Driver');
+  let name = safeName(opts.name, 'Driver');
+  let nameDirty = false, nameAt = 0;
   // id -> { id, name, car, colour }. Everyone else in the room, as the server
   // described them. The car's live pose is in room.cars; this is who they are.
   const people = new Map();
   let onRoster = opts.onRoster || null;
   let onEvent = opts.onEvent || null;
+  // The party game the room is running (server/modes.js), exactly as the room
+  // last described it, or null. Only a generation-2 room sends one.
+  let mode = null;
+  let modeAt = 0;                   // local ms it arrived
+  let onMode = opts.onMode || null;
+  let onEmote = opts.onEmote || null;
 
   function connect() {
     if (!url || state === 'connecting' || state === 'live' || state === 'off') return;
@@ -80,6 +95,7 @@ export function createNet(opts = {}) {
       tries = 0;
       epoch = now();
       welcomed = false;
+      nameDirty = false;           // the join carries the current name
       send(JSON.stringify({
         t: 'join', proto: PROTO_V2, seed: opts.seed ?? 0,
         name, carId, colour,
@@ -87,6 +103,7 @@ export function createNet(opts = {}) {
     };
     s.onmessage = ev => {
       if (ws !== s) return;
+      keepalive(now());
       const d = ev.data;
       if (typeof d === 'string') return control(d);
       const buf = d instanceof ArrayBuffer ? d : (d && d.buffer) || null;
@@ -131,6 +148,7 @@ export function createNet(opts = {}) {
       people.clear();
       if (Array.isArray(m.players)) for (const p of m.players) learn(p, false);
       welcomed = true;
+      setMode(m.mode && typeof m.mode === 'object' ? m.mode : null, { k: 'welcome' });
       pingsSent = 0;
       nextPing = now();
       roster();
@@ -158,7 +176,19 @@ export function createNet(opts = {}) {
       if (typeof m.c === 'number' && typeof m.s === 'number') room.onPong(m.c + epoch, m.s, now());
     } else if (m.t === 'error') {
       lastErr = String(m.msg || 'refused');
+    } else if (m.t === 'mode' && serverProto === PROTO_V2) {
+      setMode(m.kind ? m : null, m.ev && typeof m.ev === 'object' ? m.ev : null);
+    } else if (m.t === 'emote' && serverProto === PROTO_V2) {
+      if (onEmote && typeof m.id === 'number' && Number.isInteger(m.e)) {
+        try { onEmote(m.id, m.e); } catch { /* a UI bug must not kill the socket */ }
+      }
     }
+  }
+
+  function setMode(m, ev) {
+    mode = m;
+    modeAt = now();
+    if (onMode) { try { onMode(mode, ev); } catch (err) { console.error('[open road] party game:', err); } }
   }
 
   function roster() {
@@ -179,6 +209,7 @@ export function createNet(opts = {}) {
     room.reset();
     people.clear();
     if (had) roster();
+    if (mode) setMode(null, { k: 'lost' });
     retryAt = now() + BACKOFF[Math.min(tries, BACKOFF.length - 1)];
     tries++;
   }
@@ -190,6 +221,13 @@ export function createNet(opts = {}) {
 
   function ping() {
     send(JSON.stringify({ t: 'ping', c: (now() - epoch) | 0 }));
+  }
+
+  /** A ping when the game loop has gone quiet, at most once a KEEPALIVE_MS. */
+  function keepalive(t) {
+    if (state !== 'live' || t - lastUpdate <= KEEPALIVE_MS * 0.8 || t - lastKeep < KEEPALIVE_MS) return;
+    lastKeep = t;
+    ping();
   }
 
   function pumpPings(t) {
@@ -212,6 +250,10 @@ export function createNet(opts = {}) {
 
     if (state !== 'live') return;
     pumpPings(t);
+    if (nameDirty && welcomed && t - nameAt >= NAME_SETTLE_MS) {
+      nameDirty = false;
+      send(JSON.stringify({ t: 'name', name }));
+    }
     if (!car) return;
     // Fixed cadence off a real clock, NOT off the physics accumulator — the
     // substep count varies with frame time, so driving the send rate from it
@@ -223,12 +265,10 @@ export function createNet(opts = {}) {
     send(encodeState(car, (t - epoch) | 0));
   }
 
-  let keepalive = null;
+  let keepTimer = null;
   const si = opts.setInterval || (typeof setInterval === 'function' ? setInterval : null);
   if (si && opts.keepalive !== false) {
-    keepalive = si(() => {
-      if (state === 'live' && now() - lastUpdate > KEEPALIVE_MS * 0.8) ping();
-    }, KEEPALIVE_MS);
+    keepTimer = si(() => keepalive(now()), KEEPALIVE_MS);
   }
 
   return {
@@ -251,9 +291,14 @@ export function createNet(opts = {}) {
      *  on every screen (a race start). null until the first sync. */
     serverNow() { return room.serverNow(now()); },
     update,
+    /** A new name. Sent once it has settled (NAME_SETTLE_MS), and carried
+     *  by the next join if the socket is down. */
     rename(n) {
-      name = cleanName(n, 'Driver');
-      send(JSON.stringify({ t: 'name', name }));
+      const next = safeName(n, name);
+      if (next === name && !nameDirty) return;
+      name = next;
+      nameDirty = true;
+      nameAt = now();
     },
     /** The car and paint everyone else should see. Sent now and on every rejoin. */
     setCar(id, col) {
@@ -263,6 +308,42 @@ export function createNet(opts = {}) {
       if (serverProto === PROTO_V2) send(JSON.stringify({ t: 'car', car: carId, colour }));
     },
     ping,
+    /** The party game the room is running, as it last said, or null. */
+    get mode() { return mode; },
+    /** performance.now() when that arrived. */
+    get modeAt() { return modeAt; },
+    /** fn(mode, ev): the game changed; ev says what happened ({ k: ... }). */
+    set onMode(fn) { onMode = fn; },
+    /** fn(id, e): player `id` sent emote e (0-3). */
+    set onEmote(fn) { onEmote = fn; },
+    /**
+     * Ask the room for something in a party game. Only the shapes
+     * server/modes.js understands go out, and only numbers and ids — never
+     * anything a player typed. Returns false when there is no room to ask.
+     */
+    sendMode(a, args = {}) {
+      if (serverProto !== PROTO_V2 || !welcomed) return false;
+      const m = { t: 'mode', a };
+      if (a === 'race') {
+        m.race = String(args.race || ''); m.n = args.n | 0;
+        // Where the gates are, to the metre: the room checks each gate report
+        // against the positions it relays. 8 gates is ~180 bytes on the wire.
+        m.gates = (args.gates || []).slice(0, 32).map((q) => [Math.round(q[0]), Math.round(q[1])]);
+        if (args.again) m.again = true;
+      }
+      else if (a === 'coins') {
+        m.pts = (args.pts || []).slice(0, 16).map((q) => [Math.round(q[0] * 10) / 10, Math.round(q[1] * 10) / 10]);
+        if (args.again) m.again = true;
+      } else if (a === 'tag') { if (args.again) m.again = true; }
+      else if (a === 'gate') { m.g = args.g | 0; m.ms = Math.max(0, Math.round(args.ms || 0)); }
+      else if (a !== 'join' && a !== 'leave') return false;
+      return send(JSON.stringify(m));
+    },
+    /** One of the four preset reactions. */
+    emote(e) {
+      if (serverProto !== PROTO_V2 || !welcomed || !(e >= 0 && e < 4)) return false;
+      return send(JSON.stringify({ t: 'emote', e: e | 0 }));
+    },
     enable() { if (state === 'off') { state = 'idle'; tries = 0; } },
     disable() {
       state = 'off';
@@ -270,12 +351,13 @@ export function createNet(opts = {}) {
       const had = people.size;
       people.clear();
       if (had) roster();
+      if (mode) setMode(null, { k: 'lost' });
       if (ws) { try { ws.close(); } catch { /* already gone */ } ws = null; }
     },
     dispose() {
       this.disable();
-      if (keepalive && typeof clearInterval === 'function') { try { clearInterval(keepalive); } catch { /* fine */ } }
-      keepalive = null;
+      if (keepTimer && typeof clearInterval === 'function') { try { clearInterval(keepTimer); } catch { /* fine */ } }
+      keepTimer = null;
     },
   };
 }

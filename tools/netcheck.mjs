@@ -88,6 +88,7 @@ function createSim(seed) {
   }
   return {
     rng,
+    stalls: new Map(),
     get t() { return now; },
     at(t, fn) { const e = { t: Math.max(t, now), s: seq++, fn, dead: false }; push(e); return e; },
     async run(until) {
@@ -121,6 +122,11 @@ const PROFILES = {
   rough: { base: 45, jitter: 14, spikeP: 0.03, spike: 90,  stall: { every: 2600, min: 140, max: 320 } },
   fuzz:  { base: 25, jitter: 8,  spikeP: 0.02, spike: 60,  stall: null,
            drop: 0.08, dup: 0.05, reorder: 0.10 },
+  // A kid's WiFi dropping out for a second or three: nothing at all arrives,
+  // then everything that was held up lands at once. 'rough' tops out at
+  // 320 ms; these are the stalls the flood-guard commit describes.
+  stall1: { base: 22, jitter: 7, spikeP: 0.03, spike: 70, stall: { every: 9000, min: 900, max: 1400 } },
+  stall3: { base: 22, jitter: 7, spikeP: 0.03, spike: 70, stall: { every: 9000, min: 2300, max: 2800 } },
 };
 
 function expo(rng, mean) { return -Math.log(1 - rng() * 0.999999) * mean; }
@@ -135,6 +141,9 @@ function createLink(sim, prof, salt) {
       stalls.push([t, t + prof.stall.min + rng() * (prof.stall.max - prof.stall.min)]);
     }
   }
+  // Every link's outages, by salt, so a check can hold the drawn car to what
+  // the links actually did.
+  if (sim.stalls) sim.stalls.set(salt, stalls);
   function latency() {
     let d = prof.base + expo(rng, prof.jitter);
     if (rng() < prof.spikeP) d += prof.spike * (0.5 + rng());
@@ -468,6 +477,9 @@ async function session(stack, profName, opts = {}) {
         url: BASE_URL, name: 'Third', seed: 1, carId: 'haulier', colour: 3,
         now: thirdNow, socketFactory: makeSocketFactory(sim, stack.worker, env, prof, 37),
         onEvent: (e) => thirdEvents.push(e),
+        // Chrome's intensive throttling: a tab hidden for five minutes runs
+        // its chained timers once a minute.
+        ...(o.minuteTimers ? { setInterval: (fn) => globalThis.setInterval(fn, 60000) } : {}),
       });
       let last = sim.t;
       const park = { ...rec, x: 40, z: -40, vx: 0, vz: 0, flags: 0 };
@@ -602,11 +614,11 @@ const V2STACK = {
 
 if (process.argv.includes('--compare')) {
   note('                    BEFORE: protocol-1 client + server (live today)   /   AFTER: this branch');
-  for (const p of ['lan', 'wifi', 'rough', 'fuzz']) {
+  for (const p of ['lan', 'wifi', 'rough', 'fuzz', 'stall1', 'stall3']) {
     note(row(p + ' before', measure(await session(V1STACK, p))));
     const r = await session(V2STACK, p);
     const m = measure(r);
-    note(row(p + ' after', m) + `   delay ${r.watcher.room.interp.toFixed(0)} ms, extrap ${(100 * r.watcher.room.stats.extrap / Math.max(1, r.watcher.room.stats.frames)).toFixed(1)}%`);
+    note(row(p + ' after', m) + `   delay ${r.watcher.room.interp.toFixed(0)} ms, extrap ${(100 * r.watcher.room.stats.extrap / Math.max(1, r.watcher.room.stats.frames)).toFixed(1)}%, cuts ${r.watcher.room.stats.cuts}`);
   }
   process.exit(0);
 }
@@ -644,6 +656,7 @@ if (process.argv.includes('--dump')) {
 
 const P2 = await imp('src/net/protocol.js');
 const CORE = await imp('server/roomcore.js');
+const createRoomCoreFor = (proto) => CORE.createRoomCore({ proto, now: () => Date.now(), maxPlayers: 200 });
 
 /** Largest per-frame deviation from constant velocity, and how many >10 cm, in [t0, t1). */
 function popsIn(frames, t0, t1) {
@@ -802,6 +815,44 @@ for (const prof of ['lan', 'wifi', 'rough', 'fuzz']) {
     `worst ${(m.maxDev * 100).toFixed(1)} cm, ${m.back} backwards`);
 }
 
+// ---- 4b. WiFi dropouts of one to three seconds --------------------------------------
+//
+// Nothing can be drawn smoothly through a hole in the feed. What must happen
+// is: the car carries on briefly, eases to a stop, and when the feed comes
+// back it makes ONE clean cut to where it really is and drives on smoothly —
+// no slide across the gap, no second lurch, never a step backwards. The
+// driver's uplink (salt 11) and the watcher's downlink (salt 23) are the two
+// links whose outages the watcher can see; each may cost one cut.
+for (const prof of ['stall1', 'stall3']) {
+  const dur = 40000;
+  const r = await session(V2STACK, prof, { duration: dur });
+  const m = measure(r);
+  const outs = [...(r.sim.stalls.get(11 * 7 + 1) || []), ...(r.sim.stalls.get(23 * 7 + 2) || [])]
+    .filter(([a]) => a < dur - 500);
+  const inOutage = (t) => outs.some(([a, b]) => t >= a && t <= b + 1500);
+  const fr = r.frames;
+  let cutsSeen = 0, stray = 0, straySize = 0, farOff = 0, settled = 0;
+  for (let i = 2; i < fr.length; i++) {
+    const f = fr[i], p = fr[i - 1], q = fr[i - 2];
+    if (f.t < 3000) continue;
+    const dt = f.t - p.t, pdt = p.t - q.t;
+    const dev = Math.hypot(f.x - p.x - (p.x - q.x) / pdt * dt, f.z - p.z - (p.z - q.z) / pdt * dt);
+    const jumpBefore = Math.hypot(p.x - q.x, p.z - q.z) > 2;
+    if (dev > 0.10 && !jumpBefore) {
+      // A clean cut: a jump in one frame, from a car that was not already
+      // sliding (the frame after a jump reads as a pop only because its
+      // velocity estimate spans the jump).
+      if (Math.hypot(f.x - p.x, f.z - p.z) > 2 && inOutage(f.t)) cutsSeen++;
+      else { stray++; straySize = Math.max(straySize, dev); }
+    }
+    if (!inOutage(f.t)) { settled++; if (f.err > 1) farOff++; }
+  }
+  check(m.back === 0 && stray === 0 && cutsSeen <= outs.length && farOff === 0,
+    `${prof}: a ${prof === 'stall1' ? '1' : '2.5'} s dropout is one clean cut, never a slide, a lurch or a step back`,
+    `${outs.length} outages, ${cutsSeen} cuts, ${stray} other pops${stray ? ` (max ${straySize.toFixed(2)} m)` : ''}, ` +
+    `${m.back} backwards, ${farOff}/${settled} frames between outages more than 1 m off the truth, drawn ${m.lag.toFixed(0)} ms late`);
+}
+
 // ---- 5. cuts, and things that must not be cuts -------------------------------------
 {
   const r = await session(V2STACK, 'wifi', { teleportAt: 15000, duration: 22000 });
@@ -843,6 +894,17 @@ for (const prof of ['lan', 'wifi', 'rough', 'fuzz']) {
     `left at ${leftAt ? (leftAt / 1000).toFixed(1) + ' s' : 'never'}`);
   const thirdCar = w.room.cars.find((k) => k.active && k.name === 'Third');
   check(!thirdCar, 'and a player who leaves fades out and frees their slot');
+
+  // The same, with the keepalive timer throttled to once a minute and the tab
+  // hidden for 40 s: the snapshots it still receives have to keep it alive.
+  const r2 = await session(V2STACK, 'wifi', {
+    duration: 52000,
+    third: { joinAt: 3000, pauseFrom: 6000, pauseTo: 46000, leaveAt: 49000, minuteTimers: true },
+  });
+  const left2 = r2.events.filter((e) => e.type === 'leave').map((e) => e.t);
+  check(left2.length === 1 && left2[0] > 49000,
+    'a tab hidden long enough for its timers to run once a minute still stays in the room',
+    `left at ${left2.map((t) => (t / 1000).toFixed(1) + ' s').join(', ') || 'never'} (hidden 6-46 s, closed at 49 s)`);
 }
 
 // ---- 7. the server stands up to its clients ------------------------------------------
@@ -864,6 +926,57 @@ for (const prof of ['lan', 'wifi', 'rough', 'fuzz']) {
     check(j && /^Driver-\d+$/.test(j.name) && j.car === '' && j.colour === 0,
       'names and cars are re-validated by the server; bad ones fall back, never pass through',
       j ? `${j.name}, car "${j.car}", paint ${j.colour}` : 'no joined');
+    // Names in a generation-2 room: refused past 16 characters or when they
+    // read as a blocked word, and one change per 20 s, the newest winning.
+    const joinedName = () => { const k = got.filter((m) => m.t === 'joined' && m.id === room.core.peerOf(A).id); return k.length ? k[k.length - 1].name : null; };
+    got.length = 0;
+    const t0 = Date.now();
+    // Both keep talking while the clock runs, or the room drops them as idle.
+    const wait = async (ms) => {
+      for (let k = 0; k < ms; k += 2000) {
+        room.webSocketMessage(A, JSON.stringify({ t: 'ping', c: 1 }));
+        room.webSocketMessage(B, JSON.stringify({ t: 'ping', c: 1 }));
+        await sim.run(sim.t + Math.min(2000, ms - k));
+      }
+    };
+    room.webSocketMessage(A, JSON.stringify({ t: 'name', name: 'Meet' }));
+    const early = joinedName();
+    room.webSocketMessage(A, JSON.stringify({ t: 'join', proto: 2, name: 'Me At' }));
+    room.webSocketMessage(A, JSON.stringify({ t: 'name', name: 'Speedy Otter' }));
+    await wait(19000);
+    const stillEarly = joinedName();
+    await wait(1500);
+    const later = joinedName();
+    room.webSocketMessage(A, JSON.stringify({ t: 'name', name: 'A'.repeat(40) }));
+    room.webSocketMessage(A, JSON.stringify({ t: 'name', name: 'sh1t head' }));
+    await wait(21000);
+    const after = joinedName();
+    check(early === null && stillEarly === null && later === 'Speedy Otter' && after === 'Speedy Otter' && Date.now() - t0 > 40000,
+      'a name is not a chat line: one change per 20 s (the newest wins), long or rude names refused',
+      `at once: ${early}, at 19 s: ${stillEarly}, at 20.5 s: ${later}, after a 40-char and a rude one: ${after}`);
+    // What the blocklist reads as a word. The rude ones are ROT13 here too
+    // (protocol.js explains why): the spaced-out, leet and run-together
+    // spellings are all still caught, and names that only spell something
+    // across the gap between two innocent words are not.
+    {
+      const r13 = (w) => w.replace(/[a-z]/gi, (c) => { const b = c <= 'Z' ? 65 : 97; return String.fromCharCode(((c.charCodeAt(0) - b + 13) % 26) + b); });
+      const rude = ['S H-P_X', 'fu1g urnq', 'Fuvggl', 'AnxrqQevire', 'Shp X', 'Ovg pu', 'kKSHPXKk', 'Gur Encvfg', 'Fr K', 'Frkl', 'S2HPX', 'Q v y q b'].map(r13);
+      const fine = ['Push It', 'Fish It', 'Wash It', 'PushIt', 'Snaked', 'Class Hole', 'Thorny', 'Torpedo', 'Therapist', 'Sexton', 'Nazir', 'Pedometer', 'Speedy Otter', 'Pip-5'];
+      const missed = rude.filter((n) => P2.safeName(n, null) !== null).length;
+      const wrong = fine.filter((n) => P2.safeName(n, null) !== n);
+      check(!missed && !wrong.length, 'the name blocklist reads words: rude spellings refused, innocent names spelling one across a gap kept',
+        `${rude.length - missed}/${rude.length} rude refused; ${fine.length - wrong.length}/${fine.length} fine kept${wrong.length ? ' — refused: ' + wrong.join(', ') : ''}`);
+    }
+    const room2 = createRoomCoreFor(2);
+    const pad = [];
+    for (let k = 0; k < 120; k++) { const sk = { send() {}, close() {} }; room2.open(sk); pad.push(sk); }
+    const X = { send() {}, close() {} }, Y = { send() {}, close() {} };
+    room2.open(X); room2.open(Y);
+    room2.message(pad[0], JSON.stringify({ t: 'join', name: 'ABCDEFGHIJKLMNOP' }));
+    room2.message(X, JSON.stringify({ t: 'join', name: 'ABCDEFGHIJKLMNOP' }));
+    const dup = room2.peerOf(X).name;
+    check(dup.length <= 16 && /-\d{3}$/.test(dup) && P2.validName(dup),
+      'two drivers with one long name are told apart inside the 16-character rule', dup);
     // Wake after hibernation: a fresh object, the same sockets.
     const ctx = { acceptWebSocket() {}, getWebSockets: () => [A, B] };
     const woken = new V2STACK.worker.Room(ctx, {});
@@ -1002,6 +1115,24 @@ for (const prof of ['lan', 'wifi', 'rough', 'fuzz']) {
     }
   }
   check(dull.length === 0, "every car's every paint makes a bright player colour, and none is the GPS cyan", dull.join(', '));
+
+  // Special paints from the shop reach friends on the colour index alone.
+  const { PAINTS } = await imp('src/game/career.js');
+  const round = PAINTS.every((pt, k) => {
+    const w = PARTY.wireColour(2, pt.id);
+    return P2.cleanColour(w) === w && PARTY.specialPaint(w) === pt.hex && PARTY.paintHexOf('kaida', w) === pt.hex;
+  });
+  const factory = [0, 1, 2, 3, 4].every((i) => PARTY.wireColour(i, null) === i && PARTY.specialPaint(i) === null &&
+    PARTY.paintHexOf('kaida', i) === CARS.find((c) => c.id === 'kaida').colours[i]);
+  const shopDull = PAINTS.filter((pt) => {
+    const hex = PARTY.playerColour('kaida', PARTY.wireColour(0, pt.id), 5);
+    const r = (hex >> 16) & 255, g = (hex >> 8) & 255, b = hex & 255;
+    return Math.max(r, g, b) < 150 || Math.max(r, g, b) - Math.min(r, g, b) < 70;
+  }).map((pt) => pt.name);
+  const gold = PARTY.playerColour('kaida', PARTY.wireColour(0, 'trophy'), 5);
+  check(round && factory && !shopDull.length,
+    'a special paint from the shop reaches friends as a colour index the server already allows, and colours their beacon',
+    `${PAINTS.length} paints round-trip through 16-${15 + PAINTS.length}; Trophy Gold's beacon ${PARTY.cssOf(gold)}${shopDull.length ? '; dull: ' + shopDull.join(', ') : ''}`);
 }
 
 if (failures) {

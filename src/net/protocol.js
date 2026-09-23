@@ -220,9 +220,85 @@ export function validName(s) {
   return typeof s === 'string' && NAME_RE.test(s) && !/\s{2,}/.test(s) && s.trim() === s;
 }
 
-/** Never trusted from the wire — the server re-runs this and its answer wins. */
+/**
+ * Never trusted from the wire — the server re-runs this and its answer wins.
+ *
+ * This is the generation-1 rule, kept exactly as the live Worker runs it (a
+ * protocol-1 room must send what it always sent): control characters and
+ * non-ASCII are stripped, and anything past 16 characters is cut off rather
+ * than refused. A generation-2 room uses safeName() below.
+ */
 export function cleanName(s, fallback) {
   if (typeof s !== 'string') return fallback;
   const t = s.normalize('NFKC').replace(/[^\x20-\x7E]/g, '').replace(/\s+/g, ' ').trim().slice(0, 16);
   return validName(t) ? t : fallback;
+}
+
+// Words no name may contain. ROT13, so the source of a kids' game does not
+// read as a list of swearwords; rot13() below turns them back at load.
+//
+// A name is read as WORDS: split at anything that is not a letter, and where
+// a lower-case letter meets a capital ('NakedDriver' is two words). Digits
+// read as the letters they imitate (0=o 1=i 3=e 4=a 5=s 7=t 8=b 9=g); any
+// other digit is a gap. Then each list matches in its own way:
+//
+//   SUB    anywhere inside one word ('Shitty', 'sh1t'), or starting at the
+//          start of a word and running on across the next ones — the spaced-
+//          out spellings: 'F U-C_K', 'Fuc K', 'Bit ch'.
+//   START  only where a word starts: these sit inside innocent words.
+//   WORD   only as whole words, or a run of whole words: 'Se X'.
+//
+// A match that starts in the MIDDLE of one word and runs into the next is
+// never one: 'Push It', 'Fish It' and 'Wash It' all spell a swearword across
+// the gap, and the version before this turned all three into 'Driver-7'
+// without a word of explanation.
+const SUB_R13 = 'shpx fuvg ovgpu phag chffl juber fyhg avttre avttn snttbg ergneq cravf intvan cbea ' +
+  'onfgneq jnaxre gjng qvyqb wvmm zbyrfg nffubyr qhzonff wnpxnff frkl ahqr fhvpvqr';
+// Inside real words: 'Snaked'.
+const START_R13 = 'anxrq';
+// Inside real words: 'Thorny', 'Torpedo', 'Therapist', 'Sexton', 'Nazir'.
+const WORD_R13 = 'anmv uvgyre gvgf cvff frk crqb ubeal encvfg';
+function rot13(w) {
+  return w.replace(/[a-z]/g, (c) => String.fromCharCode(((c.charCodeAt(0) - 97 + 13) % 26) + 97));
+}
+const BLOCK = [];
+for (const w of SUB_R13.split(' ')) BLOCK.push({ w: rot13(w), how: 'sub' });
+for (const w of START_R13.split(' ')) BLOCK.push({ w: rot13(w), how: 'start' });
+for (const w of WORD_R13.split(' ')) BLOCK.push({ w: rot13(w), how: 'word' });
+const LEET = { 0: 'o', 1: 'i', 3: 'e', 4: 'a', 5: 's', 7: 't', 8: 'b', 9: 'g' };
+
+/** True when a name reads as one of the blocked words (rules above). */
+export function blockedName(s) {
+  const words = String(s).replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase()
+    .replace(/[0-9]/g, (d) => LEET[d] || ' ')
+    .split(/[^a-z]+/).filter(Boolean);
+  const joined = words.join('');
+  // Where each word starts in `joined`, and where the last one ends.
+  const at = [0];
+  for (const w of words) at.push(at[at.length - 1] + w.length);
+  for (const { w, how } of BLOCK) {
+    for (let i = joined.indexOf(w); i >= 0; i = joined.indexOf(w, i + 1)) {
+      const end = i + w.length;
+      let k = 0;
+      while (at[k + 1] <= i) k++;                   // the word the match starts in
+      const atStart = at[k] === i;
+      const inOne = end <= at[k + 1];
+      if (how === 'sub' ? inOne || atStart : how === 'start' ? atStart : atStart && at.includes(end)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * The generation-2 name rule. The same normalising as cleanName, but a name
+ * over 16 characters is REFUSED, as the name rules above always said (a
+ * 40-character name used to arrive as its first 16), and so is a name that
+ * reads as a blocked word. Refused means `fallback`: the player still drives,
+ * as "Driver-7".
+ */
+export function safeName(s, fallback) {
+  if (typeof s !== 'string') return fallback;
+  const t = s.normalize('NFKC').replace(/[^\x20-\x7E]/g, '').replace(/\s+/g, ' ').trim();
+  if (t.length > 16 || !validName(t) || blockedName(t)) return fallback;
+  return t;
 }

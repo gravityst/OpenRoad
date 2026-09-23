@@ -20,6 +20,37 @@
 
 import { createRoadGraph } from './routes.js';
 import { CAR_BY_ID, STARTER } from '../vehicles/catalog.js';
+import { PAINTS, PAINT_BY_ID } from './career.js';
+
+/**
+ * Paint on the wire. A player's paint travels as the colour index the server
+ * already accepts and re-checks (0-31, protocol.js cleanColour): a factory
+ * colour is its index (every car has five), and a special paint from the shop
+ * is PAINT_WIRE + its place in career.js PAINTS. So a kid who saved up for
+ * Trophy Gold is Trophy Gold on every friend's screen, and nothing new — let
+ * alone anything a player typed — goes on the wire to carry it.
+ */
+export const PAINT_WIRE = 16;
+
+/** The number to send for a car in factory colour `index`, or wearing shop paint `paintId`. */
+export function wireColour(index, paintId) {
+  const k = paintId ? PAINTS.indexOf(PAINT_BY_ID[paintId]) : -1;
+  return k >= 0 ? PAINT_WIRE + k : (index | 0) % PAINT_WIRE;
+}
+
+/** The shop paint's hex a wire colour stands for, or null for a factory colour. */
+export function specialPaint(wire) {
+  const k = (wire | 0) - PAINT_WIRE;
+  return k >= 0 && k < PAINTS.length ? PAINTS[k].hex : null;
+}
+
+/** The body colour a car shows for a wire colour. */
+export function paintHexOf(carId, wire) {
+  const sp = specialPaint(wire);
+  if (sp != null) return sp;
+  const car = CAR_BY_ID[carId];
+  return car ? car.colours[(wire | 0) % car.colours.length] : null;
+}
 
 // Bright, far apart on the wheel, and none of them the GPS cyan (0x4fd8f0),
 // so a friend's beacon can never be mistaken for a challenge's.
@@ -31,6 +62,23 @@ const OFF_ROUTE = 35;       // m you may stray off it
 const ARRIVE = 38;          // m: close enough — "you found them"
 const TAU = Math.PI * 2;
 const nearestFirst = (a, b) => a.dist - b.dist;
+
+/**
+ * Sorts a short array in place without allocating. Array.prototype.sort
+ * builds its merge state on every call — measured at ~0.9 KB for four
+ * elements — and the roster is sorted every frame (the chip reads it). The
+ * same helper is in game/modes.js and render/nameTags.js; each of the three
+ * loads on its own through main.js's layer(), so none imports another's.
+ */
+function sortInPlace(a, cmp) {
+  for (let i = 1; i < a.length; i++) {
+    const x = a[i];
+    let j = i - 1;
+    while (j >= 0 && cmp(a[j], x) > 0) { a[j + 1] = a[j]; j--; }
+    a[j + 1] = x;
+  }
+  return a;
+}
 
 /** 0xRRGGBB -> [h (0..1), s, l] */
 function hsl(hex) {
@@ -62,8 +110,7 @@ function fromHsl(h, s, l) {
  * colour of their own from the palette, picked by id so it is stable.
  */
 export function playerColour(carId, colourIndex, id) {
-  const car = CAR_BY_ID[carId];
-  const paint = car ? car.colours[(colourIndex | 0) % car.colours.length] : null;
+  const paint = CAR_BY_ID[carId] ? paintHexOf(carId, colourIndex) : null;
   if (paint != null) {
     let [h, s, l] = hsl(paint);
     if (s > 0.28 && l > 0.08 && l < 0.92) {
@@ -182,7 +229,7 @@ export function createParty(opts) {
       row.guided = guide.id === p.id;
       list.push(row);
     }
-    list.sort(nearestFirst);
+    sortInPlace(list, nearestFirst);
     return list;
   }
 

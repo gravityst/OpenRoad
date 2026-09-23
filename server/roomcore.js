@@ -14,9 +14,10 @@
  */
 
 import {
-  encodeSnapshot, decodeState, cleanName, cleanCarId, cleanColour,
+  encodeSnapshot, decodeState, cleanName, safeName, cleanCarId, cleanColour,
   PROTO_V2, AGE_STALE, MAX_BURST,
 } from '../src/net/protocol.js';
+import { createModes } from './modes.js';
 
 export const TICK_MS = 50;             // 20 Hz downstream
 export const MAX_PLAYERS = 16;
@@ -31,9 +32,35 @@ const BURST = 300, RATE = 45;
 // How fast the per-player clock estimate may creep upwards between the
 // packets that pin it: 1 ms per second, ten times any real crystal's drift.
 const CREEP = 0.001;
+// ... and over how much silence. Creep is there for drift, which is about
+// 0.1 ms a second; over a 2.8 s WiFi dropout it added 2.8 ms, which the first
+// fresh packet then took back — a 7% speed blip in one segment of the car's
+// curve, a 10 cm lurch on screen. A quarter of a second of creep covers the
+// normal 50 ms spacing five times over.
+const CREEP_SPAN = 250;
+// A name is shown to everyone in a public room of kids, so it must not work as
+// a chat line. The client already waits until typing stops; the server then
+// takes at most one new name per player every RENAME_MS. A name that arrives
+// sooner waits, and the newest waiting one is put up when the time comes —
+// a kid fixing a typo still ends up with the right name, while 'meet me',
+// 'at the', 'barn' would take a minute to spell out. Generation 2 only.
+const RENAME_MS = 20000;
+
+/** Who is IT first needs a coin toss, not cryptography. Seeded from the
+ *  room's own clock, so a harness on a simulated clock is repeatable. */
+function seeded(seed) {
+  let a = (seed >>> 0) ^ 0x9e3779b9;
+  return () => {
+    a = (a + 0x6D2B79F5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
 
 /**
- * opts: { proto, now: () => wall ms, maxPlayers }
+ * opts: { proto, now: () => wall ms, maxPlayers, rng }
  * Returns { open, message, close, tick, restore, has, size, rate, proto }.
  */
 export function createRoomCore(opts = {}) {
@@ -48,6 +75,21 @@ export function createRoomCore(opts = {}) {
   const out = [];                           // snapshot scratch, reused every tick
 
   const ms = () => (now() - epoch) | 0;
+
+  // Party games (server/modes.js): generation 2 only, so a protocol-1 room
+  // never sends a byte of them.
+  const modes = v2 ? createModes({
+    ms,
+    players: () => peers.values(),
+    broadcast: (obj, exceptId) => {
+      const s = JSON.stringify(obj);
+      for (const [sock, q] of peers) {
+        if (q.id === exceptId || !q.joined) continue;
+        try { sock.send(s); } catch { /* closing */ }
+      }
+    },
+    rng: opts.rng || seeded(epoch),
+  }) : null;
 
   /**
    * Ids are one byte and go round. The original took `nextId++ & 0xff`, which
@@ -79,8 +121,11 @@ export function createRoomCore(opts = {}) {
     return {
       id, name, car: '', colour: 0, rec: null, queue: [], last: now(),
       minOff: null, lastRecv: 0, lastSample: -Infinity, tokens: BURST, tokT: now(),
+      joined: false, nameAt: -Infinity, wantName: null,
     };
   }
+  /** The name rule for this room's generation (see protocol.js). */
+  const nameRule = v2 ? safeName : cleanName;
 
   /** A socket was accepted. Returns its id, or -1 if the room is full. */
   function open(sock) {
@@ -101,7 +146,8 @@ export function createRoomCore(opts = {}) {
    */
   function restore(sock, att) {
     if (peers.has(sock) || !att || typeof att.id !== 'number') return false;
-    const p = newPeer(att.id & 0xff, cleanName(att.name, 'Driver-' + att.id));
+    const p = newPeer(att.id & 0xff, nameRule(att.name, 'Driver-' + att.id));
+    p.joined = true;
     p.car = cleanCarId(att.car);
     p.colour = cleanColour(att.colour);
     peers.set(sock, p);
@@ -142,7 +188,7 @@ export function createRoomCore(opts = {}) {
     // The id on the wire is ignored. A client does not get to say who it is —
     // otherwise anyone can drive someone else's car by editing one byte.
     st.car.id = p.id;
-    if (v2) stamp(p, st, t);
+    if (v2) { stamp(p, st, t); p.recMs = ms(); }
     p.rec = st.car;
   }
 
@@ -159,8 +205,15 @@ export function createRoomCore(opts = {}) {
   function stamp(p, st, t) {
     const recv = t - epoch;
     const off = recv - st.clientMs;
-    if (p.minOff === null || recv - p.lastRecv > 2000) p.minOff = off;
-    else p.minOff = Math.min(p.minOff + (recv - p.lastRecv) * CREEP, off);
+    // Never re-anchored after a quiet spell. The client's clock is its own
+    // performance.now() from this connection's open, so the true offset only
+    // ever drifts, and CREEP already allows for that across any gap. The
+    // version this replaces reset minOff after 2 s of silence — and silence
+    // is exactly what a WiFi stall is: the first packet of the backlog set
+    // the offset 2.7 s too late, every fresh sample after it was then forced
+    // onto lastSample + 1 ms, and the car jumped 64 m and crept backwards.
+    if (p.minOff === null) p.minOff = off;
+    else p.minOff = Math.min(p.minOff + Math.min(recv - p.lastRecv, CREEP_SPAN) * CREEP, off);
     p.lastRecv = recv;
     let at = Math.round(st.clientMs + p.minOff);
     if (at <= p.lastSample) at = p.lastSample + 1;
@@ -176,16 +229,23 @@ export function createRoomCore(opts = {}) {
     if (!m || typeof m !== 'object') return;
 
     if (m.t === 'join') {
-      p.name = unique(cleanName(m.name, 'Driver-' + p.id), p.id);
+      // A second join on one socket is only ever a way round the rename
+      // limit (net.js joins once per connection): treat it as a rename.
+      if (v2 && p.joined) { rename(sock, p, m.name); return; }
+      p.name = unique(nameRule(m.name, 'Driver-' + p.id), p.id);
+      p.joined = true;
+      p.nameAt = now();
       if (v2) { p.car = cleanCarId(m.carId); p.colour = cleanColour(m.colour); }
       save(sock, p);
       const players = [];
       for (const q of peers.values()) players.push(info(q));
       const welcome = { t: 'welcome', id: p.id, sendHz: rate(), serverMs: ms(), players };
-      if (v2) { welcome.proto = PROTO_V2; welcome.tickMs = TICK_MS; }
+      // A game already on is part of the room a late arrival walks into.
+      if (v2) { welcome.proto = PROTO_V2; welcome.tickMs = TICK_MS; welcome.mode = modes.wire(); }
       send(sock, welcome);
       broadcast({ t: 'joined', ...info(p) }, sock);
     } else if (m.t === 'name') {
+      if (v2) { rename(sock, p, m.name); return; }
       p.name = unique(cleanName(m.name, p.name), p.id);
       save(sock, p);
       broadcast({ t: 'joined', ...info(p) });
@@ -196,14 +256,40 @@ export function createRoomCore(opts = {}) {
       broadcast({ t: 'joined', ...info(p) });
     } else if (m.t === 'ping') {
       send(sock, { t: 'pong', c: m.c, s: ms() });
+    } else if (v2 && (m.t === 'mode' || m.t === 'emote')) {
+      modes.control(p, m);
     }
+  }
+
+  /** A new name, generation 2: refused names keep the old one, and at most
+   *  one change goes out every RENAME_MS (see above). */
+  function rename(sock, p, raw) {
+    const n = safeName(raw, '');
+    if (!n) return;
+    p.wantName = n;
+    flushName(sock, p, now());
+  }
+  function flushName(sock, p, t) {
+    if (p.wantName === null || t - p.nameAt < RENAME_MS) return;
+    const n = unique(p.wantName, p.id);
+    p.wantName = null;
+    if (n === p.name) return;
+    p.name = n;
+    p.nameAt = t;
+    save(sock, p);
+    broadcast({ t: 'joined', ...info(p) });
   }
 
   /** Two players called "Ace" is confusing at 200 km/h; disambiguate server-side. */
   function unique(name, id) {
     let taken = false;
     for (const q of peers.values()) if (q.id !== id && q.name === name) taken = true;
-    return taken ? (name.slice(0, 13) + '-' + id) : name;
+    if (!taken) return name;
+    // Generation 2 keeps the result inside the 16-character rule: the old cut
+    // at 13 made 'ABCDEFGHIJKLM-123' once ids passed 99. Generation 1 keeps
+    // the old cut, byte for byte.
+    if (!v2) return name.slice(0, 13) + '-' + id;
+    return name.slice(0, 15 - String(id).length).trimEnd() + '-' + id;
   }
 
   /** Throttle as the room fills, so a busy room degrades smoothly instead of
@@ -219,6 +305,7 @@ export function createRoomCore(opts = {}) {
     if (!p) return false;
     peers.delete(sock);
     broadcast({ t: 'left', id: p.id });
+    if (modes) modes.drop(p.id);
     return true;
   }
 
@@ -238,6 +325,7 @@ export function createRoomCore(opts = {}) {
       if (!p && attachmentOf) { restore(sock, attachmentOf(sock)); p = peers.get(sock); }
       if (!p) continue;
       if (t - p.last > STALE_MS) { try { sock.close(1000, 'idle'); } catch { /* gone */ } continue; }
+      if (p.wantName !== null) flushName(sock, p, t);
       if (!v2) { if (p.rec) out.push(p.rec); continue; }
       if (p.queue.length) {
         for (const r of p.queue) { r.age = Math.min(AGE_STALE, Math.max(0, snapMs - r.sampleMs)); out.push(r); }
@@ -249,6 +337,7 @@ export function createRoomCore(opts = {}) {
         out.push(p.rec);
       }
     }
+    if (modes) modes.tick();
     if (!out.length) return null;
     const frame = encodeSnapshot(out, snapMs);
     for (const sock of list) {
@@ -261,6 +350,8 @@ export function createRoomCore(opts = {}) {
   return {
     proto, open, message, close, tick, restore, rate, ms,
     has: (sock) => peers.has(sock),
+    /** The party games (null in a protocol-1 room). */
+    get modes() { return modes; },
     get size() { return peers.size; },
     /** For the harness. */
     peerOf: (sock) => peers.get(sock) || null,

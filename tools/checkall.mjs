@@ -33,6 +33,7 @@ const CHECKS = [
   ['ui', 'every screen builds and focuses its action; no emoji, no fire, no scolding'],
   ['biome', 'five places a kid can name, one world for every player, and no seams'],
   ['realism', 'buildings are drawn where they are solid, and the roadside follows its rules'],
+  ['modes', 'friends race, tag and hunt coins together; the room referees, old pages never notice'],
 ];
 
 const results = [];

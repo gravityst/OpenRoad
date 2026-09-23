@@ -380,11 +380,19 @@ async function boot() {
   // layer list above, which destructures by position and is shared with every
   // other part of the game; each of these may be null, and the game without
   // them is the game with multiplayer and no way to find anybody.
-  const [mParty, mRoster, mBeacons] = net ? await Promise.all([
+  //
+  // And playing together: race your friends, tag, coin rush, emotes
+  // (game/modes.js, refereed by the room in server/modes.js), drawn on screen
+  // by game/modesUi.js and in the world by render/modeFx.js. Same rules: any
+  // of them may be null and the game carries on without it.
+  const [mParty, mRoster, mBeacons, mModes, mModesUi, mModeFx] = net ? await Promise.all([
     layer('./game/party.js', 'friends'),
     layer('./game/roster.js', 'friends list'),
     layer('./render/beacons.js', 'player beacons'),
-  ]) : [null, null, null];
+    layer('./game/modes.js', 'party games'),
+    layer('./game/modesUi.js', 'party games screen'),
+    layer('./render/modeFx.js', 'party games world'),
+  ]) : [null, null, null, null, null, null];
   const party = mParty ? safe(() => mParty.createParty({
     net, world, ground,
     // The goals layer already built the road graph; borrow it. Read at the
@@ -393,18 +401,40 @@ async function boot() {
     place: (x, z, yaw) => placeCar(x, z, yaw),
   })) : null;
   const colourOf = party ? party.colourFor : null;
+  // The paint this player's friends see (a shop paint included; see the
+  // 'drive' handler below), so their own row and bubble match it. A `let`
+  // declared here because createModes asks for it at once.
+  let selfWire = chosenColour;
+  const modes = mModes && party ? safe(() => mModes.createModes({
+    net, world,
+    // Read at the first game, long after `goals` exists: its races.
+    goals: () => goals,
+    place: (x, z, yaw) => placeCar(x, z, yaw),
+    abandonGoals: () => { if (goals) goals.abandon(); },
+    colourOf,
+    self: () => ({ name: settings.name || '', carId: chosenCar, colour: selfWire }),
+    goTo: (id) => party.goTo(id),
+  })) : null;
   const roster = mRoster && party ? safe(() => mRoster.createRoster({
-    party, net, onGo: goToFriend, onGuide: guideToFriend,
+    party, net, modes, onGo: goToFriend, onGuide: guideToFriend,
     onStopGuide: () => party.stopGuide(),
   })) : null;
   if (net && roster) net.onEvent = (e) => roster.onNetEvent(e);
   const beacons = mBeacons && party ? safe(() => mBeacons.createBeacons(scene, {
     quality: settings.quality || 'medium', heightAt: ground.heightAt,
   })) : null;
+  const modesUi = mModesUi && modes ? safe(() => mModesUi.createModesUi({
+    modes, toast: (t, css) => { if (roster) roster.toast(t, css); }, online: () => party.online,
+  })) : null;
+  const modeFx = mModeFx && modes ? safe(() => mModeFx.createModeFx(scene, {
+    quality: settings.quality || 'medium', heightAt: ground.heightAt,
+  })) : null;
 
   /** "Go": onto the road right behind them, facing their way. */
   function goToFriend(id) {
     if (!party) return;
+    // Mid-race or mid-tag, Go would be a teleport past everyone.
+    if (modes && modes.blocksGo) { if (roster) roster.toast(modes.blocksGo); return; }
     if (goals && goals.activeRace) goals.abandon();
     const s = party.goTo(id);
     if (!s) { if (roster) roster.toast('They are not on the road yet — try again in a moment'); return; }
@@ -415,6 +445,7 @@ async function boot() {
   /** "Guide": a route along the roads that keeps pointing at them. */
   function guideToFriend(id) {
     if (!party) return;
+    if (modes && modes.blocksGo) { if (roster) roster.toast(modes.blocksGo); return; }
     if (goals && goals.activeRace) {
       if (roster) roster.toast('Finish the race first — or press Backspace to leave it');
       return;
@@ -485,6 +516,10 @@ async function boot() {
           console.error('[open road] remote car model failed:', err);
           m = null;
         }
+        // A paint from the shop rides on the colour index (party.js,
+        // wireColour): the model is built in the factory colour and painted.
+        const sp = m && mParty ? mParty.specialPaint(c.colour) : null;
+        if (sp != null) m.setPaint(sp);
         r = remoteModels[i] = { m, rev: c.infoRev, spec, spin: 0 };
       }
       const m = r.m;
@@ -673,9 +708,17 @@ async function boot() {
   // while friends are online starts you on the road right behind one of them
   // — whoever you picked on the title screen, or else the nearest. Registered
   // after goals.onDrive, so the challenge GPS is set up either way.
+  // The paint goes too: a special paint from the shop as well as a factory one.
+  const wireColourOf = (index, paintId) => (mParty ? mParty.wireColour(index, paintId) : index | 0);
+  if (goals) selfWire = wireColourOf(chosenColour, goals.progress.livery(chosenCar));
+  if (net) net.setCar(chosenCar, selfWire);
   menus.on('drive', (p) => {
-    if (net && p && p.id) net.setCar(p.id, p.colour | 0);
+    if (p && p.id) selfWire = wireColourOf(p.colour, p.paint);
+    if (net && p && p.id) net.setCar(p.id, selfWire);
     if (!party || !p || !p.fresh) return;
+    // A friend's game is inviting (the title said "Press Play to join in"):
+    // Play joins it, and the game puts you where it wants you.
+    if (modes && modes.view.invite && modes.join()) return;
     const s = party.onPlay(car);
     if (s && roster) roster.toast(`You're right behind ${s.name}!`, colourOf(net.room.car(s.id) || { id: s.id }).css);
   });
@@ -1299,17 +1342,33 @@ async function boot() {
       teleported = false;
       net.update(dt, wire);
       syncRemoteModels(night, dt);
+      // Everything here that is fastened to YOUR car on screen — the guide's
+      // chevrons start 10 m ahead of it, the list measures from it — reads
+      // `pose`, where the car is drawn, not `car`, which runs up to a physics
+      // step ahead: the chevrons snapped back 0.28 m every sixth frame.
       if (party) {
-        const ev = party.update(dt, car, goals ? goals.nav : null);
+        const ev = party.update(dt, pose, goals ? goals.nav : null);
         if (ev) announceGuide(ev);
         // While guiding, the minimap's GPS line leads to the friend instead.
         if (party.nav && driving) hudState.nav = party.nav;
       }
+      // Party games. The race line (or the coins) take over the minimap, and
+      // while a game or a Guide leads, the challenge GPS stands down — a
+      // party race holding its grid also holds the car, through goals.hold.
+      const onRoad = mode === 'driving' && !menus.current;
+      if (modes) {
+        modes.update(dt, pose, onRoad);
+        if (modes.nav && driving) hudState.nav = modes.nav;
+        if (modesUi) modesUi.update(dt, onRoad, pose);
+        if (modeFx) modeFx.update(dt, camera, modes, pose, net.room);
+      }
+      if (goals) goals.setExternalGuide(modes && modes.hold ? 'hold' : !!(modes && modes.owns) || !!(party && party.guide.id >= 0));
       if (beacons) {
         beacons.setVisible(settings.nameTags !== false);
-        beacons.update(dt, camera, net.room.cars, colourOf, party ? party.guide : null, driving);
+        beacons.update(dt, camera, net.room.cars, colourOf,
+          (modes && modes.raceGuide) || (party ? party.guide : null), driving, modes ? modes.view.it : -1);
       }
-      if (roster) roster.update(dt, car, mode);
+      if (roster) roster.update(dt, pose, mode);
     }
     debris.update(dt, camera.position);
     fxCars[0] = car;
@@ -1324,7 +1383,7 @@ async function boot() {
       // Only on the road: over a menu they are clutter on top of its text.
       tags.setVisible(mode === 'driving');
       camera.updateMatrixWorld();
-      tags.update(camera, net.room.cars, car, colourOf, party ? party.guide.id : -1);
+      tags.update(camera, net.room.cars, pose, colourOf, party ? party.guide.id : -1, modes, net.id);
     }
 
     // ---- streaming ----

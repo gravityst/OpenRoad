@@ -38,7 +38,13 @@ const http = createServer((req, res) => {
 
 // Shares the HTTP server rather than opening its own port: PaaS hosts route all
 // public traffic to exactly one port, so a second listener is unreachable.
-const wss = new WebSocketServer({ server: http });
+//
+// maxPayload: ws defaults to 100 MiB, and roomcore only throws away text over
+// 512 characters AFTER it has been buffered and decoded — so one client could
+// make this process hold 100 MiB per message. The largest legitimate message
+// is a join at about 120 bytes; 1 KiB is eight times that, and anything bigger
+// is refused by ws before it is ever assembled.
+const wss = new WebSocketServer({ server: http, maxPayload: 1024 });
 
 wss.on('connection', (ws, req) => {
   const room = roomFor(protoFromUrl(req.url));

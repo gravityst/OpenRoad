@@ -2193,6 +2193,9 @@ async function boot() {
       return {
         on: autoOn(), level: auto.level, of: auto.levels, scale: r.scale, post: r.post,
         gpuMs: effects.gpuMs, ...auto.stats,
+        // Short rAF intervals the loading screen gave the display probe;
+        // under 24 and displayMs is unknown (60 Hz assumed).
+        probeSamples: displayProbe.samples,
         force: (n) => { auto.force(n); applyAuto(false); return auto.level; },
       };
     },

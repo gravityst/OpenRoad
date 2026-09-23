@@ -51,8 +51,12 @@
 // the display's own frame period while the game loads (createDisplayProbe) and
 // the thresholds scale with it: at 20 ms a window is slow over 22.8 ms, at
 // 33.3 over 38. A game running at the screen's own rate is never "slow". If a
-// window ever runs clearly faster than the measured period, the measurement was
-// wrong and it goes back to assuming 60 Hz.
+// window ever runs clearly faster than the measured period — a quarter of its
+// frames under 85% of it, or a tenth under 70% — the measurement was wrong and
+// it goes back to assuming 60 Hz. (The tenth is for a 60 Hz screen read as
+// 30 Hz off a loading screen where almost every frame took two refreshes, on a
+// machine the GPU holds near 30 fps: only its cheapest frames come round in
+// one refresh, and 16.7 ms is a frame a 30 Hz screen can never show.)
 //
 // IS IT THE PIXELS?
 //
@@ -63,11 +67,16 @@
 //
 //   CPU  main.js times its own frame callback. The screen shows a frame on a
 //        vsync, so a frame whose script alone takes 24 ms cannot come round in
-//        less than 2 x 16.7 = 33.3 ms however few pixels it draws. If the
-//        frames are already that fast, the CPU is the limit. Every browser can
-//        measure this — but the draw call inside it can also be the GPU
-//        making the page wait, so without a GPU timer only the script OUTSIDE
-//        the draw is taken as proof (see judge()).
+//        less than 2 x 16.7 = 33.3 ms however few pixels it draws. If that
+//        alone makes the window slow, and the frames are already that fast,
+//        the CPU is the limit. A script that fits in one vsync proves nothing:
+//        a GPU just over budget whose cost varies from frame to frame makes
+//        most of its frames on time and a quarter late, so the median sits on
+//        the vsync whatever the script costs. Every browser can measure this —
+//        but the draw call inside it can also be the GPU making the page wait,
+//        so only the script OUTSIDE the draw is taken as proof, unless a GPU
+//        timer says the GPU alone would have made an earlier vsync than the
+//        frame did (see judge()).
 //   GPU  with a GPU timer (effects.gpuMs; Chrome has one, Safari and Firefox
 //        do not), a frame that is slow while the GPU is idle for half of it is
 //        not waiting on pixels. And it predicts what the next level up would
@@ -77,9 +86,11 @@
 // With neither (a machine slowed by something outside the page), it learns
 // the slow way: if the whole ladder bought less than 10% it was never the
 // pixels, it goes back to where it started, and it does not try again until
-// the frame rate itself changes — the same slow frames are the same answer.
-// It used to retry after 60, 120 and 240 s, walking the whole ladder down and
-// snapping back each time.
+// the frame rate or the script's cost changes — the same slow frames from the
+// same work are the same answer. It used to retry after 60, 120 and 240 s,
+// walking the whole ladder down and snapping back each time. A level below
+// that turns out not to be the pixels, and is no faster than where the descent
+// began, has learned the same thing and is answered the same way.
 
 /** Every rung: resolution scale, and how many post tiers below the player's. */
 export const LADDER = [
@@ -161,7 +172,8 @@ const DEFAULTS = {
   headroom: 0.8,       // with GPU timing, step up only if predicted < 80% of budget
   cpuBoundHoldSec: 60,
   maxGapMs: 250,       // a longer frame is a paused tab, not a slow machine
-  sameSlow: 0.15,      // a slow median within 15% of a known answer is that answer
+  sameSlow: 0.15,      // a slow median within 15% of a known answer is that answer...
+  sameWork: 0.33,      // ...when the script's median is within a third of what it was
 };
 
 /**
@@ -190,8 +202,10 @@ export function createAdaptiveQuality(opts = {}) {
   let sinceUp = Infinity;          // windows since the last step up (a probe)
   let probeP50 = NaN;              // median before a probe made while slow
   let baselineP50 = NaN;           // median when the stepping down began...
+  let baselineCpu = NaN;           // ...the script's median then...
   let descentFrom = 0;             // ...and the level it began at
   let notPixelsP50 = NaN;          // median the whole ladder once failed to move...
+  let notPixelsCpu = NaN;          // ...with the script this busy...
   let notPixelsLevel = 0;          // ...from this level
   let blockedLevel = -1;           // a level given back while slow that made it slower...
   let blockedP50 = NaN;            // ...when the frames were this slow
@@ -228,6 +242,27 @@ export function createAdaptiveQuality(opts = {}) {
     return sorted[Math.min(count - 1, Math.floor(p * count))];
   }
 
+  /** Within `tol` of a remembered figure. NaN is never near anything. */
+  function near(v, known, tol) { return Math.abs(v - known) <= tol * known; }
+
+  /**
+   * The script about as busy as a remembered median — or neither measured.
+   * A third, not 15%: a streaming burst moves one window's median script by
+   * a sixth (simulated, 20.0 to 23.3 ms), and at 15% that alone re-walked
+   * the ladder every time a hold ran out, 16 times in 10 minutes.
+   */
+  function sameWork(cpu, known) {
+    return near(cpu, known, cfg.sameWork) || (!(cpu > 0) && !(known > 0));
+  }
+
+  /** The descent that began at descentFrom bought nothing: remember that. */
+  function learnNotPixels() {
+    notPixelsP50 = baselineP50;
+    notPixelsCpu = baselineCpu;
+    notPixelsLevel = descentFrom;
+    baselineP50 = NaN;
+  }
+
   /** Predicted GPU ms one rung up from here, from the measured GPU time. */
   function predictUp(gpuMs) {
     if (!(gpuMs > 0) || level === 0) return NaN;
@@ -247,16 +282,17 @@ export function createAdaptiveQuality(opts = {}) {
 
   function judge(gpuMs) {
     const w = buf.subarray(0, n).sort();
-    const p25 = pct(w, n, 0.25), p50 = pct(w, n, 0.5), p75 = pct(w, n, 0.75), p90 = pct(w, n, 0.9);
+    const p10 = pct(w, n, 0.1), p25 = pct(w, n, 0.25), p50 = pct(w, n, 0.5), p75 = pct(w, n, 0.75), p90 = pct(w, n, 0.9);
     // Script time is only trusted when most of the window's frames had one.
     const cpu50 = cpuN >= n >> 1 ? pct(cpuBuf.subarray(0, cpuN).sort(), cpuN, 0.5) : NaN;
     const logic50 = logicN >= n >> 1 ? pct(logicBuf.subarray(0, logicN).sort(), logicN, 0.5) : NaN;
     last.p50 = p50; last.p75 = p75; last.p90 = p90; last.gpuMs = gpuMs; last.cpuMs = cpu50; last.logicMs = logic50;
     n = 0; cpuN = 0; logicN = 0; windowMs = 0;
 
-    // A quarter of the frames came faster than the screen supposedly can:
+    // Frames came faster than the screen supposedly can — a quarter of them
+    // a little faster, or a tenth a lot (see "a screen that is not 60 Hz"):
     // the measured period was wrong, so go back to assuming 60 Hz.
-    if (displayMs > 0 && p25 < 0.85 * displayMs) displayMs = NaN;
+    if (displayMs > 0 && (p25 < 0.85 * displayMs || p10 < 0.7 * displayMs)) displayMs = NaN;
     last.displayMs = displayMs;
     const k = displayMs > cfg.budgetMs ? displayMs / cfg.budgetMs : 1;
     const vsync = displayMs > 0 ? displayMs : cfg.budgetMs;
@@ -278,25 +314,43 @@ export function createAdaptiveQuality(opts = {}) {
         // bounds while the frames are this slow, or it would be tried again
         // every few seconds.
         if (probeP50 > 0) { blockedLevel = level; blockedP50 = probeP50; }
+        // And if it was learned that the pixels do not matter here, they do.
+        if (level === notPixelsLevel) notPixelsP50 = NaN;
         sinceUp = Infinity;
         slowStreak = 0;
         return setLevel(level + 1, 'probe failed');
       }
 
-      // Not the pixels, measured: the script alone fills the frame (rounded
-      // up to the vsync it can make), or the GPU is idle for half of it.
+      // Not the pixels, measured: the script alone makes the window slow
+      // (rounded up to the vsync it can make) and the frames are no slower
+      // than that, or the GPU is idle for half of the frame.
       //
-      // Which script time is evidence depends on what else is known. The
-      // draw call can block while the GPU catches up, so on a GPU-bound
-      // machine the WHOLE script time can fill the frame too. With a GPU
-      // timer that is visible (the GPU busy for 80% of the frame) and the
-      // whole script counts otherwise. Without one, only the part outside
-      // the draw counts, which no GPU can inflate: a machine whose CPU goes
-      // on draw calls then has to try the ladder once (see "with neither").
-      // A GPU-bound laptop on Safari that never stepped down would be far
-      // worse than a CPU-bound one blurred for ten seconds.
-      const cpuSure = gpuMs > 0 ? (gpuMs < 0.8 * p50 ? cpu50 : NaN) : logic50;
-      const cpuBound = cpuSure > 0 && p50 <= Math.ceil(cpuSure * 1.05 / vsync) * vsync + 1.5;
+      // The script has to miss the slow line by itself. Rounded up, a 5 ms
+      // script "fills" a 16.7 ms frame, and a GPU just over budget whose cost
+      // varies frame to frame puts its median exactly there, with its 75th
+      // percentile a vsync later. Calling that the CPU held such a machine at
+      // full quality — simulated, CPU 5 ms and GPU 14 ms +-50%, no timer:
+      // 29.8% of frames late, where stepping down leaves 7.6%.
+      //
+      // Which script time is evidence depends on what else is known. The draw
+      // call can block while the GPU catches up, so on a GPU-bound machine the
+      // WHOLE script can fill the frame too. It counts only when a GPU timer
+      // clears it: the GPU alone would have made an earlier vsync than the
+      // frame did, or the script is a quarter longer than the GPU's own time,
+      // which no amount of waiting for the GPU can make it (the 25% is for
+      // the timer being a running average of every fourth frame). Otherwise
+      // only the part outside the draw counts, which no GPU can inflate, and
+      // a machine whose CPU goes on draw calls has to try the ladder once
+      // (see "with neither"). A GPU-bound laptop that never stepped down
+      // would be far worse than a CPU-bound one blurred for ten seconds.
+      // (Before, the whole script counted whenever the GPU was busy for under
+      // 80% of the frame, which forgot the vsync: a 20 ms GPU makes 33.3 ms
+      // frames, 60% busy, and a draw call waiting on it read as a 20 ms CPU —
+      // every frame late, at full quality, for good.)
+      const scriptIsCpu = gpuMs > 0 && (vsyncsFor(gpuMs, vsync) + 1.5 < p50 || cpu50 > 1.25 * gpuMs);
+      const cpuSure = scriptIsCpu ? cpu50 : logic50;
+      const cpuFrame = vsyncsFor(cpuSure, vsync);
+      const cpuBound = cpuSure > 0 && cpuFrame > cfg.slowMs * k && p50 <= cpuFrame + 1.5;
       const gpuIdle = gpuMs > 0 && gpuMs < 0.5 * p50;
       if (cpuBound || gpuIdle) {
         slowStreak = 0;
@@ -307,8 +361,33 @@ export function createAdaptiveQuality(opts = {}) {
         // it has not already been tried at this speed and found slower.
         const blocked = level - 1 <= blockedLevel && Math.abs(p50 - blockedP50) <= cfg.sameSlow * blockedP50;
         if (level > 0 && !blocked && ++idleStreak >= 2) {
+          // And no faster than where this descent began, with the same work
+          // to do: it bought nothing, which is what reaching the bottom and
+          // finding so proves, so it is answered the same way — straight
+          // back, remembered. Handed back a level at a time instead, a
+          // machine slow on both counts (a 24 ms CPU, a 24 ms GPU) stopped a
+          // level short, where the GPU alone fills the frame and nothing says
+          // "not the pixels", and walked down again every time the hold ran
+          // out: 11 changes in 5 minutes, blurred throughout, for frames that
+          // never changed.
+          if (level > descentFrom && p50 > 0.9 * baselineP50 && sameWork(cpu50, baselineCpu)) {
+            hold();
+            idleStreak = 0;
+            const back = descentFrom;
+            learnNotPixels();
+            return setLevel(back, 'slow, but not the pixels');
+          }
           const pred = predictUp(gpuMs);
-          if (!(pred > 0) || pred < 0.8 * p50) return probeUp(p50, 'not the pixels: sharper again');
+          if (!(pred > 0) || pred < 0.8 * p50) {
+            // A step up ends this descent. If the frames turn slow again from
+            // the level it lands on, that is a new descent, measured from
+            // there: measured from the old start, a machine the first steps
+            // DID help (a 36 ms GPU: 50 ms frames to 33.3) could never find
+            // that the rest bought nothing, and walked down and was handed
+            // back every time the hold ran out — 13 changes in 10 minutes.
+            baselineP50 = NaN;
+            return probeUp(p50, 'not the pixels: sharper again');
+          }
         }
         return false;
       }
@@ -318,20 +397,35 @@ export function createAdaptiveQuality(opts = {}) {
       slowStreak = 0;
 
       // Slow in the same way as when the whole ladder was last tried from
-      // here and bought nothing: that answer still stands.
-      if (level === notPixelsLevel && Math.abs(p50 - notPixelsP50) <= cfg.sameSlow * notPixelsP50) {
+      // here and bought nothing, with the script about as busy as it was
+      // then: that answer still stands. The script is part of "the same way"
+      // because the frame rate alone barely moves — slow at 60 Hz is 33.3 ms
+      // almost whatever the cause — and a machine that was slow for its CPU
+      // for a while (24 ms of script), and is now slow for its GPU (5 ms),
+      // must not be told "as before".
+      if (level === notPixelsLevel && near(p50, notPixelsP50, cfg.sameSlow) && sameWork(cpu50, notPixelsCpu)) {
         last.verdict = 'slow, but not the pixels (as before)';
         return false;
       }
       if (level >= rungs.length - 1) {
         // Bottom of the ladder and still slow. If the whole ladder bought
         // less than 10%, it was never the pixels: give the picture back.
+        // Unless the script's work changed on the way down, when the two
+        // ends were measured under different loads and prove nothing. A CPU
+        // spike (24 ms of script for 35 s) landing on a GPU-bound laptop's
+        // descent made the bottom look no faster than the top; the lesson
+        // "not the pixels" then outlived the spike, and the laptop sat at
+        // full quality with every frame late for as long as it ran. Instead
+        // the descent is forgotten, and with no baseline the bottom goes and
+        // measures the top again (below).
         if (level > descentFrom && p50 > 0.9 * baselineP50) {
-          hold();
-          notPixelsP50 = baselineP50;
-          notPixelsLevel = descentFrom;
+          if (sameWork(cpu50, baselineCpu)) {
+            hold();
+            const back = descentFrom;
+            learnNotPixels();
+            return setLevel(back, 'slow, but not the pixels');
+          }
           baselineP50 = NaN;
-          return setLevel(descentFrom, 'slow, but not the pixels');
         }
         // Started down here (a level remembered from last time) and never
         // measured the top, so there is nothing to compare with. Without that,
@@ -346,7 +440,7 @@ export function createAdaptiveQuality(opts = {}) {
         last.verdict = 'slow at the lowest level';
         return false;
       }
-      if (!Number.isFinite(baselineP50)) { baselineP50 = p50; descentFrom = level; }
+      if (!Number.isFinite(baselineP50)) { baselineP50 = p50; baselineCpu = cpu50; descentFrom = level; }
       return setLevel(level + (verySlow ? 2 : 1), verySlow ? 'very slow' : 'slow');
     }
 
@@ -397,7 +491,8 @@ export function createAdaptiveQuality(opts = {}) {
     ignoreMs = cfg.warmupSec * 1000;
     slowStreak = 0; goodStreak = 0; idleStreak = 0;
     probeNeed = cfg.probeWindows; sinceUp = Infinity; probeP50 = NaN;
-    baselineP50 = NaN; descentFrom = 0; notPixelsP50 = NaN; notPixelsLevel = 0;
+    baselineP50 = NaN; baselineCpu = NaN; descentFrom = 0;
+    notPixelsP50 = NaN; notPixelsCpu = NaN; notPixelsLevel = 0;
     blockedLevel = -1; blockedP50 = NaN;
     holdMs = 0; holdNext = cfg.cpuBoundHoldSec * 1000;
     blindAtBottom = 0;
@@ -418,6 +513,14 @@ export function createAdaptiveQuality(opts = {}) {
   };
 }
 
+/**
+ * The frame a job of `ms` can make: rounded up to whole refreshes of `vsync`,
+ * with 5% for the frame-to-frame spread a median hides. NaN in, NaN out.
+ */
+function vsyncsFor(ms, vsync) {
+  return Math.ceil(ms * 1.05 / vsync) * vsync;
+}
+
 // 4 ms is a 240 Hz screen; 34 ms a 30 fps cap with a millisecond of slack.
 // Anything outside that is a measurement gone wrong, and 60 Hz is assumed.
 function validPeriod(ms) {
@@ -431,12 +534,22 @@ function validPeriod(ms) {
  * busy, and the loading screen is the one time the page is mostly idle while
  * visible. Loading work can only make an interval LONGER — a whole number of
  * refreshes longer — never shorter, so the period is the shortest interval
- * that turns up often: the cluster at the 10th percentile. Intervals over
- * 40 ms are dropped outright. Fewer than 24 samples, or no real cluster there
- * (a tenth of them within 12% of each other), and the answer is "unknown":
- * the game assumes 60 Hz exactly as it always did. `raf` is
+ * that turns up often: the cluster at the 10th percentile — or a whole
+ * fraction of it, if that turns up too (see estimateDisplayPeriod). Intervals
+ * over 40 ms are dropped outright. Fewer than 24 samples, or no real cluster
+ * there (a tenth of them within 12% of each other), and the answer is
+ * "unknown": the game assumes 60 Hz exactly as it always did. `raf` is
  * requestAnimationFrame (a parameter so the harness can drive it). stop()
  * ends it and returns the period in ms, or NaN.
+ *
+ * "Mostly idle" is generous: each loading stage is one long task with a
+ * single frame between it and the next. Measured on a 120 Hz laptop, a
+ * 5.5 s load gave 28 callbacks, only 14 of them under 40 ms, so there the
+ * answer is "unknown" — which is safe (see "a screen that is not 60 Hz").
+ * A load that waits more (slow shader compiles, a slow network) gives more,
+ * and a slow machine's waits are where a misreading could come from, hence
+ * the checks in estimateDisplayPeriod. __OPENROAD.autoQuality.probeSamples
+ * says how many it got.
  */
 export function createDisplayProbe(raf) {
   const got = new Float64Array(240);
@@ -462,16 +575,45 @@ export function createDisplayProbe(raf) {
 export function estimateDisplayPeriod(intervals, count) {
   if (!(count >= 24)) return NaN;
   const s = intervals.slice(0, count).sort();
-  // The cluster round it, and its middle: rAF timestamps wobble either way,
-  // so the 10th percentile sits low in the cluster. Centred twice, which
-  // takes a 144 Hz screen's estimate from 6.70 ms to 6.86 (true: 6.94).
-  let mid = s[Math.floor(count * 0.1)], a = 0, b = count;
-  for (let pass = 0; pass < 2; pass++) {
-    a = 0; b = count;
-    while (a < count && s[a] < mid * 0.88) a++;
-    while (b > a && s[b - 1] > mid * 1.12) b--;
-    if (b - a < Math.max(8, count * 0.1)) return NaN;
+  const period = clusterAt(s, count, s[Math.floor(count * 0.1)], Math.max(8, count * 0.1));
+  if (!(period > 0)) return NaN;
+  // A slow machine can spend the whole load doing 17-33 ms of work a frame.
+  // Then nine intervals in ten take two refreshes, the 10th percentile sits
+  // on the second, and a 60 Hz screen reads as 30 Hz — which doubles every
+  // threshold, and a laptop the GPU then holds at 30 fps in the game never
+  // steps down, because the in-game correction needs frames faster than the
+  // period and it never makes one. But no screen shows a frame faster than
+  // its period, so a real cluster at a half, a third... of the one found —
+  // a few idle refreshes, 3% of the samples — IS the period. Smallest
+  // first, so a 144 Hz screen read at three refreshes (20.8 ms) comes back
+  // as 6.9, not as 72 Hz.
+  for (let d = 5; d >= 2; d--) {
+    const sub = clusterAt(s, count, period / d, Math.max(6, count * 0.03));
+    if (Math.abs(sub * d - period) < 0.06 * period) return validPeriod(sub);
+  }
+  return validPeriod(period);
+}
+
+/**
+ * The middle of the cluster of sorted `s` within 12% of `guess`, or NaN if it
+ * holds fewer than `need`. rAF timestamps wobble either way, so a percentile
+ * sits low in its cluster: centred twice within 12%, then twice more within
+ * 25%. The wider passes are for a wobble that is a large part of the period:
+ * this game's title screen on a 120 Hz laptop measured intervals of 7.0 /
+ * 8.3 / 9.8 ms at the 10th / 50th / 90th percentiles, and a 12% window
+ * cannot reach the middle of that — it read 7.3 ms, 12% fast, which puts the
+ * vsync grid the CPU test rounds to in the wrong place. Two refreshes are
+ * +100%, so 25% never reaches the next cluster.
+ */
+function clusterAt(s, count, guess, need) {
+  let mid = guess;
+  for (let pass = 0; pass < 4; pass++) {
+    const w = pass < 2 ? 0.12 : 0.25;
+    let a = 0, b = count;
+    while (a < count && s[a] < mid * (1 - w)) a++;
+    while (b > a && s[b - 1] > mid * (1 + w)) b--;
+    if (b - a < need) return NaN;
     mid = s[(a + b) >> 1];
   }
-  return validPeriod(mid);
+  return mid;
 }

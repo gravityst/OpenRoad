@@ -373,7 +373,6 @@ export function createGoals(opts) {
     if (overlay) { overlay.hideResult(); overlay.countdown(3); }
     play('beep');
     setTarget(c, false);
-    if (view && view.raceStart) view.raceStart(c);
   }
 
   function raceStep(dt) {
@@ -457,7 +456,6 @@ export function createGoals(opts) {
     showResult(c, t, res);
     race.c = null; race.phase = '';
     cooldown[c.id] = clock + 4;
-    if (view && view.raceEnd) view.raceEnd();
     afterChallenge(c);
   }
 
@@ -467,7 +465,6 @@ export function createGoals(opts) {
     race.c = null; race.phase = '';
     cooldown[c.id] = clock + 3;
     if (overlay) overlay.countdown(-1);
-    if (view && view.raceEnd) view.raceEnd();
     if (msg) toast(msg, 3);
   }
 

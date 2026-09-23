@@ -154,7 +154,7 @@ export function snowAmount(wAlpine, x, z, h, seed) {
   const edge = 4 * wAlpine * (1 - wAlpine);
   const v = wAlpine + (h + 20) / 140 + (fbm(x / 180, z / 180, s + 481, 2) * 0.3
           + valueNoise(x / 43, z / 43, s + 482) * 0.1) * edge;
-  return smoothstep(0.38, 0.72, v);
+  return smoothstep(0.32, 0.82, v);
 }
 
 // ---------------------------------------------------------------------------

@@ -876,6 +876,20 @@ export function createTerrain(world, ground, opts = {}) {
   const bw = new Float64Array(5);
   bw[BIOME.farm] = 1;
 
+  /**
+   * A dusting of snow on bare ground near the pass — the canyon's sand and
+   * hardpan where the two meet — rising to meet the snow proper, as the
+   * grass already had. Without it the sand ran straight into white along a
+   * line, the one border on the map that still looked like a seam.
+   */
+  function dust(x, z, y, wA, out) {
+    if (wA <= 0.02) return;
+    const k = smoothstep(0.12, 0.5, bio.snowAt(x, z, y, wA)) * 0.7;
+    if (k <= 0) return;
+    out[0] = lerp(out[0], SNOW[0], k); out[1] = lerp(out[1], SNOW[1], k); out[2] = lerp(out[2], SNOW[2], k);
+    if (k > palSnow) palSnow = k;
+  }
+
   function palette(surface, x, z, ny, y, crest, out, fine = 1) {
     palWood = 0;
     palSnow = 0;
@@ -1005,6 +1019,7 @@ export function createTerrain(world, ground, opts = {}) {
       out[2] = WASH[2] * wash + lerp(DUNE[2], SILT[2], silt) * wD + BEACH[2] * wC;
       const wet = surface === 'water' ? 1 : smoothstep(seaLevel + 1.0, seaLevel + 0.1, y);
       if (wet > 0) { out[0] = lerp(out[0], WET_SAND[0], wet); out[1] = lerp(out[1], WET_SAND[1], wet); out[2] = lerp(out[2], WET_SAND[2], wet); }
+      dust(x, z, y, wA, out);
       return;
     }
     const hex = (SURFACES[surface] || SURFACES.grass).colour;
@@ -1026,6 +1041,7 @@ export function createTerrain(world, ground, opts = {}) {
       out[0] = lerp(out[0], lerp(HARDPAN[0], PAVEMENT[0], pv), wD) * k;
       out[1] = lerp(out[1], lerp(HARDPAN[1], PAVEMENT[1], pv), wD) * k;
       out[2] = lerp(out[2], lerp(HARDPAN[2], PAVEMENT[2], pv), wD) * k;
+      dust(x, z, y, wA, out);
     } else if (surface === 'rock' && wD + wA > 0) {
       const base = 1 - wD - wA;
       out[0] = out[0] * base + RED_ROCK[0] * wD + GRANITE[0] * wA;

@@ -18,6 +18,7 @@ const CHECKS = [
   ['carcrash', 'cars are solid against each other and both take the damage'],
   ['debris', 'parts that fall off tumble, land, and never gain energy'],
   ['model', 'imported cars match the rig, and a missing one is harmless'],
+  ['cars', 'the car models look like cars and still come apart where damage expects'],
   ['traffic', 'the other cars behave like traffic'],
   ['drift', 'sideways scores, straight does not, and the detector never flickers'],
   ['brand', 'every name in the game is invented'],

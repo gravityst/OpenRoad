@@ -22,8 +22,10 @@
 // lands between a draw and the screen; no quality step cuts more than 40% of
 // the pixels on any screen; the loading screen compiles the shader variants
 // the frame will actually draw), the automatic quality against simulated
-// machines — HiDPI, 50 Hz, 30 fps capped, 144 Hz, CPU-bound, slow for reasons
-// nobody can measure — and the measurement of the screen's own rate.
+// machines — HiDPI, 50 Hz, 30 fps capped, 144 Hz, CPU-bound, a GPU whose cost
+// varies frame to frame, slow on both counts, a CPU spike mid-descent, slow
+// for reasons nobody can measure — and the measurement of the screen's own
+// rate, including a loading screen that hid it.
 //
 // Headless, so it cannot see the screen. What to look at in the browser is in
 // the report that came with this harness; the short version is "drive at 144
@@ -515,7 +517,11 @@ function effectsOn(dpr, quality, log = []) {
 // with the post tier by the costs measured for adaptive.js. The frame takes
 // the longer of the two, plus 4% noise, and waits for the screen's next
 // refresh; its timestamp wobbles by up to +-1.5 ms, as requestAnimationFrame's
-// do. The script time main.js measures is the CPU part. Every ~5 s a 180 ms
+// do. `gpuSpread` makes the GPU's cost vary from frame to frame as well, the
+// way scenery, traffic and particles make it vary in the game — without it no
+// machine here could have a median on the vsync and a quarter of its frames
+// a vsync late, which is the machine a round-three rule got wrong while every
+// check passed. The script time main.js measures is the CPU part. Every ~5 s a 180 ms
 // hitch lands on top (under maxGapMs, so it IS judged — an earlier version
 // used 300 ms, which the judge throws away as a paused tab and so proved
 // nothing), every ~15 s a 300 ms one, and every 10 s a burst of streaming
@@ -526,16 +532,20 @@ function effectsOn(dpr, quality, log = []) {
   function machine({
     cpu, gpu, chosen = 'medium', dpr = 1, screenMs = HZ60, hitches = true, timing = true,
     scriptTimed = true, screenKnown = true, level = 0, drawShare = 0.6, drawWaits = false,
+    gpuSpread = 0, cpuAt = null, measuredMs,
   }) {
+    // measuredMs: what the loading screen read the screen's period as, when
+    // that is not simply right (screenKnown) or unknown.
     const { fx } = effectsOn(dpr, chosen);
     const q = createAdaptiveQuality({
-      post: chosen, level, dpr: fx.basePixelRatio(chosen), displayMs: screenKnown ? screenMs : NaN,
+      post: chosen, level, dpr: fx.basePixelRatio(chosen),
+      displayMs: measuredMs !== undefined ? measuredMs : screenKnown ? screenMs : NaN,
     });
     // Pixels at each rung, relative to full quality, as effects.js draws them
     // (the same rungs the controller uses: ladderFor with the same inputs).
     const px = ladderFor(chosen, fx.basePixelRatio(chosen)).map((r) => { applyRung(fx, r, chosen); return fx.pixelRatio ** 2; });
     const full = px[0];
-    const startChanges = q.changes;
+    let startChanges = q.changes, judgedFrom = 15000;
     let t = 0, frame = 0, slowFrames = 0, drawnFrames = 0, below = 0, wobble = 0;
     const levels = [];
     return {
@@ -545,8 +555,11 @@ function effectsOn(dpr, quality, log = []) {
         while (t < end) {
           const r = q.rung;
           const g = gpu * (0.15 + 0.85 * px[q.level] / full) * POST[r.post] / POST[chosen];
-          const c = cpu * (0.98 + rnd() * 0.04);
-          const gg = g * (0.98 + rnd() * 0.04);
+          const c = (cpuAt ? cpuAt(t / 1000) : cpu) * (0.98 + rnd() * 0.04);
+          // (The spread draws its own random number only when there is one,
+          // so every machine without it runs exactly as it always did.)
+          const spread = gpuSpread > 0 ? 1 - gpuSpread + 2 * gpuSpread * rnd() : 1;
+          const gg = g * spread * (0.98 + rnd() * 0.04);
           let ms = Math.max(c, gg);
           // The draw call's share of the script. A draw that waits for the
           // GPU runs until the GPU is done, so the script then fills the frame
@@ -563,7 +576,7 @@ function effectsOn(dpr, quality, log = []) {
             scriptTimed ? script : NaN, scriptTimed ? draw : NaN);
           wobble = w;
           t += ms; frame++;
-          if (t > 15000) {             // judged after the first 15 s
+          if (t > judgedFrom) {        // judged after the first 15 s
             drawnFrames++;
             if (ms > Math.max(19, screenMs * 1.14) && ms < 250) slowFrames++;
             if (q.level > 0) below += ms;
@@ -571,9 +584,11 @@ function effectsOn(dpr, quality, log = []) {
           if (!levels.length || levels[levels.length - 1][1] !== q.level) levels.push([Math.round(t / 1000), q.level]);
         }
       },
+      /** Judge only what happens from here on. */
+      restart() { judgedFrom = t; slowFrames = 0; drawnFrames = 0; below = 0; startChanges = q.changes; },
       get changes() { return q.changes - startChanges; },
       get slowShare() { return drawnFrames ? slowFrames / drawnFrames : 0; },
-      get belowShare() { return below / Math.max(1, t - 15000); },
+      get belowShare() { return below / Math.max(1, t - judgedFrom); },
       levels,
     };
   }
@@ -659,6 +674,105 @@ function effectsOn(dpr, quality, log = []) {
       `CPU-bound in the draw: ${m.changes} changes, ${(m.belowShare * 100).toFixed(1)}% blurred; ` +
       `GPU-bound, draw waiting: level ${g.q.level}, ${(g.slowShare * 100).toFixed(1)}% slow frames (${trace(g)})`);
   }
+
+  // The machines below were added after a review of round three. They draw
+  // from the same random sequence as everything else, so it is put back
+  // afterwards: every check above and below reports what it always did.
+  const seedBefore = seed;
+  {
+    // The machine the review found: a GPU just over budget whose cost varies
+    // from frame to frame. Most frames make the vsync and a quarter or more
+    // miss it, so the median sits on 16.7 ms — where a 5 ms script, rounded
+    // up to the vsync it can make, was said to fill the frame. Judged
+    // CPU-bound, it was held at full quality with a fifth to a third of its
+    // frames late; stepping down leaves under a tenth.
+    const out = [];
+    let ok = true;
+    for (const [gpu, gpuSpread, timing] of [
+      [14, 0.4, false], [14, 0.5, false], [15, 0.4, false], [14, 0.4, true], [14, 0.5, true], [13, 0.5, true],
+    ]) {
+      const m = machine({ cpu: 5, gpu, gpuSpread, timing });
+      m.run(300);
+      ok = ok && m.q.level > 0 && m.slowShare < 0.1;
+      out.push(`${gpu}+-${gpuSpread * 100}% ${timing ? 'timer' : 'no timer'}: level ${m.q.level}, ` +
+        `${(m.slowShare * 100).toFixed(1)}%`);
+    }
+    check('a GPU whose cost varies frame to frame steps down, timer or not', ok,
+      `CPU 5 ms; slow frames after 15 s — ${out.join('; ')}`);
+  }
+  {
+    // A draw call that waits for the GPU makes the whole script as long as
+    // the GPU's frame. With a timer, the whole script used to count as CPU
+    // whenever the GPU was busy for under 80% of the frame: a 28 ms GPU
+    // makes 33.3 ms frames, 84% busy, but one step down it is 23 ms — 69% —
+    // and the "CPU" handed every level back. Now the whole script counts
+    // only when the GPU would have made an earlier vsync, or the script
+    // outlasts the GPU by a quarter.
+    const out = [];
+    let ok = true;
+    for (const gpu of [20, 28]) {
+      const m = machine({ cpu: 7, gpu, timing: true, drawWaits: true });
+      m.run(300);
+      ok = ok && m.q.level > 0 && m.slowShare < 0.03;
+      out.push(`GPU ${gpu} ms: level ${m.q.level}, ${(m.slowShare * 100).toFixed(1)}% slow (${trace(m)})`);
+    }
+    check('...and one whose draw call waits steps down with a GPU timer too', ok, out.join('; '));
+  }
+  {
+    // Slow on both counts: a 24 ms script (60% of it in the draw call, so
+    // only a GPU timer shows it is CPU) and a GPU that needs 20 or 36 ms.
+    // Frames are 33.3 ms at every level the CPU allows. It may look, but it
+    // must settle: before, a descent that levels were handed back from was
+    // walked again every time the 60 s hold ran out, 11-13 changes in ten
+    // minutes, blurred all the while for frames that never changed.
+    const out = [];
+    let ok = true;
+    for (const [gpu, sharp] of [[20, true], [36, false]]) {
+      const m = machine({ cpu: 24, gpu, timing: true });
+      m.run(120);
+      const early = m.changes;
+      m.restart();
+      m.run(480);
+      ok = ok && early <= 6 && m.changes === 0 && (!sharp || m.q.level === 0);
+      out.push(`GPU ${gpu} ms: ${early} changes in the first 2 min, ${m.changes} in the next 8, level ${m.q.level} (${trace(m)})`);
+    }
+    check('slow on both CPU and GPU: it settles, and stays settled', ok, out.join('; '));
+  }
+  {
+    // A CPU spike (24 ms of script for 35 s) landing on a GPU-bound laptop's
+    // first descent. The bottom of the ladder, measured during the spike,
+    // looked no faster than the top, measured before it; "not the pixels"
+    // was learned and outlived the spike, and the laptop sat at full quality
+    // with every frame late for good. Now the lesson needs the same work at
+    // both ends.
+    const out = [];
+    let ok = true;
+    for (const timing of [false, true]) {
+      const m = machine({ cpu: 5, gpu: 30, timing, cpuAt: (sec) => (sec > 5 && sec < 40 ? 24 : 5) });
+      m.run(120);
+      m.restart();
+      m.run(480);
+      ok = ok && m.q.level > 0 && m.slowShare < 0.05;
+      out.push(`${timing ? 'timer' : 'no timer'}: level ${m.q.level}, ${(m.slowShare * 100).toFixed(1)}% slow after 2 min`);
+    }
+    check('a CPU spike during a descent is not remembered as "not the pixels"', ok, out.join('; '));
+  }
+  {
+    // A 60 Hz screen that the loading screen read as 30 Hz, on a laptop the
+    // GPU (23 ms, +-30%) holds near 30 fps: about one frame in seven still
+    // makes one refresh, 16.7 ms, which a 30 Hz screen can never show. The
+    // old test needed a quarter of them, so the period stood, every
+    // threshold stayed doubled, and it never stepped down: 93% of frames
+    // late, for good. (A GPU that never makes one refresh — 24 ms +-30% —
+    // leaves nothing to find it out by; see the report.)
+    const m = machine({ cpu: 5, gpu: 23, gpuSpread: 0.3, timing: false, measuredMs: 1000 / 30 });
+    m.run(300);
+    check('a 60 Hz screen misread as 30 Hz is found out, and the laptop steps down',
+      !(m.q.stats.displayMs > 0) && m.q.level > 0 && m.slowShare < 0.1,
+      `period now ${m.q.stats.displayMs > 0 ? m.q.stats.displayMs.toFixed(1) + ' ms' : 'unknown (60 Hz)'}, ` +
+      `level ${m.q.level}, ${(m.slowShare * 100).toFixed(1)}% slow frames: ${trace(m)}`);
+  }
+  seed = seedBefore;
   {
     // Slow for a reason neither the script time nor a GPU timer can see — a
     // busy machine. It has to try the ladder once; it must not keep trying.
@@ -757,6 +871,25 @@ function effectsOn(dpr, quality, log = []) {
     [ragged, few, none].every(Number.isNaN),
     `${got.map(([hz, , v]) => `${hz} Hz -> ${v.toFixed(2)} ms`).join(', ')}; 60 Hz with 80% of frames busy -> ` +
     `${busy.toFixed(2)} ms; ragged -> ${ragged}; 20 frames -> ${few}; no frames -> ${none}`);
+
+  // A slow machine whose loading work takes 17-33 ms a frame: nearly every
+  // interval is two refreshes, and the 10th percentile sits on the second.
+  // Read as 30 Hz, every threshold doubles. A few idle refreshes are enough
+  // to say what the screen is, because no screen shows a frame faster than
+  // its period. And the other way: a real 30 Hz cap with a couple of stray
+  // short intervals (a late frame, then an early one) stays 30 Hz.
+  const saved = seed;
+  const doubled = (ms, single) => () => ms * (rnd() < single ? 1 : 2) + (rnd() * 2 - 1) * 0.8;
+  const slow60 = probe(doubled(1000 / 60, 0.05), 240);
+  const slow144 = probe(() => (1000 / 144) * (rnd() < 0.06 ? 1 : 3) + (rnd() * 2 - 1) * 0.4, 240);
+  let strays = 0;
+  const cap30 = probe(() => (strays < 3 && rnd() < 0.02 ? (strays++, 17 + rnd() * 3) : doubled(1000 / 30, 1)()), 240);
+  seed = saved;
+  check('...even when loading kept nearly every frame to two refreshes',
+    Math.abs(slow60 - 1000 / 60) < 0.02 * 1000 / 60 && Math.abs(slow144 - 1000 / 144) < 0.02 * 1000 / 144 &&
+    Math.abs(cap30 - 1000 / 30) < 0.02 * 1000 / 30,
+    `60 Hz, 95% at two refreshes -> ${slow60.toFixed(2)} ms (was 33.3); 144 Hz, 94% at three -> ` +
+    `${slow144.toFixed(2)} ms; 30 Hz cap with ${strays} stray short intervals -> ${cap30.toFixed(2)} ms`);
 }
 
 console.log(fail === 0 ? '\nSmooth at every frame rate.' : `\n${fail} CHECK(S) FAILED`);

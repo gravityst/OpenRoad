@@ -14,7 +14,16 @@
 //
 // It drives the loop main.js runs, line for line, and then reads main.js to
 // make sure that IS the loop main.js runs: a harness that tests a copy proves
-// nothing the day the original changes.
+// nothing the day the original changes — and proves that reading is strict,
+// by breaking copies of main.js fourteen ways and requiring each be caught.
+//
+// Then the rest of what makes a frame arrive smoothly: effects.js run for real
+// through a renderer that writes down what it is asked to do (no resize ever
+// lands between a draw and the screen; no quality step cuts more than 40% of
+// the pixels on any screen; the loading screen compiles the shader variants
+// the frame will actually draw), the automatic quality against simulated
+// machines — HiDPI, 50 Hz, 30 fps capped, 144 Hz, CPU-bound, slow for reasons
+// nobody can measure — and the measurement of the screen's own rate.
 //
 // Headless, so it cannot see the screen. What to look at in the browser is in
 // the report that came with this harness; the short version is "drive at 144
@@ -25,8 +34,10 @@ import { fileURLToPath } from 'node:url';
 import {
   createPoseBuffer, settleAccumulator, blendFactor, springAngleStep, followLinear, wrapPi,
 } from '../src/core/interp.js';
+import * as THREE from 'three';
 import { createVehicle } from '../src/physics/vehicle.js';
-import { createAdaptiveQuality, ladderFor } from '../src/core/adaptive.js';
+import { createAdaptiveQuality, ladderFor, applyRung, createDisplayProbe } from '../src/core/adaptive.js';
+import { createEffects } from '../src/render/effects.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 let fail = 0;
@@ -264,48 +275,267 @@ function makeLoop(car, physics) {
 }
 
 // ---------------------------------------------------------------------------
-// 5. main.js really runs this loop.
+// 5. main.js really runs this loop — and this check would notice if it stopped.
 // ---------------------------------------------------------------------------
+// Reading the source is the only way a headless harness can see main.js, so
+// the reading has to be strict enough to matter. The first version checked
+// that a few lines EXISTED; a reviewer then broke main.js five ways (the
+// car's yaw from the physics while its position came from the pose, pitch
+// and roll likewise, the steering, and the blend moved below the camera so
+// everything drew last frame's pose) and four of the five passed. So this
+// audits order and completeness, and then proves itself: every one of those
+// breakages, and a few more, is applied to a copy of main.js below and must
+// be caught.
 {
   const src = readFileSync(join(ROOT, 'src/main.js'), 'utf8');
-  const has = (s) => src.includes(s);
-  const loopAt = src.indexOf('while (accumulator >= PHYS_DT && steps < MAX_SUBSTEPS) {');
-  const firstInLoop = loopAt >= 0 ? src.slice(loopAt, loopAt + 120) : '';
-  check('main.js captures the pose first thing in every physics step',
-    /\{\s*carPose\.capture\(car\);/.test(firstInLoop), loopAt >= 0 ? 'found' : 'loop header not found');
-  check('main.js blends after the step loop with the settled accumulator',
-    has('accumulator = settleAccumulator(accumulator, steps, MAX_SUBSTEPS, PHYS_DT);') &&
-    has('pose = carPose.blend(car, blendFactor(accumulator, PHYS_DT));'), 'both lines present');
-  check('main.js steps at the rate and cap this harness assumes',
-    has(`const PHYS_HZ = ${PHYS_HZ};`) && has(`const MAX_SUBSTEPS = ${MAX_SUBSTEPS};`), `${PHYS_HZ} Hz, ${MAX_SUBSTEPS} steps`);
-  check('the car is drawn from the blended pose',
-    has('carRoot.position.set(pose.x, pose.y, pose.z);') && has('carModel.setWheelSpin(pose.spin);'), '');
-  const cam = src.slice(src.indexOf('function updateCamera('), src.indexOf('// ---- prime the streaming layers'));
-  const leaks = cam.match(/\bcar\.(x|y|z|yaw|roll)\b/g) || [];
-  check('the camera follows the drawn car, never the simulated one',
-    cam.includes('const p = pose;') && leaks.length === 0,
-    leaks.length ? `updateCamera reads ${[...new Set(leaks)].join(', ')}` : 'no car.x/y/z/yaw/roll in updateCamera');
-  // Exactly once: the spring and the lags advance by dt on every call, so a
-  // second call in a frame would move the camera twice as fast as the car.
-  const camCalls = (src.match(/\bupdateCamera\(dt, driving\);/g) || []).length;
-  check('the camera is updated exactly once a frame', camCalls === 1, `${camCalls} call(s) in main.js`);
+
+  // Functions inside boot() are indented two spaces and close with a brace
+  // at exactly that indent; anything nested is indented further.
+  const body = (s, head) => {
+    const at = s.indexOf(head);
+    if (at < 0) return '';
+    const end = s.indexOf('\n  }\n', at);
+    return end < 0 ? '' : s.slice(at, end);
+  };
+  // The simulated car's own pose fields. Anything drawn on it reads `pose`.
+  const PHYS = /\bcar\.(x|y|z|yaw|pitch|roll|steerAngle|wheels)\b/g;
+
+  function auditMain(s) {
+    const bad = [];
+    const need = (ok, what) => { if (!ok) bad.push(what); };
+    const loopAt = s.indexOf('while (accumulator >= PHYS_DT && steps < MAX_SUBSTEPS) {');
+    need(loopAt >= 0 && /\{\s*carPose\.capture\(car\);/.test(s.slice(loopAt, loopAt + 120)),
+      'the pose is captured first thing in every physics step');
+    need(s.includes('accumulator = settleAccumulator(accumulator, steps, MAX_SUBSTEPS, PHYS_DT);'),
+      'the accumulator is settled after the step loop');
+    need(s.includes(`const PHYS_HZ = ${PHYS_HZ};`) && s.includes(`const MAX_SUBSTEPS = ${MAX_SUBSTEPS};`),
+      `physics at ${PHYS_HZ} Hz, capped at ${MAX_SUBSTEPS} steps`);
+
+    const step = body(s, 'function stepFrame(dt) {');
+    need(step.length > 0, 'stepFrame() found');
+    const blendAt = step.indexOf('pose = carPose.blend(car, blendFactor(accumulator, PHYS_DT));');
+    need(blendAt > step.indexOf('accumulator = settleAccumulator('), 'the blend comes after the settled accumulator');
+    // Everything drawn from the pose must come after the pose is made, or it
+    // draws last frame's — at 144 Hz with a ragged dt, that IS the judder.
+    for (const use of ['carRoot.position.set(', 'emitTyreEffects(dt)', 'updateCamera(dt, driving);']) {
+      const at = step.indexOf(use);
+      need(at >= 0 && blendAt >= 0 && blendAt < at, `the pose is blended before ${use.replace(/\($/, '')}`);
+    }
+    // Every line that places the car's body or wheels reads the pose, and
+    // none reads the simulated car.
+    const drawn = step.split('\n').filter((l) =>
+      /carRoot\.(position|rotation|quaternion|rotate[XYZ])\b|carModel\.set(Steer|WheelSpin)\(|suspension\[i\]\s*=/.test(l));
+    need(drawn.length >= 7, `all seven car placements found (${drawn.length})`);
+    for (const l of drawn) {
+      const leak = l.match(PHYS);
+      need(!leak && /\bpose\./.test(l), `drawn from the pose: ${l.trim()}`);
+    }
+
+    const cam = body(s, 'function updateCamera(dt, driving) {');
+    need(cam.includes('const p = pose;'), 'the camera is hung off the pose');
+    const camLeaks = cam.match(PHYS) || [];
+    need(camLeaks.length === 0, `the camera never reads the simulated car (${[...new Set(camLeaks)].join(', ')})`);
+    // Exactly once: the spring and the lags advance by dt on every call, so a
+    // second call in a frame would move the camera twice as fast as the car.
+    need((s.match(/\bupdateCamera\(dt, driving\);/g) || []).length === 1, 'the camera is updated exactly once a frame');
+
+    const tyres = body(s, 'function emitTyreEffects(dt) {');
+    need(/const wx = pose\.x/.test(tyres) && /pose\.yaw/.test(tyres), 'tyre marks are laid where the wheels are drawn');
+
+    // The automatic quality judges and applies BEFORE the frame is drawn. A
+    // canvas resized after its frame was drawn shows the page through it for
+    // one frame (effects.js also defers every resize to its next draw, which
+    // section 6 checks; this is the belt to those braces).
+    const fr = body(s, 'function frame(now) {');
+    const sampleAt = fr.indexOf('auto.sample('), drawAt = fr.indexOf('stepFrame(dt);');
+    need(sampleAt >= 0 && drawAt > sampleAt && fr.indexOf('applyAuto(', drawAt) < 0,
+      'quality is judged and applied before the frame is drawn, never after');
+    need(/auto\.sample\(raw \* 1000, effects\.gpuMs, scriptMs, drawMs\)/.test(fr) && /scriptMs = performance\.now\(\) - t0;/.test(fr) &&
+      /const drawAt = performance\.now\(\);\s*effects\.render\(dt\);\s*drawMs = performance\.now\(\) - drawAt;/.test(step),
+      'the frame\'s own script time, and the draw call\'s share of it, reach the judge');
+    need(/applyRung\(effects, autoOn\(\) \? auto\.rung : AUTO_FULL, autoPost\)/.test(s),
+      'a rung is applied as a fraction of the CHOSEN tier\'s pixel ratio');
+    return bad;
+  }
+
+  const found = auditMain(src);
+  check('main.js runs the loop this harness drives, in this order', found.length === 0,
+    found.length ? `missing: ${found.join('; ')}` : 'capture, settle, blend, then car, tyres, camera; quality before the draw');
+
+  // The self-test. Each mutation must actually change the text (or it proves
+  // nothing) and must be caught.
+  const swap = (a, b) => (s) => s.replace(a, b);
+  const move = (line, after) => (s) => {
+    const cut = s.replace(line, '');
+    return cut.replace(after, after + line);
+  };
+  const MUTANTS = [
+    ['yaw from the physics', swap('carRoot.rotation.set(0, pose.yaw, 0);', 'carRoot.rotation.set(0, car.yaw, 0);')],
+    ['pitch from the physics', swap('carRoot.rotateX(pose.pitch);', 'carRoot.rotateX(car.pitch);')],
+    ['roll from the physics', swap('carRoot.rotateZ(-pose.roll);', 'carRoot.rotateZ(-car.roll);')],
+    ['steering from the physics', swap('carModel.setSteer(pose.steer);', 'carModel.setSteer(car.steerAngle);')],
+    ['wheel spin from the physics', swap('carModel.setWheelSpin(pose.spin);', 'carModel.setWheelSpin(car.wheels[0].spin);')],
+    ['suspension from the physics', swap('suspension[i] = pose.comp[i];', 'suspension[i] = car.wheels[i].comp;')],
+    ['position from the physics', swap('carRoot.position.set(pose.x, pose.y, pose.z);', 'carRoot.position.set(car.x, car.y, car.z);')],
+    ['blend moved below the camera', move('\n    pose = carPose.blend(car, blendFactor(accumulator, PHYS_DT));', '\n    updateCamera(dt, driving);')],
+    ['camera rolls with the physics', swap('camera.rotateZ(-p.roll * 0.22);', 'camera.rotateZ(-car.roll * 0.22);')],
+    ['camera pitches with the physics', swap('const p = pose;', 'const p = pose; void car.pitch;')],
+    ['camera updated twice', swap('updateCamera(dt, driving);', 'updateCamera(dt, driving);\n    updateCamera(dt, driving);')],
+    ['quality applied after the draw', move('\n    if (mode === \'driving\' && autoOn() && auto.sample(raw * 1000, effects.gpuMs, scriptMs, drawMs)) applyAuto(true);', '\n    stepFrame(dt);')],
+    ['draw time not measured', swap('drawMs = performance.now() - drawAt;', '')],
+    ['capture after the step', swap('carPose.capture(car);', '/* moved */')],
+    ['post drop cuts the resolution', swap('applyRung(effects, autoOn() ? auto.rung : AUTO_FULL, autoPost);', 'applyRung(effects, autoOn() ? auto.rung : AUTO_FULL, null);')],
+  ];
+  const missed = [];
+  for (const [name, mutate] of MUTANTS) {
+    const m = mutate(src);
+    if (m === src) { missed.push(`${name} (mutation did not apply)`); continue; }
+    if (auditMain(m).length === 0) missed.push(name);
+  }
+  check('...and that check catches every known way of breaking it', missed.length === 0,
+    missed.length ? `not caught: ${missed.join(', ')}` : `${MUTANTS.length} of ${MUTANTS.length} broken copies of main.js caught`);
 }
 
 // ---------------------------------------------------------------------------
-// 6. Automatic quality, against simulated machines.
+// 6. The post-processing, through a recording renderer.
 // ---------------------------------------------------------------------------
-// A machine is a CPU time and a GPU time per frame. The GPU part shrinks with
-// the resolution (a fixed 15% that does not, e.g. the shadow map, and the rest
-// with the pixel count) and with the post tier, by the costs measured for
-// adaptive.js. The frame takes the longer of the two, plus 4% noise, and on a
-// 60 Hz screen waits for the next vsync; the timestamp it is measured by then
-// wobbles by up to +-1.5 ms, as requestAnimationFrame's do. Every so often a
-// hitch lands on top: a 300 ms stall and a burst of streaming frames, which
-// must never move it.
+// effects.js runs here for real — the composer, bloom, finish and FXAA passes
+// — against a renderer that only writes down what it is asked to do. Two
+// things to prove:
+//
+//  * a quality change never resizes the canvas between a frame being drawn and
+//    the screen showing it. A resize clears a WebGL canvas, and one landing
+//    after the draw showed the page through the game for a frame: a black
+//    flash on every automatic quality change;
+//  * on a HiDPI screen no step of the ladder cuts more than 40% of the pixels.
+//    With the post tier's own pixel-ratio cap applied, (0.8, medium) to
+//    (0.8, low) at devicePixelRatio 2 was a 56% cut.
+const NOOP = () => {};
+function recordingRenderer(log, w = 1440, h = 900) {
+  let pr = 1;
+  const r = {
+    getSize: (v) => v.set(w, h), getPixelRatio: () => pr,
+    setPixelRatio: (p) => { pr = p; log.push('resize'); },
+    setSize: (a, b) => { w = a; h = b; log.push('resize'); },
+    getDrawingBufferSize: (v) => v.set(Math.floor(w * pr), Math.floor(h * pr)),
+    render: () => { log.push('draw'); },
+    getContext: () => ({}), getClearColor: (c) => c, getClearAlpha: () => 1, getRenderTarget: () => null,
+    autoClear: true, outputColorSpace: '', toneMapping: 0, toneMappingExposure: 1,
+  };
+  // Everything else a pass calls (setRenderTarget, clear, setClearColor...)
+  // is accepted and ignored.
+  return new Proxy(r, { get: (o, k) => (k in o ? o[k] : NOOP) });
+}
+/** effects.js on a screen of devicePixelRatio `dpr`. */
+function effectsOn(dpr, quality, log = []) {
+  globalThis.window = { devicePixelRatio: dpr };
+  const fx = createEffects(recordingRenderer(log), new THREE.Scene(), new THREE.PerspectiveCamera(),
+    { quality, width: 1440, height: 900 });
+  return { fx, log };
+}
+{
+  const { fx, log } = effectsOn(2, 'medium');
+  fx.render(1 / 60);
+  const rungs = ladderFor('medium', fx.basePixelRatio('medium'));
+  let lateResizes = 0, drawnFirst = 0, applied = 0;
+  for (const r of [...rungs, ...rungs.slice().reverse()]) {
+    log.length = 0;
+    applyRung(fx, r, 'medium');
+    lateResizes += log.filter((e) => e === 'resize').length;   // before any draw: must be none
+    fx.render(1 / 60);
+    const firstDraw = log.indexOf('draw');
+    if (log.lastIndexOf('resize') > firstDraw) drawnFirst++;
+    applied++;
+  }
+  check('a quality change never resizes the canvas between a draw and the screen',
+    lateResizes === 0 && drawnFirst === 0,
+    `${applied} changes: ${lateResizes} resized on the spot, ${drawnFirst} resized after drawing began`);
+}
+{
+  const rows = [];
+  let worst = 1;
+  for (const [dpr, chosen] of [[1, 'medium'], [2, 'medium'], [2, 'high'], [1.25, 'medium'], [2, 'low']]) {
+    const { fx } = effectsOn(dpr, chosen);
+    const rungs = ladderFor(chosen, fx.basePixelRatio(chosen));
+    const prs = rungs.map((r) => { applyRung(fx, r, chosen); return fx.pixelRatio; });
+    for (let i = 1; i < prs.length; i++) worst = Math.min(worst, (prs[i] / prs[i - 1]) ** 2);
+    rows.push(`dpr ${dpr} ${chosen}: ${prs.map((p) => p.toFixed(2)).join(' ')}`);
+  }
+  check('no step of the ladder cuts more than 40% of the pixels, on any screen', worst >= 0.6,
+    `worst step keeps ${(worst * 100).toFixed(0)}%; ${rows.join('; ')}`);
+}
+
+{
+  // The loading screen compiles every shader so no frame has to. It is only
+  // worth anything if it compiles the variant the frame will draw: bound to
+  // no render target, three compiles the canvas variant (tone-mapped, sRGB),
+  // which the post chain never uses — 47 of 89 programs after loading were
+  // those, and everything hidden at load compiled again mid-drive. Likewise
+  // the shadow type is in every lit program's key, and three r185 swaps a
+  // PCFSoft shadow map to PCF at the first shadow render.
+  const seen = [];
+  const log = [];
+  globalThis.window = { devicePixelRatio: 1 };
+  const r = recordingRenderer(log);
+  let bound = null;
+  r.setRenderTarget = (t) => { bound = t; };
+  r.getRenderTarget = () => bound;
+  r.compileAsync = () => { seen.push(bound); return Promise.resolve(); };
+  // A hidden mesh with a texture: its texture must go to the GPU now too, not
+  // on the frame it first appears.
+  const uploaded = new Set();
+  r.initTexture = (t) => uploaded.add(t);
+  const scene = new THREE.Scene();
+  const tex = new THREE.Texture();
+  const hidden = new THREE.Mesh(new THREE.PlaneGeometry(), new THREE.MeshStandardMaterial({ map: tex, normalMap: new THREE.Texture() }));
+  hidden.visible = false;
+  scene.add(hidden);
+  const fx = createEffects(r, scene, new THREE.PerspectiveCamera(), { quality: 'medium', width: 1440, height: 900 });
+  fx.compile();
+  fx.setQuality('off');
+  fx.compile();
+  const src = readFileSync(join(ROOT, 'src/main.js'), 'utf8');
+  const warm = src.slice(src.indexOf("'warming up the paint shop'"));
+  const ok = seen.length === 2 && seen[0] && seen[0].isWebGLRenderTarget && seen[1] === null && bound === null &&
+    /renderer\.shadowMap\.type = THREE\.PCFShadowMap;/.test(src) && !/PCFSoftShadowMap;/.test(src) &&
+    /effects\.compile\(scene\)/.test(warm.slice(0, 1500)) && uploaded.has(tex) && uploaded.size === 2;
+  check('the loading screen compiles the shaders the frame will actually use', ok,
+    `post chain: compiled into ${seen[0] && seen[0].isWebGLRenderTarget ? 'its own buffer' : 'the canvas'}; ` +
+    `'off': into ${seen[1] === null ? 'the canvas' : 'a buffer'}; PCF shadows set up front; warm-up goes through effects; ` +
+    `${uploaded.size} of a hidden mesh's 2 textures uploaded`);
+}
+
+// ---------------------------------------------------------------------------
+// 7. Automatic quality, against simulated machines.
+// ---------------------------------------------------------------------------
+// A machine is a CPU time and a GPU time per frame, and a screen. The GPU part
+// shrinks with the pixel count — taken from what effects.js ACTUALLY renders
+// at for each rung on that screen, so a ladder that cuts more than it says is
+// simulated as doing so — with a fixed 15% that does not (the shadow map), and
+// with the post tier by the costs measured for adaptive.js. The frame takes
+// the longer of the two, plus 4% noise, and waits for the screen's next
+// refresh; its timestamp wobbles by up to +-1.5 ms, as requestAnimationFrame's
+// do. The script time main.js measures is the CPU part. Every ~5 s a 180 ms
+// hitch lands on top (under maxGapMs, so it IS judged — an earlier version
+// used 300 ms, which the judge throws away as a paused tab and so proved
+// nothing), every ~15 s a 300 ms one, and every 10 s a burst of streaming
+// frames. None of them may move it.
 {
   const POST = { off: 0.6, low: 0.65, medium: 1, high: 1.65 };
-  function machine({ cpu, gpu, chosen = 'medium', vsync = true, hitches = true, timing = true, level = 0 }) {
-    const q = createAdaptiveQuality({ post: chosen, level });
+  const HZ60 = 1000 / 60;
+  function machine({
+    cpu, gpu, chosen = 'medium', dpr = 1, screenMs = HZ60, hitches = true, timing = true,
+    scriptTimed = true, screenKnown = true, level = 0, drawShare = 0.6, drawWaits = false,
+  }) {
+    const { fx } = effectsOn(dpr, chosen);
+    const q = createAdaptiveQuality({
+      post: chosen, level, dpr: fx.basePixelRatio(chosen), displayMs: screenKnown ? screenMs : NaN,
+    });
+    // Pixels at each rung, relative to full quality, as effects.js draws them
+    // (the same rungs the controller uses: ladderFor with the same inputs).
+    const px = ladderFor(chosen, fx.basePixelRatio(chosen)).map((r) => { applyRung(fx, r, chosen); return fx.pixelRatio ** 2; });
+    const full = px[0];
+    const startChanges = q.changes;
     let t = 0, frame = 0, slowFrames = 0, drawnFrames = 0, below = 0, wobble = 0;
     const levels = [];
     return {
@@ -314,49 +544,77 @@ function makeLoop(car, physics) {
         const end = t + seconds * 1000;
         while (t < end) {
           const r = q.rung;
-          const g = gpu * (0.15 + 0.85 * r.scale * r.scale) * POST[r.post] / POST[chosen];
-          let ms = Math.max(cpu, g) * (0.98 + rnd() * 0.04);
-          if (hitches && frame % 300 === 150) ms += 300;                 // every ~5 s
-          if (hitches && frame % 600 >= 400 && frame % 600 < 410) ms += 22;   // streaming burst
-          if (vsync) ms = Math.ceil(ms / (1000 / 60) - 0.02) * (1000 / 60);
+          const g = gpu * (0.15 + 0.85 * px[q.level] / full) * POST[r.post] / POST[chosen];
+          const c = cpu * (0.98 + rnd() * 0.04);
+          const gg = g * (0.98 + rnd() * 0.04);
+          let ms = Math.max(c, gg);
+          // The draw call's share of the script. A draw that waits for the
+          // GPU runs until the GPU is done, so the script then fills the frame
+          // on a GPU-bound machine too — what a GPU-bound Safari laptop might do.
+          const wait = drawWaits && gg > c ? gg - c : 0;
+          const draw = c * drawShare + wait;
+          let script = c + wait;
+          if (hitches && frame % 300 === 150) { ms += 180; script += 180; }
+          if (hitches && frame % 900 === 450) { ms += 300; script += 300; }
+          if (hitches && frame % 600 >= 400 && frame % 600 < 410) { ms += 22; script += 22; }
+          ms = Math.ceil(ms / screenMs - 0.02) * screenMs;
           const w = (rnd() * 2 - 1) * 1.5;
-          q.sample(ms + w - wobble, timing ? g * (0.97 + rnd() * 0.06) : NaN);
+          q.sample(ms + w - wobble, timing ? g * (0.97 + rnd() * 0.06) : NaN,
+            scriptTimed ? script : NaN, scriptTimed ? draw : NaN);
           wobble = w;
           t += ms; frame++;
           if (t > 15000) {             // judged after the first 15 s
             drawnFrames++;
-            if (ms > 19 && ms < 250) slowFrames++;
+            if (ms > Math.max(19, screenMs * 1.14) && ms < 250) slowFrames++;
             if (q.level > 0) below += ms;
           }
           if (!levels.length || levels[levels.length - 1][1] !== q.level) levels.push([Math.round(t / 1000), q.level]);
         }
       },
+      get changes() { return q.changes - startChanges; },
       get slowShare() { return drawnFrames ? slowFrames / drawnFrames : 0; },
       get belowShare() { return below / Math.max(1, t - 15000); },
       levels,
     };
   }
   const trace = (m) => m.levels.map(([s, l]) => `${s}s:${l}`).join(' ');
+  const cut = (s, n = 90) => (s.length > n ? `${s.slice(0, n)}...` : s);
 
   {
     const m = machine({ cpu: 6, gpu: 9 });
     m.run(300);
-    check('a fast machine is left alone for five minutes, hitches and all', m.q.changes === 0,
-      `${m.q.changes} changes, level ${m.q.level}`);
+    check('a fast machine is left alone for five minutes, hitches and all', m.changes === 0,
+      `${m.changes} changes, level ${m.q.level}, through 60 hitches of 180 ms and 20 of 300 ms`);
   }
-  {
+  for (const dpr of [1, 2]) {
     // An integrated GPU that needs 28 ms for the full picture.
-    const m = machine({ cpu: 7, gpu: 28 });
+    const m = machine({ cpu: 7, gpu: 28, dpr });
     m.run(300);
     // The last step DOWN is when it stopped juddering; a later step back up
     // (it can overshoot by one when it drops two at a time) is a refinement.
     let lastDown = 0;
     for (let i = 1; i < m.levels.length; i++) if (m.levels[i][1] > m.levels[i - 1][1]) lastDown = m.levels[i][0];
-    check('a GPU-bound laptop steps down until it holds 60 fps',
-      m.slowShare < 0.03 && m.q.level > 0,
-      `level ${m.q.level} (${m.q.rung.scale} res, ${m.q.rung.post}), ${(m.slowShare * 100).toFixed(1)}% slow frames after 15 s`);
-    check('...gets there within ten seconds and then stays put',
-      lastDown <= 10 && m.q.changes <= 4, `last step down at ${lastDown} s, ${m.q.changes} changes in 5 min: ${trace(m)}`);
+    check(`a GPU-bound laptop steps down until it holds 60 fps (devicePixelRatio ${dpr})`,
+      m.slowShare < 0.03 && m.q.level > 0 && lastDown <= 10 && m.changes <= 4,
+      `level ${m.q.level} (${m.q.rung.scale} res, ${m.q.rung.post}), ${(m.slowShare * 100).toFixed(1)}% slow frames after 15 s; ` +
+      `last step down at ${lastDown} s, ${m.changes} changes in 5 min: ${trace(m)}`);
+  }
+  {
+    // The case a reviewer found: a HiDPI laptop with a GPU timer, needing
+    // 26 or 30 ms for the full picture. When the post step also cut the
+    // resolution, the prediction for stepping back up was 2.25x too low, so it
+    // kept stepping up into frames it could not hold. Through this model,
+    // round3/base made 101 changes in 10 minutes at 26 ms, 13% of frames slow.
+    const out = [];
+    let worst = 0, slow = 0;
+    for (const gpu of [26, 30]) {
+      const m = machine({ cpu: 6, gpu, dpr: 2 });
+      m.run(600);
+      worst = Math.max(worst, m.changes); slow = Math.max(slow, m.slowShare);
+      out.push(`${gpu} ms: ${m.changes} (${trace(m)})`);
+    }
+    check('a HiDPI laptop with a GPU timer settles, and does not probe again and again', worst <= 4 && slow < 0.05,
+      `changes in 10 min — ${out.join('; ')}; worst ${(slow * 100).toFixed(1)}% slow frames (was 101 changes, 13%)`);
   }
   for (const timing of [true, false]) {
     // On the edge: one level holds 60, the level above it does not, quite.
@@ -364,16 +622,77 @@ function makeLoop(car, physics) {
     const m = machine({ cpu: 6, gpu: 22.4, timing });
     m.run(600);
     check(`a machine on the edge does not flicker between levels (GPU timing ${timing ? 'on' : 'off'})`,
-      m.q.changes <= (timing ? 3 : 16) && m.slowShare < 0.05,
-      `${m.q.changes} changes in 10 min, ${(m.slowShare * 100).toFixed(1)}% slow frames: ${trace(m).slice(0, 110)}`);
+      m.changes <= (timing ? 3 : 6) && m.slowShare < 0.05,
+      `${m.changes} changes in 10 min, ${(m.slowShare * 100).toFixed(1)}% slow frames: ${cut(trace(m))}`);
   }
-  for (const timing of [true, false]) {
-    // Slow because of the CPU. Fewer pixels would only blur the picture.
-    const m = machine({ cpu: 24, gpu: 6, timing });
+  {
+    // Slow because of the CPU, which main.js measures on every browser. The
+    // model's script is 60% draw call, as measured in the game (render 57-75%
+    // of the frame's script). With a GPU timer the whole script is evidence;
+    // without one only the part outside the draw is, and a machine whose CPU
+    // time goes on the logic, not the draw, is still recognised at once.
+    const out = [];
+    let ok = true;
+    for (const [label, opts] of [
+      ['GPU timer', { timing: true }],
+      ['no timer, busy outside the draw', { timing: false, drawShare: 0.25 }],
+    ]) {
+      const m = machine({ cpu: 24, gpu: 6, ...opts });
+      m.run(600);
+      ok = ok && m.changes === 0 && m.belowShare === 0;
+      out.push(`${label}: ${m.changes} changes, ${(m.belowShare * 100).toFixed(0)}% blurred`);
+    }
+    check('a CPU-bound machine is never blurred for nothing', ok, `${out.join('; ')} (was 16 changes without a timer)`);
+  }
+  {
+    // Without a timer, a machine whose CPU goes on draw calls looks, from
+    // inside the page, like one waiting on the GPU: it tries the ladder once.
+    // And the case that rule exists for: a GPU-bound laptop with no timer
+    // whose draw call waits for the GPU, so the script fills every frame. It
+    // must still step down — never mistake it for a CPU-bound one.
+    const m = machine({ cpu: 24, gpu: 6, timing: false });
     m.run(600);
-    check(`a CPU-bound machine is not blurred for nothing (GPU timing ${timing ? 'on' : 'off'})`,
-      timing ? m.q.changes === 0 : m.belowShare < 0.12,
-      `${(m.belowShare * 100).toFixed(0)}% of 10 min below full quality, ${m.q.changes} changes, now level ${m.q.level}`);
+    const g = machine({ cpu: 7, gpu: 28, timing: false, drawWaits: true });
+    g.run(300);
+    check('...and a GPU-bound one whose draw call waits is never mistaken for one',
+      m.changes <= 6 && m.belowShare < 0.05 && g.q.level > 0 && g.slowShare < 0.03,
+      `CPU-bound in the draw: ${m.changes} changes, ${(m.belowShare * 100).toFixed(1)}% blurred; ` +
+      `GPU-bound, draw waiting: level ${g.q.level}, ${(g.slowShare * 100).toFixed(1)}% slow frames (${trace(g)})`);
+  }
+  {
+    // Slow for a reason neither the script time nor a GPU timer can see — a
+    // busy machine. It has to try the ladder once; it must not keep trying.
+    const m = machine({ cpu: 24, gpu: 6, timing: false, scriptTimed: false });
+    m.run(600);
+    check('slow for reasons nobody can measure: the ladder is tried once, not over and over',
+      m.changes <= 6 && m.belowShare < 0.05,
+      `${m.changes} changes (was 16), ${(m.belowShare * 100).toFixed(1)}% of 10 min below full quality: ${cut(trace(m))}`);
+  }
+  for (const [label, screenMs, was] of [
+    ['a 50 Hz screen', 20, '24 changes, 12% blurred'],
+    ['a 30 fps cap (Low Power Mode)', 1000 / 30, '16 changes, 4% blurred'],
+  ]) {
+    // A fast machine, no GPU timer (Safari), on a screen that is not 60 Hz.
+    // Measured at load, the screen's rate is simply the rate; unmeasured (the
+    // tab loaded in the background), it has to find out, once.
+    const known = machine({ cpu: 5, gpu: 6, timing: false, screenMs });
+    known.run(600);
+    const blind = machine({ cpu: 5, gpu: 6, timing: false, screenMs, screenKnown: false });
+    blind.run(600);
+    check(`${label} is not mistaken for a slow machine`,
+      known.changes === 0 && blind.changes <= 6 && blind.belowShare < 0.05,
+      `rate measured: ${known.changes} changes; not measured: ${blind.changes} changes, ` +
+      `${(blind.belowShare * 100).toFixed(1)}% blurred (was ${was}, either way): ${cut(trace(blind), 60)}`);
+  }
+  {
+    // 144 Hz, and a GPU that needs 18 ms: three refreshes a frame, 48 fps.
+    // One level down it makes two refreshes, 72 fps — so down it goes, and
+    // no further.
+    const m = machine({ cpu: 5, gpu: 18, screenMs: 1000 / 144 });
+    m.run(300);
+    check('a 144 Hz screen: steps down only as far as it takes to beat 60 fps',
+      m.q.level > 0 && m.q.level <= 2 && m.changes <= 3 && m.slowShare < 0.03,
+      `level ${m.q.level}, ${m.changes} changes, ${(m.slowShare * 100).toFixed(1)}% slow frames: ${trace(m)}`);
   }
   {
     const m = machine({ cpu: 8, gpu: 70, chosen: 'high' });
@@ -389,15 +708,17 @@ function makeLoop(car, physics) {
       `level ${m.q.level} after 20 s: ${trace(m)}`);
   }
   {
-    // Remembered at the bottom, and the pixels were never the problem. With no
-    // GPU timer and no baseline, it has to go and look.
+    // Remembered at the bottom, and the pixels were never the problem.
     const m = machine({ cpu: 24, gpu: 6, timing: false, level: 5 });
     m.run(120);
+    const blind = machine({ cpu: 24, gpu: 6, timing: false, scriptTimed: false, level: 5 });
+    blind.run(120);
     const w = machine({ cpu: 6, gpu: 70, timing: false, level: 5 });
     w.run(120);
     check('remembered at the bottom: a CPU-bound machine finds its way back up',
-      m.q.level === 0 && w.belowShare > 0.85,
-      `CPU-bound now level ${m.q.level} (${trace(m)}); a GPU-bound one stays down ${(w.belowShare * 100).toFixed(0)}% of the time`);
+      m.q.level === 0 && blind.q.level === 0 && w.belowShare > 0.85,
+      `script timed: level ${m.q.level} (${cut(trace(m), 50)}); not timed: level ${blind.q.level}; ` +
+      `a GPU-bound one stays down ${(w.belowShare * 100).toFixed(0)}% of the time`);
   }
   {
     const hi = ladderFor('high'), md = ladderFor('medium'), lo = ladderFor('low'), off = ladderFor('off');
@@ -407,6 +728,35 @@ function makeLoop(car, physics) {
       off.every((r) => r.post === 'off') && [hi, md, lo].every((l) => l.every((r) => r.post !== 'off')),
       `high: ${posts(hi)}; medium: ${posts(md)}; low: ${posts(lo)}; off: ${posts(off)}`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// 8. Measuring the screen's rate while the game loads.
+// ---------------------------------------------------------------------------
+// The loading screen's requestAnimationFrame intervals: a whole number of
+// refreshes each, most of them one, the rest stretched by loading work. It
+// has to find the screen's period even when most frames were busy, and say
+// "unknown" rather than guess when there is nothing regular to find.
+{
+  const probe = (next, frames = 180) => {
+    let now = 0, cb = null;
+    const p = createDisplayProbe((f) => { cb = f; });
+    for (let i = 0; i < frames && cb; i++) { const f = cb; cb = null; now += next(); f(now); }
+    return p.stop();
+  };
+  const refreshes = (ms, busy) => () =>
+    ms * (rnd() < busy ? 2 + Math.floor(rnd() * 12) : 1) + (rnd() * 2 - 1) * 0.8;
+  const got = [[60, 1000 / 60], [144, 1000 / 144], [50, 20], [30, 1000 / 30]]
+    .map(([hz, ms]) => [hz, ms, probe(refreshes(ms, 0.33))]);
+  const busy = probe(refreshes(1000 / 60, 0.8));
+  const ragged = probe(() => 5 + rnd() * 34);
+  const few = probe(refreshes(1000 / 60, 0), 20);
+  const none = createDisplayProbe(null).stop();
+  check('the screen\'s rate is read off the loading screen, or not guessed at',
+    got.every(([, ms, v]) => Math.abs(v - ms) < 0.02 * ms) && Math.abs(busy - 1000 / 60) < 0.8 &&
+    [ragged, few, none].every(Number.isNaN),
+    `${got.map(([hz, , v]) => `${hz} Hz -> ${v.toFixed(2)} ms`).join(', ')}; 60 Hz with 80% of frames busy -> ` +
+    `${busy.toFixed(2)} ms; ragged -> ${ragged}; 20 frames -> ${few}; no frames -> ${none}`);
 }
 
 console.log(fail === 0 ? '\nSmooth at every frame rate.' : `\n${fail} CHECK(S) FAILED`);

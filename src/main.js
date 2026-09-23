@@ -27,7 +27,7 @@ import { loadSettings, saveSettings, suggestName } from './game/settings.js';
 // Pure arithmetic, no three.js and no DOM, so imported directly for the same
 // reason as roomUrl above. See the render-interpolation note in the loop.
 import { createPoseBuffer, settleAccumulator, blendFactor, springAngleStep, followLinear } from './core/interp.js';
-import { createAdaptiveQuality } from './core/adaptive.js';
+import { createAdaptiveQuality, applyRung, createDisplayProbe } from './core/adaptive.js';
 
 const BUILD = '2026-08-22';
 const PHYS_HZ = 120;
@@ -110,6 +110,10 @@ function stub(methods, extra) {
 
 async function boot() {
   const canvas = document.getElementById('view');
+  // How often this screen refreshes, measured while the page is loading and
+  // mostly idle; the automatic quality judges frames against it. See
+  // core/adaptive.js, "a screen that is not 60 Hz".
+  const displayProbe = createDisplayProbe(window.requestAnimationFrame.bind(window));
 
   // ---- renderer -----------------------------------------------------------
   let renderer;
@@ -129,7 +133,14 @@ async function boot() {
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.05;
   renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  // PCF, not PCFSoft. three r185 has dropped PCFSoft: it swaps the type to
+  // PCF at the first shadow render, and the shadow type is part of every lit
+  // program's key — so every shader the loading screen compiled before that
+  // render was the wrong one. The ones on screen were compiled a second time
+  // on the first frames; everything hidden at load (the wheel blur discs, the
+  // sea) compiled on first sight, mid-drive: 356 and 227 ms stalls. The
+  // shadows look exactly as they did, because they already were PCF.
+  renderer.shadowMap.type = THREE.PCFShadowMap;
 
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.35, 6000);
@@ -687,7 +698,7 @@ async function boot() {
   // car back on disk and the next visit starts in it.
   menus.on('drive', (p) => { if (p && p.id) { settings.car = p.id; settings.colour = p.colour | 0; } });
   // Handed to goals.update() every frame; one object, not one per frame.
-  const goalsFrame = { driving: false, model: null };
+  const goalsFrame = { driving: false, model: null, pose: null };
 
   // ---- state --------------------------------------------------------------
   const MODES = ['chase', 'chaseFar', 'bonnet', 'bumper', 'orbit'];
@@ -718,7 +729,10 @@ async function boot() {
   const AUTO_KEY = 'openroad.autoquality.v1';
   const autoOn = () => settings.autoQuality !== false;
   let autoPost = settings.post || 'medium';
-  const auto = createAdaptiveQuality({ post: autoPost, level: autoRemembered(autoPost) });
+  // The pixel ratio a tier draws at on this screen: a HiDPI ladder has one
+  // more rung. The fallback is for the stub a failed effects layer leaves.
+  const autoDpr = (post) => (effects.basePixelRatio ? effects.basePixelRatio(post) : 1);
+  const auto = createAdaptiveQuality({ post: autoPost, level: autoRemembered(autoPost), dpr: autoDpr(autoPost) });
   if (effects.setGpuTiming) effects.setGpuTiming(autoOn());
   function autoRemembered(post) {
     try {
@@ -726,11 +740,13 @@ async function boot() {
       return v && v.post === post && Number.isFinite(v.level) ? v.level : 0;
     } catch { return 0; }
   }
+  const AUTO_FULL = { scale: 1, post: 'medium' };
   function applyAuto(save) {
-    const on = autoOn();
-    const r = auto.rung;
-    if (effects.setResolutionScale) effects.setResolutionScale(on ? r.scale : 1);
-    effects.setQuality(on ? r.post : autoPost);
+    AUTO_FULL.post = autoPost;
+    // The scale is a fraction of the CHOSEN tier's pixel ratio, so a post
+    // step never cuts the resolution too. effects.js applies it just before
+    // its next draw, never between a draw and the screen.
+    applyRung(effects, autoOn() ? auto.rung : AUTO_FULL, autoPost);
     if (save) {
       try { localStorage.setItem(AUTO_KEY, JSON.stringify({ post: autoPost, level: auto.level })); }
       catch { /* private browsing: it just forgets */ }
@@ -788,7 +804,7 @@ async function boot() {
     // Anything else — a new name, the weather — leaves the level alone, or a
     // kid renaming themselves would put a slow laptop back to juddering.
     const post = settings.post || 'medium';
-    if (post !== autoPost || !autoOn()) { autoPost = post; auto.reset(post, 0); }
+    if (post !== autoPost || !autoOn()) { autoPost = post; auto.reset(post, 0, autoDpr(post)); }
     if (effects.setGpuTiming) effects.setGpuTiming(autoOn());
     applyAuto(true);
     terrain.setQuality(settings.quality || 'medium');
@@ -902,9 +918,14 @@ async function boot() {
   let accumulator = 0;
   let last = performance.now();
   let fpsSmooth = 60;
+  // How long the previous frame's script ran, and how much of that was the
+  // draw call, for telling a CPU-bound machine from a GPU-bound one
+  // (core/adaptive.js, "is it the pixels?").
+  let scriptMs = NaN, drawMs = NaN;
 
   function frame(now) {
     requestAnimationFrame(frame);
+    const t0 = performance.now();
     let dt = (now - last) / 1000;
     last = now;
     const raw = dt;
@@ -912,11 +933,14 @@ async function boot() {
     // A tab that was in the background hands back a dt of several seconds.
     // Clamping is what stops the car teleporting across the city on return.
     dt = Math.min(dt, 0.1);
-    stepFrame(dt);
     // Judged on the real interval between frames, and only while driving: the
     // menus draw over the world and cost differently, and a harness calling
-    // frame() directly is not a frame rate at all.
-    if (mode === 'driving' && autoOn() && auto.sample(raw * 1000, effects.gpuMs)) applyAuto(true);
+    // frame() directly is not a frame rate at all. BEFORE the frame is drawn:
+    // the interval being judged is the previous frame's either way, and a
+    // quality change then lands on this frame rather than after it.
+    if (mode === 'driving' && autoOn() && auto.sample(raw * 1000, effects.gpuMs, scriptMs, drawMs)) applyAuto(true);
+    stepFrame(dt);
+    scriptMs = performance.now() - t0;
   }
 
   // The R key's bookkeeping: a scratch road record and how long the car has
@@ -1166,6 +1190,9 @@ async function boot() {
       // overlay — and the medal card in it — must never show over a menu.
       goalsFrame.driving = driving && !menus.current;
       goalsFrame.model = carModel;
+      // Where the car is DRAWN, for anything goals hangs over it on screen
+      // (the GPS arrow); `car` stays the truth for the game logic.
+      goalsFrame.pose = pose;
       goals.update(dt, goalsFrame);
       hudState.nav = goals.nav;
     }
@@ -1331,7 +1358,9 @@ async function boot() {
     // its own limit rather than never triggering the effect at all.
     const vMax = Math.max(30, (car.spec.power / 700) ** 0.5 * 9);
     effects.setSpeedBlur(Math.min(1, Math.max(0, (car.speed / vMax - 0.35) / 0.65)));
+    const drawAt = performance.now();
     effects.render(dt);
+    drawMs = performance.now() - drawAt;
   }
 
   // --- helpers used by the loop, defined here so they close over the world ---
@@ -1800,7 +1829,11 @@ async function boot() {
     const want = a < 1
       ? 2 * Math.atan(Math.tan(target * Math.PI / 360) / Math.pow(a, 0.6)) * 180 / Math.PI
       : target;
-    camera.fov += (want - camera.fov) * Math.min(1, dt * rate);
+    // The exact decay over dt, not its first-order approximation min(1,
+    // dt * rate), which at rate 2.5 closes the gap 3.1% too fast per frame
+    // at 40 fps and 0.9% at 144 Hz — so a ragged frame rate made the field of
+    // view breathe by the difference.
+    camera.fov += (want - camera.fov) * (1 - Math.exp(-rate * dt));
     camera.updateProjectionMatrix();
   }
 
@@ -1997,14 +2030,20 @@ async function boot() {
   // A material's shader program is compiled the first time something using it
   // is drawn, and that compile stalls the frame. A cold 60 s drive across the
   // map compiled 20 programs mid-drive, the worst frame 172 ms. So everything
-  // that exists at boot is compiled here, on the loading bar, instead — the
-  // same drive now compiles 8 (goal markers built on demand, a few car parts)
-  // and its worst frame is 37 ms:
+  // that exists at boot is compiled here, on the loading bar, instead. A
+  // 13.6 km tour of every corner of the map at 216 km/h now compiles none
+  // (round3/base compiled 2-4, at 25-144 ms a frame; the shadow type at the
+  // top of boot() is half of why):
   //  * the traffic pool's cars are built now rather than on the first frame
   //    (they are hidden until they spawn, but a hidden car's materials still
   //    compile — that is the point);
-  //  * compileAsync() compiles every material in the scene, hidden or not, in
-  //    parallel where the browser can, and waits until they are ready;
+  //  * effects.compile() compiles every material in the scene, hidden or not,
+  //    in parallel where the browser can, and waits until they are ready. It
+  //    goes through effects so each is compiled in the variant the post chain
+  //    draws it in: straight through renderer.compileAsync, 47 of the 89
+  //    programs alive after loading were a variant nothing ever drew, and
+  //    everything hidden at load (wheel blur, the sea) compiled again on first
+  //    sight — 130, 95, 33 and 110 ms stalls in the first 11 s of a drive;
   //  * one frame through every post pass compiles those, and the shadow pass.
   // Capped at 8 s, so a driver that never reports ready cannot hold the game
   // on the loading screen.
@@ -2014,12 +2053,11 @@ async function boot() {
   await stage(0.985, 'warming up the paint shop', async () => {
     try { syncTrafficModels(0, 0); } catch (err) { console.warn('[open road] traffic warm-up:', err); }
     try {
-      if (renderer.compileAsync) {
-        await Promise.race([
-          renderer.compileAsync(scene, camera),
-          new Promise((resolve) => setTimeout(resolve, 8000)),
-        ]);
-      }
+      // The stub a failed effects layer leaves draws to the canvas directly,
+      // which is the variant compileAsync makes on its own.
+      const compiling = effects.compile ? effects.compile(scene)
+        : renderer.compileAsync ? renderer.compileAsync(scene, camera) : null;
+      if (compiling) await Promise.race([compiling, new Promise((resolve) => setTimeout(resolve, 8000))]);
     } catch (err) { console.warn('[open road] shader warm-up:', err); }
     try { if (effects.prewarm) effects.prewarm(); } catch (err) { console.warn('[open road] post warm-up:', err); }
     // The remembered automatic-quality level goes on AFTER the warm-up, so the
@@ -2127,6 +2165,7 @@ async function boot() {
     tick: (n = 1, dt = PHYS_DT) => { for (let i = 0; i < n; i++) car.step(dt); return car; },
   };
 
+  auto.setDisplayPeriod(displayProbe.stop());
   requestAnimationFrame(frame);
 }
 

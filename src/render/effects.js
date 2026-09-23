@@ -74,6 +74,28 @@
 // softens slightly, nothing appears or disappears — so it is the first one the
 // automatic quality in main.js reaches for.
 //
+// Its optional second argument names the tier whose pixel-ratio CAP the scale
+// applies to. The automatic quality passes the tier the player chose, so
+// stepping the post tier down does not also cut the resolution. Without it, on
+// a devicePixelRatio-2 laptop, medium's cap is 1.5 and low's 1.0: the ladder's
+// step from (0.8, medium) to (0.8, low) went from 1.2 to 0.8 device pixels per
+// CSS pixel, 44% of the pixels in one step where it expected 100%, and the
+// predicted cost of stepping back up was 2.25x too low, so it kept probing up,
+// failing and dropping back — 15 changes in 10 minutes, simulated.
+//
+// NO RESIZE EVER LANDS BETWEEN A RENDER AND THE SCREEN
+//
+// Changing the pixel ratio resizes the canvas, and resizing a WebGL canvas
+// clears its drawing buffer. Done after the frame was drawn — which is where
+// the automatic quality used to apply its decision, at the end of the frame —
+// the browser composited that cleared, transparent canvas over the page: one
+// fully black frame for every quality change (measured: the centre pixel read
+// 218,216,187 before force(2) and 0,0,0,0 straight after it, in the same task).
+// So nothing here resizes on the spot. Every change marks the size stale, and
+// the next render() or prewarm() applies it immediately before drawing — the
+// only moment a resize is invisible. It also coalesces: a step that changes
+// both the scale and the tier reallocates the targets once, not twice.
+//
 // GPU TIME
 //
 // With setGpuTiming(true) and EXT_disjoint_timer_query_webgl2 available, one
@@ -377,11 +399,15 @@ export function createEffects(renderer, scene, camera, opts = {}) {
   let msaaPass = null;
   let activeMsaa = 0;
 
-  // Fraction of the tier's pixel ratio actually rendered. See setResolutionScale.
+  // Fraction of the tier's pixel ratio actually rendered, and the tier whose
+  // cap that is a fraction of (null: the current one). See setResolutionScale.
   let resScale = 1;
+  let resBase = null;
+  // The canvas and targets are out of date; render() fixes that before drawing.
+  let sizeStale = true;
 
   // GPU timing: one query in flight at a time, read back when it is ready.
-  let timerExt = null, timing = false, query = null, queryWait = 0;
+  let timerExt = null, timing = false, query = null, queryInFlight = false, queryWait = 0;
   let gpuMs = NaN;
 
   // Bloom fades rather than switching. bloomNow is what is drawn, bloomWant
@@ -463,15 +489,30 @@ export function createEffects(renderer, scene, camera, opts = {}) {
     activeMsaa = 0;
   }
 
-  function pixelRatio() {
+  /** Device pixels per CSS pixel tier `tier` draws at full scale on this screen. */
+  function capRatio(tier) {
     const device = (typeof window !== 'undefined' && window.devicePixelRatio) || 1;
-    return Math.min(device, TIERS[quality].dpr, maxPixelRatio) * resScale;
+    return Math.min(device, TIERS[tier].dpr, maxPixelRatio);
   }
 
-  function applySize() {
+  function pixelRatio() {
+    return capRatio(resBase || quality) * resScale;
+  }
+
+  /** The size is out of date. Applied by the next render(), just before it draws. */
+  function applySize() { sizeStale = true; }
+
+  function flushSize() {
+    sizeStale = false;
     const pr = pixelRatio();
-    renderer.setPixelRatio(pr);
-    renderer.setSize(width, height, updateStyle);
+    // Only when the canvas really changes: assigning a canvas its own size
+    // still reallocates the drawing buffer. Compared with the renderer's own
+    // state, since main.js's resize handler also sets it.
+    renderer.getSize(size);
+    if (renderer.getPixelRatio() !== pr || size.x !== width || size.y !== height) {
+      renderer.setPixelRatio(pr);
+      renderer.setSize(width, height, updateStyle);
+    }
     if (!composer) return;
 
     composer.setPixelRatio(pr);
@@ -547,6 +588,9 @@ export function createEffects(renderer, scene, camera, opts = {}) {
     exposure += (want - exposure) * (1 - Math.exp(-d / ADAPT_TAU));
     renderer.toneMappingExposure = exposure;
 
+    // Here and nowhere else: see "no resize ever lands between a render and
+    // the screen" at the top.
+    if (sizeStale) flushSize();
     const timed = beginTiming();
     if (!composer) {
       renderer.render(scene, camera);
@@ -576,21 +620,23 @@ export function createEffects(renderer, scene, camera, opts = {}) {
   // polled, never waited for — waiting would stall the CPU on the GPU, which is
   // the one thing this must not do. `disjoint` means the GPU was interrupted
   // (a context switch, a power-state change) and that sample is discarded.
+  // One query object, reused once its result has been read, rather than a
+  // new one (and a new JS wrapper for the collector) fifteen times a second.
   function beginTiming() {
     if (!timing || !timerExt) return false;
     const gl = renderer.getContext();
-    if (query) {
+    if (queryInFlight) {
       if (!gl.getQueryParameter(query, gl.QUERY_RESULT_AVAILABLE)) return false;
       const disjoint = gl.getParameter(timerExt.GPU_DISJOINT_EXT);
       const ms = gl.getQueryParameter(query, gl.QUERY_RESULT) / 1e6;
       if (!disjoint && ms >= 0 && ms < 1000) gpuMs = Number.isFinite(gpuMs) ? gpuMs + (ms - gpuMs) * 0.25 : ms;
-      gl.deleteQuery(query);
-      query = null;
+      queryInFlight = false;
       queryWait = 3;               // leave a few frames untimed between samples
     }
     if (queryWait > 0) { queryWait--; return false; }
-    query = gl.createQuery();
+    if (!query) query = gl.createQuery();
     gl.beginQuery(timerExt.TIME_ELAPSED_EXT, query);
+    queryInFlight = true;
     return true;
   }
   function endTiming() {
@@ -626,12 +672,21 @@ export function createEffects(renderer, scene, camera, opts = {}) {
    * and the browser scales the frame up, so the picture softens a little
    * rather than changing. Reallocates the render targets, so it is for a
    * decision made every few seconds, not every frame.
+   *
+   * `base`, if given, is the tier whose pixel-ratio cap `s` scales ('low',
+   * 'medium', ...); null goes back to following the current tier. Omitted, it
+   * is left as it was.
    */
-  function setResolutionScale(s) {
+  function setResolutionScale(s, base) {
     const v = Math.min(1, Math.max(0.5, Number(s) || 1));
-    if (v === resScale) return;
+    const b = base === undefined ? resBase : (TIERS[base] ? base : null);
+    if (v === resScale && b === resBase) return;
+    const before = pixelRatio();
     resScale = v;
-    applySize();
+    resBase = b;
+    // A new base with the same effective ratio (the player on 'medium' with
+    // the base set to 'medium') changes nothing on screen: no reallocation.
+    if (pixelRatio() !== before) applySize();
   }
 
   /** Start or stop timing frames on the GPU. False if the browser cannot. */
@@ -645,8 +700,64 @@ export function createEffects(renderer, scene, camera, opts = {}) {
       gpuMs = NaN;
       // A query still in flight would otherwise never be read or deleted.
       if (query) { try { renderer.getContext().deleteQuery(query); } catch { /* context gone */ } query = null; }
+      queryInFlight = false;
     }
     return !!(timing && timerExt);
+  }
+
+  /**
+   * Compile every material under `root` (the whole scene by default), hidden
+   * objects included, in the variant this pipeline will actually draw it in,
+   * and resolve when the programs are ready. Call it from a loading screen.
+   *
+   * WHY NOT renderer.compileAsync(scene, camera) ON ITS OWN. A program's
+   * variant depends on where it draws: to the canvas it tone-maps and encodes
+   * sRGB itself, into the composer's buffer it does neither. Compiled with no
+   * render target bound, every material got the canvas variant, which the
+   * composer never uses. Measured on round3/base: 47 of the 89 programs alive
+   * after loading were those strays. Whatever was on screen at the one
+   * warm-up frame got recompiled there; everything hidden at load — the wheel
+   * blur discs, the sea — compiled again on first sight, mid-drive: 130, 95,
+   * 33 and 110 ms stalls in the first 11 s of a flat-out drive.
+   */
+  function compile(root = scene) {
+    const prev = renderer.getRenderTarget();
+    renderer.setRenderTarget(composer ? composer.readBuffer : null);
+    let done;
+    try {
+      if (renderer.compileAsync) done = renderer.compileAsync(root, camera, scene);
+      else { renderer.compile(root, camera, scene); done = Promise.resolve(root); }
+    } finally {
+      renderer.setRenderTarget(prev);
+    }
+    uploadTextures(root);
+    return done;
+  }
+
+  // A texture is uploaded the first time something using it is drawn — on a
+  // hidden object, that is mid-drive, the same as a shader. Straight after
+  // loading, 19 of the scene's 67 textures (car lamps, grilles, tyres, the
+  // wheel blur, the light pools, nine 256x192 labels) had never been sent to
+  // the GPU. Each is small, but they arrive in clumps: a 29-45 ms frame 87 s
+  // into a drive where two did. Uploaded here, they land on the loading bar.
+  const TEXTURE_SLOTS = ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'emissiveMap', 'aoMap',
+    'alphaMap', 'bumpMap', 'lightMap', 'specularMap', 'displacementMap', 'clearcoatNormalMap'];
+  function uploadTextures(root) {
+    if (!renderer.initTexture) return;
+    const seen = new Set();
+    const up = (t) => {
+      if (!t || !t.isTexture || seen.has(t) || t.isRenderTargetTexture) return;
+      seen.add(t);
+      try { renderer.initTexture(t); } catch { /* then it uploads when first drawn, as before */ }
+    };
+    root.traverse((o) => {
+      const mats = !o.material ? null : Array.isArray(o.material) ? o.material : [o.material];
+      if (!mats) return;
+      for (const m of mats) {
+        for (const k of TEXTURE_SLOTS) up(m[k]);
+        if (m.uniforms) for (const u in m.uniforms) up(m.uniforms[u].value);
+      }
+    });
   }
 
   /**
@@ -658,6 +769,7 @@ export function createEffects(renderer, scene, camera, opts = {}) {
    */
   function prewarm() {
     if (!composer) return;
+    if (sizeStale) flushSize();
     const bloomWas = bloomPass.enabled, fxaaWas = fxaaPass.enabled;
     bloomPass.enabled = true;
     fxaaPass.enabled = true;
@@ -667,6 +779,7 @@ export function createEffects(renderer, scene, camera, opts = {}) {
 
   function dispose() {
     if (query) { try { renderer.getContext().deleteQuery(query); } catch { /* context gone */ } query = null; }
+    queryInFlight = false;
     teardown();
   }
 
@@ -674,7 +787,7 @@ export function createEffects(renderer, scene, camera, opts = {}) {
 
   return {
     render, setSize, setQuality, setSpeedBlur, dispose,
-    setResolutionScale, setGpuTiming, prewarm,
+    setResolutionScale, setGpuTiming, prewarm, compile,
     // Exposed so a harness can measure the effect rather than guess at it.
     get bloom() { return bloomPass; },
     get composer() { return composer; },
@@ -685,5 +798,9 @@ export function createEffects(renderer, scene, camera, opts = {}) {
     get gpuMs() { return gpuMs; },
     /** The pixel ratio actually rendered at: device, tier cap and scale. */
     get pixelRatio() { return pixelRatio(); },
+    /** A size change is waiting for the next render(), which applies it before drawing. */
+    get sizePending() { return sizeStale; },
+    /** The pixel ratio tier `tier` draws at full scale on this screen (the current tier if unknown). */
+    basePixelRatio: (tier) => capRatio(TIERS[tier] ? tier : quality),
   };
 }

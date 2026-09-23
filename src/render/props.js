@@ -920,8 +920,13 @@ export function createProps(world, ground, opts = {}) {
     if (!store) return null;
     const { name, geometry, material, maxRadius } = spec;
     const reach = maxRadius * range * (1 + BAND * 0.5) + REBUILD_STEP;
-    const cap = capacityFor(store, reach + CELL);
-    if (cap === 0) return null;
+    // A store small enough to be reached whole (a lighthouse, the arches)
+    // gets one slot more than it has instances: a full buffer is how
+    // tools/naturecheck.mjs sees a field that has run out of room, and one
+    // that holds every instance there is has not.
+    const need = capacityFor(store, reach + CELL);
+    if (need === 0) return null;
+    const cap = need === store.n ? need + 1 : need;
     const offs = offsetsFor(Math.ceil(reach / CELL) + 1);
 
     const mesh = new THREE.InstancedMesh(geometry, material, cap);

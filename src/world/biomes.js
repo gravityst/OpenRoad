@@ -382,8 +382,10 @@ export function buildBiomes(world, terrain) {
     const wz = z + warpN(x, z);
     const north = smoothstep(-700, -1350, wz);
     if (north <= 0) return 0;
-    const qx = x + fbm(x / 900, z / 900, s + 433, 2) * 170;
-    const qz = z + fbm(x / 900, z / 900, s + 434, 2) * 170;
+    // One octave of warp each way: the ridged field carries all the detail,
+    // and the second octave cost 30 ms of the bake for nothing visible.
+    const qx = x + valueNoise(x / 900, z / 900, s + 433) * 150;
+    const qz = z + valueNoise(x / 900, z / 900, s + 434) * 150;
     const r = ridgedMF(qx / 1000, qz / 1000, s + 421, 4);
     let h = 35 + 115 * smoothstep(-1250, -2250, wz) + r * 280;
     const high = smoothstep(90, 240, h);
@@ -405,7 +407,7 @@ export function buildBiomes(world, terrain) {
   // below zero (at most 0.4 of the ramp against a grade of at least 0.56),
   // and it adds at most 0.7 to the grade at its steepest.
   function alpineCap(x, z, dRoad) {
-    const n1 = fbm(x / 300, z / 300, s + 445, 2), n2 = fbm(x / 300, z / 300, s + 446, 2);
+    const n1 = valueNoise(x / 300, z / 300, s + 445), n2 = valueNoise(x / 300, z / 300, s + 446);
     const foot = KEEP_AT + 15 + n1 * 15;
     const grade = 0.78 + n2 * 0.22;
     const u = dRoad - foot;

@@ -1205,7 +1205,7 @@ export function createTerrain(world, ground, opts = {}) {
         // into a brow, more means it is steepening into a gully. Measured this
         // way the answer is a pure function of (x,z), so it cannot disagree
         // across a chunk border the way anything read off the local grid would.
-        const hl = Math.hypot(nx, nz);
+        const hl = Math.sqrt(nx * nx + nz * nz);
         let crest = 0;
         if (hl > 1e-5) {
           const inv = 1 / hl;

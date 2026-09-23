@@ -285,10 +285,10 @@ function makeLoop(car, physics) {
   check('the camera follows the drawn car, never the simulated one',
     cam.includes('const p = pose;') && leaks.length === 0,
     leaks.length ? `updateCamera reads ${[...new Set(leaks)].join(', ')}` : 'no car.x/y/z/yaw/roll in updateCamera');
-  const camAt = src.indexOf('updateCamera(dt, driving);');
-  const tagsAt = src.indexOf('tags.update(camera');
-  check('the camera is placed before anything projects through it',
-    camAt > 0 && tagsAt > 0 && camAt < tagsAt, 'updateCamera runs before the name tags');
+  // Exactly once: the spring and the lags advance by dt on every call, so a
+  // second call in a frame would move the camera twice as fast as the car.
+  const camCalls = (src.match(/\bupdateCamera\(dt, driving\);/g) || []).length;
+  check('the camera is updated exactly once a frame', camCalls === 1, `${camCalls} call(s) in main.js`);
 }
 
 // ---------------------------------------------------------------------------

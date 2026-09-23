@@ -1054,13 +1054,6 @@ async function boot() {
     // ---- tyre effects ----
     if (driving) emitTyreEffects(dt);
 
-    // ---- camera ----
-    // Straight after the car is posed and before anything projects through the
-    // camera. It used to run after the network block, so the name tags were
-    // placed with LAST frame's camera and slid about under their cars by a
-    // frame of camera motion — 0.75 m of it at 160 km/h.
-    updateCamera(dt, driving);
-
     // ---- traffic ----
     // Consume the shove a collision gave each traffic car. traffic.js steers
     // itself and knows nothing about being hit, so the knock is applied here
@@ -1112,6 +1105,9 @@ async function boot() {
     debris.update(dt, camera.position);
     fxCars[0] = car;
     damageFx.update(dt, fxCars, camera.position);
+
+    // ---- camera ----
+    updateCamera(dt, driving);
 
     // ---- streaming ----
     terrain.update(camera.position, dt);

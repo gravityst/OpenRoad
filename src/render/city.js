@@ -109,6 +109,43 @@ const QUALITY = {
 // last pass, and only one mesh is re-culled per frame.
 const REFRESH_MOVE = 26;
 
+// ---------------------------------------------------------------------------
+// Where a building may be drawn
+// ---------------------------------------------------------------------------
+//
+// physics/collision.js makes a building solid over 94% of its lot and stops a
+// car when a corner of a box wheelbase/2 + 0.55 m long and track/2 + 0.22 m
+// wide touches it. Both halves of that disagreed with what was drawn, and the
+// car visibly sank into walls:
+//
+//   * every wall was drawn at the FULL lot, so 3% of each side was drawn but
+//     not solid — 0.48 m on a median lot, 1.31 m on a 43.7 m shed;
+//   * the drawn body reaches past that box by 0.20-0.48 m at the nose and up
+//     to 0.63 m at the tail, measured per catalogue car.
+//
+// Measured with the real vehicle and collision, drawn car against drawn wall,
+// the worst was 1.22 m on a 12 m lot and 2.04 m on a 40 m one: the bonnet and
+// front wheels disappeared into the corrugated steel up to the A-pillar.
+//
+// So every wall is now drawn WALL_INSET inside the solid face, which puts it
+// where the drawn nose stops. A door-mirror's gap to the wall when grinding
+// along it is the price (0.32 m at the side), and it is the right way round:
+// a car stopping a hand short of a wall reads as a car stopping; a bonnet
+// inside one reads as a bug. Everything that stands on the ground — a porch
+// post, a garage, a garden wall — is inside this envelope too, because
+// nothing outside the solid box can stop a car and a wall you can drive
+// through is worse than no wall. tools/realismcheck.mjs sweeps the cars
+// into buildings and holds the result.
+export const SOLID_FRACTION = 0.94;   // must match physics/collision.js
+export const WALL_INSET = 0.4;
+/** The footprint a lot's building is drawn at: the solid box, less the inset. */
+export function drawnSize(lot) {
+  return {
+    w: Math.max(2, lot.w * SOLID_FRACTION - 2 * WALL_INSET),
+    d: Math.max(2, lot.d * SOLID_FRACTION - 2 * WALL_INSET),
+  };
+}
+
 // Invented, every one of them. No real trader's name appears in this city.
 const SHOP_NAMES = [
   'MARLOWE & SONS', 'TIDEWATER COFFEE', 'PELLINGTON BOOKS', 'BRACKENFORD GROCER',
@@ -1317,6 +1354,7 @@ export function createCity(world, ground, opts = {}) {
   const UP = new THREE.Vector3(0, 1, 0);
   const ONE = new THREE.Vector3(1, 1, 1);
   const _base = new THREE.Matrix4();
+  const _shift = new THREE.Matrix4();
   const _local = new THREE.Matrix4();
   const _world = new THREE.Matrix4();
   const _pos = new THREE.Vector3();
@@ -1522,12 +1560,31 @@ export function createCity(world, ground, opts = {}) {
     const paint = masonry ? STONE_TINT[(rnd() * STONE_TINT.length) | 0] : HOUSE_PAINT[(rnd() * HOUSE_PAINT.length) | 0];
     const roofCol = ROOF_PAINT[(rnd() * ROOF_PAINT.length) | 0];
     const trim = TRIM_TINT[(rnd() * TRIM_TINT.length) | 0];
-    const T = TILE.house, w = lot.w, d = lot.d;
+    const T = TILE.house;
+    let w = lot.w, d = lot.d;
 
     // Whole storeys, so the windows are the height windows are: the facade
     // tile is two floors of 2.9 m, and a bungalow shows the lower half of it.
     const storeys = lot.height >= 6.4 ? 2 : 1;
     const wallH = storeys * 2.9 + 0.12;
+
+    // The front garden comes out of the envelope rather than being added in
+    // front of it (see drawnSize): the house body steps back by G so the
+    // porch, the garage and the garden wall all stand on solid ground. The
+    // decisions draw from their own stream so the rest of the house — paint,
+    // roof, chimney — comes out exactly as it did before.
+    const grnd = mulberry((lot.seed ^ 0x6a09e667) | 0);
+    const F0 = frontal(lot);
+    const deep = F0.sideways ? w : d;
+    const garageWanted = F0.front > 10.5 && grnd() < 0.55 && deep * 0.3 >= 2.6;
+    const wallWanted = !garageWanted && grnd() < 0.7 && deep * 0.3 >= 2.4;
+    const G = garageWanted ? 2.6 : wallWanted ? 2.4 : Math.min(1.9, deep * 0.3);
+    const porch = G >= 1.85;
+    if (F0.sideways) { w -= G; _shift.makeTranslation(-F0.ox * G * 0.5, 0, 0); }
+    else { d -= G; _shift.makeTranslation(0, 0, -F0.oz * G * 0.5); }
+    _base.multiply(_shift);
+    const body = { ...lot, w, d };
+
     const span = Math.min(w, d);
     const roofH = clamp((span / 2 + 0.45) * TAN(33 + rnd() * 12), 1.8, 4.6);
     const hip = masonry ? rnd() < 0.7 : rnd() < 0.3;
@@ -1550,32 +1607,34 @@ export function createCity(world, ground, opts = {}) {
         rep4(1, 1, 1, 1), 0, CULL.house);
     }
 
-    // Front-garden clutter, all of it on the street side.
-    const F = frontal(lot);
-    const garage = F.front > 10.5 && rnd() < 0.55;
+    // Front-garden clutter, all of it on the street side and all of it inside
+    // the G metres the body stepped back by.
+    const F = frontal(body);
+    const garage = garageWanted;
     if (garage) {
-      // Half-buried in the house, so it only projects as far as the front
-      // garden and never over the kerb.
+      // Half-buried in the house; its door is flush with the envelope's front.
       const gw = 3.5, gd = 4.8, gh = 2.65;
-      const along = (F.front / 2 - gw / 2 - 0.5) * (rnd() < 0.5 ? -1 : 1);
-      const [gx, gz] = F.at(along, gd * 0.22);
+      const along = (F.front / 2 - gw / 2 - 0.5) * (grnd() < 0.5 ? -1 : 1);
+      const [gx, gz] = F.at(along, G - 0.1 - gd / 2);
       const [sx, sz] = F.boxScale(gw, gd);
       put(pHouse[v], gx, gh / 2, gz, 0, sx, gh, sz, paint,
         rep4(reps(sx, T.u), reps(sz, T.u), 0.45, 1), 0, CULL.house);
       put(pTrimCap, gx, gh, gz, 0, sx + 0.35, 1, sz + 0.35, trim,
         rep4(1, 1, 1, 1), 0, CULL.house);
-      const [dx, dz] = F.at(along, gd * 0.72 + 0.03);
+      const [dx, dz] = F.at(along, G - 0.1 + 0.03);
       put(pRoller, dx, (gh - 0.3) / 2, dz, F.yaw, gw - 0.5, gh - 0.3, 1, 0xdcdcd6,
         rep4(1, 1, 1, 1), 0, CULL.detail);
     }
 
     const porchY = Math.min(wallH - 0.4, 2.55);
-    const [px, pz] = F.at(0, 0.85);
-    const [psx, psz] = F.boxScale(2.5, 1.7);
-    put(pTrim, px, porchY, pz, 0, psx, 0.22, psz, trim, rep4(1, 1, 1, 1), 0, CULL.detail);
-    for (const side of [-1, 1]) {
-      const [cx, cz] = F.at(side * 1.05, 1.5);
-      put(pTrim, cx, porchY / 2, cz, 0, 0.16, porchY, 0.16, trim, rep4(1, 1, 1, 1), 0, CULL.detail);
+    if (porch) {
+      const [px, pz] = F.at(0, 0.85);
+      const [psx, psz] = F.boxScale(2.5, 1.7);
+      put(pTrim, px, porchY, pz, 0, psx, 0.22, psz, trim, rep4(1, 1, 1, 1), 0, CULL.detail);
+      for (const side of [-1, 1]) {
+        const [cx, cz] = F.at(side * 1.05, 1.5);
+        put(pTrim, cx, porchY / 2, cz, 0, 0.16, porchY, 0.16, trim, rep4(1, 1, 1, 1), 0, CULL.detail);
+      }
     }
     // A front step, so the door does not open onto grass. The base of every
     // building is 0.35 m under the ground (seatY), so the step's top is 0.15 m
@@ -1589,9 +1648,10 @@ export function createCity(world, ground, opts = {}) {
 
     // Garden wall only where there is no garage: the two occupy the same strip
     // of front garden, and a wall crossing a garage door looks like a mistake.
-    if (!garage && rnd() < 0.7) {
-      const [wx, wz] = F.at(0, 3.4);
-      const [wsx, wsz] = F.boxScale(F.front + 1.6, 0.3);
+    // Its outer face is the envelope's, so a car stops against the wall.
+    if (wallWanted) {
+      const [wx, wz] = F.at(0, G - 0.15);
+      const [wsx, wsz] = F.boxScale(F.front - 0.1, 0.3);
       put(masonry ? pBrick : pTrim, wx, 0.36, wz, 0, wsx, 0.72, wsz, masonry ? STONE_TINT[1] : trim,
         rep4(reps(wsx, masonry ? TILE.brick.u : TILE.trim.u), reps(wsz, masonry ? TILE.brick.u : TILE.trim.u), masonry ? 0.36 : 1, 1),
         0, CULL.detail);
@@ -1726,10 +1786,13 @@ export function createCity(world, ground, opts = {}) {
       : lot.kind === 'block' ? 0.22 + rnd() * 0.45
         : 0.3 + rnd() * 0.45;
 
-    if (lot.kind === 'tower') { emitTower(lot, rnd, occ); counts.tower++; }
-    else if (lot.kind === 'warehouse') { emitWarehouse(lot, rnd); counts.warehouse++; }
-    else if (lot.kind === 'house') { emitHouse(lot, rnd, occ); counts.house++; }
-    else { emitBlock(lot, rnd, occ); counts.block++; }
+    // Drawn inside the solid box, never across its face: see drawnSize().
+    const size = drawnSize(lot);
+    const L = { ...lot, w: size.w, d: size.d };
+    if (lot.kind === 'tower') { emitTower(L, rnd, occ); counts.tower++; }
+    else if (lot.kind === 'warehouse') { emitWarehouse(L, rnd); counts.warehouse++; }
+    else if (lot.kind === 'house') { emitHouse(L, rnd, occ); counts.house++; }
+    else { emitBlock(L, rnd, occ); counts.block++; }
   }
 
   // ---- meshes ------------------------------------------------------------

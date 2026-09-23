@@ -2922,6 +2922,43 @@ function charFinish(mat) {
   mat.metalness = lerp(f.metalness, 0.1, k);
 }
 
+/**
+ * Draw a ground decal nearer the eye in DEPTH by the same amount the road is.
+ *
+ * render/roads.js pulls the whole road toward the camera by 0.4% of the
+ * distance, capped at 15 cm, so it wins the depth test against terrain that
+ * rides a few centimetres above it between grid vertices. Geometrically that
+ * means anything within about 0.004 x camera height of the road surface loses
+ * to it: ~1 cm from the chase camera. The contact shadow sits 7 mm over the
+ * road, and measured on round3/base the road ate half of it — 1183 shadowed
+ * pixels became 570 with the pull on (side orbit, pitch 0.12), 620 became 261
+ * at pitch 0.6. Applying the identical pull keeps the 7 mm ordering intact at
+ * every distance, because the pull is the same monotonic function of the
+ * distance for both surfaces.
+ *
+ * The numbers must match roads.js's uPull (0.004, 0.15);
+ * tools/realismcheck.mjs holds them together.
+ */
+export const ROAD_PULL = [0.004, 0.15];
+const PULL_VERT = /* glsl */`
+{
+  float pullLen = length( mvPosition.xyz );
+  float pullBy = min( ${ROAD_PULL[0].toFixed(4)} * pullLen, ${ROAD_PULL[1].toFixed(3)} );
+  mvPosition.xyz *= 1.0 - pullBy / max( pullLen, 1e-3 );
+  gl_Position = projectionMatrix * mvPosition;
+}
+`;
+function pullToward(mat) {
+  const prev = mat.onBeforeCompile;
+  mat.onBeforeCompile = (shader, r) => {
+    if (prev) prev(shader, r);
+    shader.vertexShader = shader.vertexShader.replace('#include <project_vertex>', '#include <project_vertex>\n' + PULL_VERT);
+  };
+  const key = mat.customProgramCacheKey ? mat.customProgramCacheKey.bind(mat) : () => '';
+  mat.customProgramCacheKey = () => key() + '|road-pull';
+  return mat;
+}
+
 const _cam = new THREE.Vector3(), _car = new THREE.Vector3();
 // Past LOD.far the cabin, grille infill and calipers cannot be resolved and
 // are hidden; they come back inside LOD.near, the gap being hysteresis so a car
@@ -3040,13 +3077,16 @@ export function createCarModel(spec = {}, opts = {}) {
     color: 0x000000, map: K.tex.shadow, transparent: true, opacity: SHADOW_ALPHA,
     depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -4,
   });
+  pullToward(shadowMat);
   const shadow = new THREE.Mesh(geo.shadow, shadowMat);
   shadow.name = 'contactShadow';
   shadow.renderOrder = -1;
   shadow.visible = !!K.tex.shadow;
   group.add(shadow);
   // The road ribbon is drawn 4 cm above the physics ground (render/roads.js),
-  // so the shadow sits just above that or the road would cover it.
+  // so the shadow sits just above that or the road would cover it — and it is
+  // pulled toward the eye exactly as the road is (see pullToward), or that
+  // 7 mm is lost again to the road's depth pull.
   const SHADOW_LIFT = 0.047;
 
   // ---- wheels -------------------------------------------------------------

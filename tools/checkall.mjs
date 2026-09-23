@@ -30,6 +30,7 @@ const CHECKS = [
   ['nature', 'trees, rocks and grass grow where they should and cost what they say'],
   ['calm', 'a crash is a solid, harmless bump: nothing burns, breaks or slows down'],
   ['net', 'remote cars move smoothly, and old and new pages can both still play'],
+  ['realism', 'buildings are drawn where they are solid, and the roadside follows its rules'],
 ];
 
 const results = [];

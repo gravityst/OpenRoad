@@ -1159,6 +1159,8 @@ async function boot() {
     // moved. Projected before it, through last frame's matrices, every tag
     // trailed its car by a frame and swam against it at speed.
     if (net && tags) {
+      // Only on the road: over a menu they are clutter on top of its text.
+      tags.setVisible(mode === 'driving');
       camera.updateMatrixWorld();
       tags.update(camera, net.room.cars, car, colourOf, party ? party.guide.id : -1);
     }

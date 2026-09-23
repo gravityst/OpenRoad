@@ -73,6 +73,8 @@ export function createNameTags(root, opts = {}) {
   const tags = [];              // pooled DOM, never rebuilt per frame
   const arrows = [];
   const live = [];              // scratch, reused
+  const placed = new Float32Array(MAX_TAGS * 2);   // arrow positions this frame
+  const tagAt = new Float32Array(MAX_TAGS * 2);    // tag positions this frame
   const v = new THREE.Vector3();
   const camPos = new THREE.Vector3();
   let w = 1, h = 1;
@@ -174,6 +176,19 @@ export function createNameTags(root, opts = {}) {
       const sy = (-v.y * 0.5 + 0.5) * h;
       const onScreen = !behind && sx > 0 && sx < w && sy > 0 && sy < h;
       const nm = c.name || ('Driver-' + c.id);
+      // Two friends in the same direction put their tags on top of each other.
+      // The nearer one (placed first) keeps its spot; this one stacks above.
+      let ty = sy;
+      if (onScreen) {
+        for (let tries = 0; tries < 6; tries++) {
+          let hit = false;
+          for (let j = 0; j < ti; j++) {
+            if (Math.abs(tagAt[j * 2] - sx) < 120 && Math.abs(tagAt[j * 2 + 1] - ty) < 40) { hit = true; break; }
+          }
+          if (!hit) break;
+          ty -= 42;
+        }
+      }
 
       if (onScreen && showTags) {
         const t = tags[ti] || mkTag();
@@ -183,8 +198,10 @@ export function createNameTags(root, opts = {}) {
         // The renderer overwrites the outer transform every frame, so scale and
         // opacity live on the inner span — anything set on the outer element
         // would be destroyed on the next tick.
-        t.el.style.transform = `translate(${sx.toFixed(1)}px,${sy.toFixed(1)}px)`;
-        const k = Math.max(0.62, Math.min(1, 30 / Math.max(1, c.dist)));
+        t.el.style.transform = `translate(${sx.toFixed(1)}px,${ty.toFixed(1)}px)`;
+        tagAt[(ti - 1) * 2] = sx; tagAt[(ti - 1) * 2 + 1] = ty;
+        // Never below 80%: at the old 62% floor a far tag was 9 px text.
+        const k = Math.max(0.8, Math.min(1, 30 / Math.max(1, c.dist)));
         // Quantised so a car at a steady distance stops invalidating layout
         // 60 times a second for changes nobody can see.
         const ks = `translate(-50%,-100%) scale(${k.toFixed(2)})`;
@@ -212,7 +229,19 @@ export function createNameTags(root, opts = {}) {
         const sxr = (cx - EDGE) / Math.abs(dx || 1e-6);
         const syr = (cy - EDGE) / Math.abs(dy || 1e-6);
         const r = Math.min(sxr, syr);
-        const px = cx + dx * r, py = cy + dy * r;
+        let px = cx + dx * r, py = cy + dy * r;
+        // Two friends in the same direction must not stack into one unreadable
+        // arrow: slide this one along the edge until it clears the others.
+        const side = sxr < syr;               // on the left/right edge
+        for (let tries = 0; tries < 6; tries++) {
+          let hit = false;
+          for (let j = 0; j < ai - 1; j++) {
+            if (Math.abs(placed[j * 2] - px) < 110 && Math.abs(placed[j * 2 + 1] - py) < 40) { hit = true; break; }
+          }
+          if (!hit) break;
+          if (side) py = Math.min(h - EDGE, py + 44); else px = Math.min(w - EDGE, px + 120);
+        }
+        placed[(ai - 1) * 2] = px; placed[(ai - 1) * 2 + 1] = py;
         const ang = Math.atan2(dy, dx) + Math.PI / 2;   // triangle points "up"
         a.el.style.transform =
           `translate(${px.toFixed(1)}px,${py.toFixed(1)}px) rotate(${ang.toFixed(3)}rad)`;
@@ -231,7 +260,10 @@ export function createNameTags(root, opts = {}) {
   return {
     element: layer,
     update, setSize,
-    setVisible(on) { layer.style.display = on ? '' : 'none'; },
+    setVisible(on) {
+      const want = on ? '' : 'none';
+      if (layer.style.display !== want) layer.style.display = want;
+    },
     setShowTags(on) { showTags = !!on; },
     setShowArrows(on) { showArrows = !!on; },
     dispose() { layer.remove(); tags.length = 0; arrows.length = 0; },

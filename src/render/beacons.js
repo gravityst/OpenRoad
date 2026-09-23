@@ -39,10 +39,10 @@ function bandTex() {
   const img = g.createImageData(w, h);
   for (let y = 0; y < h; y++) {
     const v = y / h;
-    const band = 0.45 + 0.55 * Math.pow(Math.max(0, Math.sin(v * Math.PI)), 6);
+    const band = 0.55 + 0.45 * Math.pow(Math.max(0, Math.sin(v * Math.PI)), 6);
     for (let x = 0; x < w; x++) {
       const s = Math.abs(x / (w - 1) - 0.5) * 2;
-      const core = Math.exp(-s * s * 14) + 0.4 * Math.exp(-s * s * 3);
+      const core = Math.exp(-s * s * 4) + 0.35 * Math.exp(-s * s * 1.2);
       const i = (y * w + x) * 4;
       img.data[i] = img.data[i + 1] = img.data[i + 2] = 255;
       img.data[i + 3] = Math.round(Math.min(1, core * band) * 255);
@@ -66,7 +66,7 @@ function beamGeometry() {
   const col = new Float32Array(pos.count * 4);
   for (let i = 0; i < pos.count; i++) {
     const up = pos.getY(i);
-    const a = Math.pow(1 - up, 1.5) * Math.min(1, up * 40 + 0.35);
+    const a = Math.pow(1 - up, 1.1) * Math.min(1, up * 40 + 0.35);
     col[i * 4] = col[i * 4 + 1] = col[i * 4 + 2] = 1;
     col[i * 4 + 3] = a;
   }
@@ -108,9 +108,14 @@ export function createBeacons(scene, opts = {}) {
   const slots = [];
   function slot(i) {
     if (slots[i]) return slots[i];
+    // NORMAL blending, not additive. Added light is invisible against a
+    // bright midday sky — the first version was measured in the browser as a
+    // 3 px, barely-there hairline at 2.4 km — whereas a column painted in the
+    // player's colour reads against sky, cloud and hillside alike, and still
+    // blooms at night from the colour's slight HDR lift.
     const beamMat = new THREE.MeshBasicMaterial({
       map: tex, color: 0xffffff, vertexColors: true, transparent: true, opacity: 1,
-      blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, fog: false,
+      depthWrite: false, side: THREE.DoubleSide, fog: false,
     });
     const beam = new THREE.Mesh(beamGeo, beamMat);
     beam.renderOrder = 4;
@@ -134,8 +139,12 @@ export function createBeacons(scene, opts = {}) {
     return s;
   }
 
+  // Painted, not added. The challenge GPS gets away with additive because
+  // cyan is bright; a red or purple friend's chevrons added onto grey tarmac
+  // in daylight were faint dashes (seen in the browser at 71 km/h). They fade
+  // in by size instead of by brightness.
   const chevMat = new THREE.MeshBasicMaterial({
-    color: 0xffffff, transparent: true, opacity: 0.95, blending: THREE.AdditiveBlending,
+    color: 0xffffff, transparent: true, opacity: 0.88,
     depthWrite: false, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -10,
     side: THREE.DoubleSide,
   });
@@ -182,7 +191,7 @@ export function createBeacons(scene, opts = {}) {
       const pulse = guided ? 0.85 + 0.35 * Math.sin(time * 6) : 1;
       if (s.hex !== hex || guided) {
         tmpCol.setHex(hex);
-        s.beamMat.color.setRGB(tmpCol.r * 2.6 * pulse, tmpCol.g * 2.6 * pulse, tmpCol.b * 2.6 * pulse);
+        s.beamMat.color.setRGB(tmpCol.r * 1.3 * pulse, tmpCol.g * 1.3 * pulse, tmpCol.b * 1.3 * pulse);
         if (s.ringMat) s.ringMat.color.setRGB(tmpCol.r * 2.2, tmpCol.g * 2.2, tmpCol.b * 2.2);
         s.hex = guided ? -2 : hex;
       }
@@ -190,7 +199,10 @@ export function createBeacons(scene, opts = {}) {
       const far = smooth(NEAR, FULL, dist);
       s.beam.visible = far > 0.01;
       if (s.beam.visible) {
-        const w = Math.max(1.4, dist * 0.0042) * (guided ? 1.35 : 1);
+        // About 1.6 degrees wide at any range: 4 m at 150 m, 67 m at 2.4 km,
+        // ~20 px on a laptop screen wherever they are. At 0.2 degrees (the
+        // first try) a purple column against a blue sky was a hairline.
+        const w = Math.max(3, dist * 0.028) * (guided ? 1.35 : 1);
         s.beam.position.set(c.x, gy, c.z);
         // Turned to face the camera about the vertical only, so it stays a
         // column from every side.
@@ -227,13 +239,13 @@ export function createBeacons(scene, opts = {}) {
         e3.set(pitch, Math.atan2(-rp.tx, -rp.tz), 0, 'YXZ');
         q.setFromEuler(e3);
         v3.set(rp.x, y0 + 0.13, rp.z);
-        const sc = Math.min(1.25, (rp.hw || 4) / 4);
+        const nearA = Math.min(1, Math.max(0, (d - guide.d - 6) / 14));
+        const grow = Math.max(0.2, nearA * (0.55 + 0.45 * (1 - k / nChev)));
+        const sc = Math.min(1.25, (rp.hw || 4) / 4) * grow;
         s3.set(sc, 1, sc);
         m4.compose(v3, q, s3);
         chevrons.setMatrixAt(shown, m4);
-        const nearA = Math.min(1, Math.max(0, (d - guide.d - 6) / 14));
-        const a = nearA * (0.35 + 0.65 * (1 - k / nChev)) * 1.5;
-        chevrons.setColorAt(shown, chevCol.setRGB(tmpCol.r * a, tmpCol.g * a, tmpCol.b * a));
+        chevrons.setColorAt(shown, chevCol.setRGB(tmpCol.r * 1.15, tmpCol.g * 1.15, tmpCol.b * 1.15));
         shown++;
       }
     }

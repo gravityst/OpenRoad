@@ -69,7 +69,7 @@ const CSS = `
   animation:ormp-in .22s cubic-bezier(.22,.61,.36,1);max-width:min(380px,80vw)}
 .ormp-toast.is-out{opacity:0;transform:translateX(-8px);transition:opacity .3s,transform .3s}
 @keyframes ormp-in{from{opacity:0;transform:translateX(-12px)}to{opacity:1;transform:none}}
-.ormp-guide{position:absolute;left:50%;top:calc(env(safe-area-inset-top,0px) + 12vmin);transform:translateX(-50%);display:flex;align-items:center;gap:.6em;
+.ormp-guide{position:absolute;left:calc(12px + env(safe-area-inset-left,0px));top:calc(30vh - 50px);display:flex;align-items:center;gap:.6em;
   padding:.5em 1em;border-radius:999px;background:rgba(10,14,20,.72);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.18);
   font:800 14px/1.1 var(--ormp-font);letter-spacing:.02em;white-space:nowrap;box-shadow:0 8px 24px rgba(0,0,0,.35)}
 .ormp-guide[hidden]{display:none}
@@ -502,6 +502,10 @@ export function createRoster(opts) {
     if (disposed) return;
     mode = gameMode;
     tickToasts(dt);
+    // Toasts are for the road. On the title screen the badge says the same
+    // thing, and a toast there landed on top of the wordmark.
+    const showToasts = mode === 'driving';
+    if (toasts.hidden === showToasts) toasts.hidden = !showToasts;
     if (mode !== 'driving' && open) close();
     renderChip();
     renderBanner();

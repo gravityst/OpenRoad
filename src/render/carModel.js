@@ -202,6 +202,44 @@ const LAMPS = {
   lIndR:  [0x8a5410, 0xff9a12, 0.12, 0.15, 'strip'],
 };
 
+// Per-model variety. Traffic is dozens of cars drawn from fifteen catalogue
+// entries, and with one design per body style every hatch in a queue wore the
+// same wheels, lamps and grille. Each catalogue car now picks from its style's
+// candidates by a hash of its own id — so a given model always looks the same,
+// the player's and traffic's alike, but two hatches do not.
+const FINISH = { silver: 0xc4c8ce, bright: 0xdde1e6, graphite: 0x5b5f66, black: 0x2c2e32, bronze: 0x8a6c42 };
+const VARIANTS = {
+  sedan: { spokes: ['twin5', 'ten', 'y6'], finish: ['silver', 'bright', 'graphite'], caliper: [0x303236, 0x2a4f8a],
+    head: ['swept', 'slim'], tail: ['wrap', 'bar'], grille: ['wide', 'bars'] },
+  coupe: { spokes: ['y6', 'five', 'twin5'], finish: ['graphite', 'silver', 'black'], caliper: [0xb3261e, 0x303236],
+    head: ['slim', 'swept'], tail: ['bar', 'wrap'], grille: ['mesh'] },
+  hatch: { spokes: ['ten', 'five', 'six'], finish: ['silver', 'black', 'bronze'], caliper: [0x303236, 0xb3261e],
+    head: ['swept', 'square'], tail: ['tall', 'wrap'], grille: ['mesh', 'wide'] },
+  suv: { spokes: ['five', 'six', 'twin5'], finish: ['graphite', 'silver', 'black'], caliper: [0x303236],
+    head: ['square', 'swept'], tail: ['tall'], grille: ['bars', 'shield'] },
+  pickup: { spokes: ['six', 'five'], finish: ['black', 'graphite', 'silver'], caliper: [0x303236],
+    head: ['square'], tail: ['tall'], grille: ['shield', 'bars'] },
+  van: { spokes: ['steel'], finish: ['silver', 'bright'], caliper: [0x303236],
+    head: ['square'], tail: ['tall'], grille: ['wide', 'bars'] },
+  sports: { spokes: ['mesh', 'y6', 'twin5'], finish: ['graphite', 'black', 'bronze'], caliper: [0xd8a200, 0xb3261e, 0x2a4f8a],
+    head: ['slim'], tail: ['bar', 'wrap'], grille: ['mesh'] },
+};
+
+/** The style table entry for this style, with this model's variant applied. */
+function variantOf(style, vseed) {
+  const V = VARIANTS[style], base = STYLES[style];
+  if (!V) return { st: base, key: '' };
+  let h = vseed >>> 0;
+  const pick = (list) => { const v = list[h % list.length]; h = Math.imul(h ^ (h >>> 13), 0x5bd1e995) >>> 0; return v; };
+  const spokes = pick(V.spokes), finish = pick(V.finish), caliper = pick(V.caliper);
+  const head = pick(V.head), tail = pick(V.tail), grille = pick(V.grille);
+  const st = {
+    ...base, head, tail, grille,
+    wheel: { ...base.wheel, spokes, finish: FINISH[finish], caliper },
+  };
+  return { st, key: `${spokes}.${finish}.${caliper.toString(16)}.${head}.${tail}.${grille}` };
+}
+
 const TAU = Math.PI * 2;
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 const lerp = (a, b, t) => a + (b - a) * t;
@@ -1172,8 +1210,8 @@ function profileAt(cps, z) {
 // ===========================================================================
 
 /** Everything derived from the spec that the builders below need. */
-function dimensions(style, spec) {
-  const st = STYLES[style] || STYLES.sedan;
+function dimensions(style, spec, stOverride = null) {
+  const st = stOverride || STYLES[style] || STYLES.sedan;
   const wb = spec.wheelbase, tr = spec.track, wr = spec.wheelRadius, rh = spec.rideHeight;
   const fo = wb * st.over[0], ro = wb * st.over[1];
   const H = (k) => k * wr;
@@ -2064,7 +2102,7 @@ function frontEnd(d, B, hi) {
   else if (st.grille === 'mesh') grille = [[-gx * 0.7 * hw, yN - 0.09], [gx * 0.7 * hw, yN - 0.09], [gx * 0.8 * hw, yN - 0.015], [-gx * 0.8 * hw, yN - 0.015]];
   else if (st.grille === 'bars') grille = [[-gx * hw, yN - 0.17], [gx * hw, yN - 0.17], [gx * hw, yN - 0.005], [-gx * hw, yN - 0.005]];
   else grille = [[-gx * 0.92 * hw, yN - 0.14], [gx * 0.92 * hw, yN - 0.14], [gx * hw, yN - 0.008], [-gx * hw, yN - 0.008]];
-  const gp = projectedPatch(d, grille, hi ? 8 : 2, hi ? 3 : 1, 'front', { lift: 0.003, dome: 0 });
+  const gp = projectedPatch(d, grille, hi ? 8 : 4, hi ? 3 : 1, 'front', { lift: 0.003, dome: 0 });
   // The atlas: honeycomb in the top half, slats in the bottom.
   const slats = st.grille === 'bars' || st.grille === 'shield' || st.grille === 'wide';
   for (let i = 0; i < gp.uv.length; i += 2) { gp.uv[i] *= 2.2; gp.uv[i + 1] = (slats ? 0 : 0.5) + gp.uv[i + 1] * 0.5; }
@@ -2079,12 +2117,14 @@ function frontEnd(d, B, hi) {
   // front-bumper line, so it comes off with the bumper.
   const iy0 = yChin + 0.04, iy1 = Math.min(yN - 0.17, yChin + (d.style === 'sports' || d.style === 'coupe' ? 0.2 : 0.17));
   const intake = [[-0.62 * hw, iy0], [0.62 * hw, iy0], [0.7 * hw, iy1], [-0.7 * hw, iy1]];
-  B.plastic.push(projectedPatch(d, intake, hi ? 8 : 2, 1, 'front', { lift: 0.004, dome: 0 }));
+  // Wide patches keep a few segments even at low detail: across a curved
+  // bumper, two segments cut into the body and show as black teeth.
+  B.plastic.push(projectedPatch(d, intake, hi ? 8 : 6, 1, 'front', { lift: 0.004, dome: 0 }));
   // The lip under the nose: a black band standing a couple of centimetres
   // proud of the bumper and following its curve. (A straight plate stuck out
   // past the corners like a snow plough; one projected down to the chin was
   // clamped into a saw-tooth.)
-  B.plastic.push(projectedPatch(d, [[-0.8 * hw, yChin + 0.004], [0.8 * hw, yChin + 0.004], [0.8 * hw, yChin + 0.024], [-0.8 * hw, yChin + 0.024]], hi ? 16 : 4, 1, 'front', { lift: 0.022, dome: 0 }));
+  B.plastic.push(projectedPatch(d, [[-0.8 * hw, yChin + 0.004], [0.8 * hw, yChin + 0.004], [0.8 * hw, yChin + 0.024], [-0.8 * hw, yChin + 0.024]], hi ? 16 : 8, 1, 'front', { lift: 0.022, dome: 0 }));
   if (hi && (d.style === 'sedan' || d.style === 'suv' || d.style === 'pickup' || d.style === 'hatch')) {
     const fog = projectedPatch(d, [[0.62 * hw, iy0 + 0.012], [0.76 * hw, iy0 + 0.018], [0.76 * hw, iy0 + 0.052], [0.62 * hw, iy0 + 0.048]], 3, 1, 'front', { lift: 0.006, dome: 0.003 });
     pair(B.lHead, fog);
@@ -2165,7 +2205,7 @@ function rearEnd(d, B, hi) {
   // ---- lower bumper: diffuser, plate, exhausts ------------------------------
   const dy1 = yChin + (d.style === 'sports' || d.style === 'coupe' ? 0.16 : 0.12);
   const diff = [[-0.76 * hw, yChin + 0.006], [0.76 * hw, yChin + 0.006], [0.8 * hw, dy1], [-0.8 * hw, dy1]];
-  B.plastic.push(projectedPatch(d, diff, hi ? 14 : 3, hi ? 2 : 1, 'rear', { lift: 0.006, dome: 0 }));
+  B.plastic.push(projectedPatch(d, diff, hi ? 14 : 6, hi ? 2 : 1, 'rear', { lift: 0.006, dome: 0 }));
   if (hi && (d.style === 'sports' || d.style === 'coupe')) {
     for (const x of [-0.3, -0.1, 0.1, 0.3]) {
       const zf = projectEnd(d, 'rear', x * hw, yChin + 0.03)[1];
@@ -2732,14 +2772,14 @@ function mergeBucket(list, coloured) {
   return toGeometry(piece(pos, nrm, uv, idx, col));
 }
 
-function geometryFor(style, spec, detail, plateRow) {
-  const key = `${style}|${spec.wheelbase.toFixed(2)}|${spec.track.toFixed(2)}|` +
+function geometryFor(style, spec, detail, plateRow, variant) {
+  const key = `${style}|${variant.key}|${spec.wheelbase.toFixed(2)}|${spec.track.toFixed(2)}|` +
     `${spec.wheelRadius.toFixed(2)}|${spec.rideHeight.toFixed(2)}|${detail}|${plateRow}`;
   const hit = kit.geom.get(key);
   if (hit) return hit;
 
   const hi = detail !== 'low';
-  const d = dimensions(style, spec);
+  const d = dimensions(style, spec, variant.st);
   const B = { plateRow };
   for (const b of BUCKETS) B[b] = [];
   buildShell(d, B, hi);
@@ -2807,7 +2847,8 @@ export function createCarModel(spec = {}, opts = {}) {
   const K = acquireKit();
   // Low detail drops the plates, so letting the plate row into the cache key
   // there would stash four identical geometry sets instead of one.
-  const geo = geometryFor(style, defaults(spec), detail, detail === 'low' ? 0 : seed % 4);
+  const variant = variantOf(style, hash(`${spec.id || style}:${spec.name || ''}:look`));
+  const geo = geometryFor(style, defaults(spec), detail, detail === 'low' ? 0 : seed % 4, variant);
   const d = geo.d;
   const env = K.tex.env;
 

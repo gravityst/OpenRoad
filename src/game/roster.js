@@ -203,8 +203,11 @@ export function createRoster(opts) {
     let pick = null, pickName = null;
     if (g.kind === 'race') {
       pick = el('div', 'ormp-pick');
-      const prev = el('button', null, '◀'); prev.type = 'button'; prev.setAttribute('aria-label', 'Previous race');
-      const next = el('button', null, '▶'); next.type = 'button'; next.setAttribute('aria-label', 'Next race');
+      // Drawn chevrons, not the triangle characters: phones render those as colour
+      // emoji buttons, a different cartoon on every device (uicheck enforces it).
+      const chev = (d) => `<svg viewBox="0 0 10 16" width="9" height="14" aria-hidden="true"><path d="${d}" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="square"/></svg>`;
+      const prev = el('button'); prev.innerHTML = chev('M8 1.5 2 8l6 6.5'); prev.type = 'button'; prev.setAttribute('aria-label', 'Previous race');
+      const next = el('button'); next.innerHTML = chev('M2 1.5 8 8l-6 6.5'); next.type = 'button'; next.setAttribute('aria-label', 'Next race');
       pickName = el('span');
       prev.addEventListener('click', () => cycleRace(-1));
       next.addEventListener('click', () => cycleRace(1));

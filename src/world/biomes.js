@@ -139,9 +139,17 @@ export function biomeWeights(x, z, seed, out) {
 export function snowAmount(wAlpine, x, z, h, seed) {
   if (wAlpine < 0.02) return 0;
   const s = seed | 0;
-  const v = wAlpine + (h + 20) / 140 + fbm(x / 260, z / 260, s + 481, 2) * 0.07
-          + valueNoise(x / 31, z / 31, s + 482) * 0.035;
-  return smoothstep(0.45, 0.62, v);
+  // Across the border the noise is wider than the ramp, so the snow line
+  // breaks up into fields of snow reaching out into the grass and green
+  // patches melted out of the snow, over about 150 m; it is scaled by
+  // w(1 - w), so the heart of the pass is white and the farmland green all
+  // the same. With a fixed, small noise the line followed the biome
+  // weight's contour and crossed it in 15 m: from the air, a curve where
+  // the grass stopped and the snow began.
+  const edge = 4 * wAlpine * (1 - wAlpine);
+  const v = wAlpine + (h + 20) / 140 + (fbm(x / 180, z / 180, s + 481, 2) * 0.3
+          + valueNoise(x / 43, z / 43, s + 482) * 0.1) * edge;
+  return smoothstep(0.38, 0.72, v);
 }
 
 // ---------------------------------------------------------------------------

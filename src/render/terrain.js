@@ -201,6 +201,10 @@ const LITTER_DARK = [0.34, 0.19, 0.09];
 const ROCK_L = [0.18, 0.165, 0.145];
 const RED_ROCK_L = [0.27, 0.068, 0.030];
 const GRANITE_L = [0.105, 0.105, 0.11];
+// The bay's cliffs: pale, warm sandstone (sRGB about 0.74, 0.66, 0.54), the
+// palest rock on the map — which is how the shader tells it apart and beds
+// it boldly, the way a sea cliff shows its layers.
+const CLIFF_L = [0.50, 0.39, 0.25];
 
 // How much of each packed detail mask a surface shows, in the attribute's own
 // order: (gravel chips, sand ripple, grass blades, soil clods). These do NOT
@@ -501,6 +505,7 @@ varying vec3 vOrNormal;
 varying vec4 vOrRock;
 uniform float orTime;
 uniform float orHeat;
+uniform float orSeaY;       // sea level, for the tide line on the cliffs
 `;
 
 // The canyon's heat haze, as the one part of it a ground shader can draw: a
@@ -589,6 +594,15 @@ const F_MAIN = `
   float orStrata = 0.84 + 0.16 * sin( vOrPos.y * 2.7 + orMa.r * 9.0 ) * ( 1.0 - smoothstep( 60.0, 220.0, length( vOrPos.xyz - cameraPosition ) ) )
                  * ( 1.0 - smoothstep( 0.0, 0.004, vOrRock.b - vOrRock.r ) );
   orStrata = mix( orStrata, 0.86 + 0.14 * sin( vOrPos.y * 0.85 + orMa.r * 4.0 ) * sin( vOrPos.y * 0.31 + 1.3 ), orDes );
+  // Sea cliffs, told apart by how pale their rock is (luminance over 0.3 in
+  // linear light; no other rock on the map is over 0.17): beds a metre or
+  // two thick in three tones, and a dark tide line at their foot. The fine
+  // 2.3 m ribbing everywhere else read on a 60 m cliff as corrugated iron.
+  float orCliff = smoothstep( 0.24, 0.32, dot( vOrRock.rgb * 0.5, vec3( 0.2126, 0.7152, 0.0722 ) ) );
+  float orCb = sin( vOrPos.y * 0.9 + orMa.r * 6.0 + orMb.g * 1.5 ) * 0.5 + 0.5;
+  float orCliffBeds = mix( 0.78, 1.08, smoothstep( 0.2, 0.8, orCb ) ) * mix( 1.0, 0.82, smoothstep( 0.55, 0.9, sin( vOrPos.y * 0.37 + 2.0 ) ) )
+                    * mix( 0.62, 1.0, smoothstep( orSeaY + 1.3, orSeaY + 3.3, vOrPos.y ) );
+  orStrata = mix( orStrata, orCliffBeds, orCliff );
   // Granite is not bedded; it weathers in patches, lighter where a face
   // has freshly spalled and darker where lichen and meltwater have been.
   // (Jointing drawn as a sine across the face, the first try, striped every
@@ -791,6 +805,7 @@ export function createTerrain(world, ground, opts = {}) {
       // make one, 0 at night.
       orTime: { value: 0 },
       orHeat: { value: 1 },
+      orSeaY: { value: world.biomes ? world.biomes.seaLevel : -1e4 },
     };
 
     const prevCompile = material.onBeforeCompile;
@@ -1261,10 +1276,11 @@ export function createTerrain(world, ground, opts = {}) {
         if (dtl) weigh(surface, ny, v * 4, dtl);
         if (rkt) {
           // bw still holds this vertex's weights: tint() just asked palette().
-          const wD = bw[BIOME.desert], wA = bw[BIOME.alpine], wR = 1 - wD - wA, o4 = v * 4;
-          rkt[o4] = (ROCK_L[0] * wR + RED_ROCK_L[0] * wD + GRANITE_L[0] * wA) * 510;
-          rkt[o4 + 1] = (ROCK_L[1] * wR + RED_ROCK_L[1] * wD + GRANITE_L[1] * wA) * 510;
-          rkt[o4 + 2] = (ROCK_L[2] * wR + RED_ROCK_L[2] * wD + GRANITE_L[2] * wA) * 510;
+          const wD = bw[BIOME.desert], wA = bw[BIOME.alpine], wC = bw[BIOME.coast];
+          const wR = 1 - wD - wA - wC, o4 = v * 4;
+          rkt[o4] = (ROCK_L[0] * wR + RED_ROCK_L[0] * wD + GRANITE_L[0] * wA + CLIFF_L[0] * wC) * 510;
+          rkt[o4 + 1] = (ROCK_L[1] * wR + RED_ROCK_L[1] * wD + GRANITE_L[1] * wA + CLIFF_L[1] * wC) * 510;
+          rkt[o4 + 2] = (ROCK_L[2] * wR + RED_ROCK_L[2] * wD + GRANITE_L[2] * wA + CLIFF_L[2] * wC) * 510;
           // Snow country also carries how well the ground holds its snow:
           // a gully fills and a rib is stripped (the shader reads it as the
           // steepness the rock shows through at). 0.8..1 in the heart of the

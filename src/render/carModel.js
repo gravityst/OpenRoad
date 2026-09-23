@@ -71,9 +71,10 @@
 //
 // WHAT IT COSTS
 //
-// Per car at player detail: 26 draw calls at rest (the first version: 24), 11
-// shadow casters (12), 21-23k triangles (1.6k). At traffic detail ('low'): 12
-// calls (12), 6 casters (6), 4.8-5.8k triangles (1.4k). Past ~35 m a car's
+// Per car at player detail: 27 draw calls at rest, the new contact shadow
+// included (the first version: 24), 11 shadow casters (12), 21-23k triangles
+// (1.6k). At traffic detail ('low'): 13 calls (12), 6 casters (6), 4.8-5.8k
+// triangles (1.4k). Past ~35 m a car's
 // cabin, grille infill and calipers are dropped by a THREE.LOD switch, which is
 // why a street full of traffic now costs FEWER draw calls than before. The
 // wheel-blur discs are drawn only while the wheels are turning fast. Geometry

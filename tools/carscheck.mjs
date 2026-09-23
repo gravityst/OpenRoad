@@ -138,8 +138,12 @@ for (const detail of ['high', 'low']) {
     if (!lenOk || !hOk) note(tag, `paint spans z ${box.min.z.toFixed(2)}..${box.max.z.toFixed(2)} (dims ${m.dims.front.toFixed(2)}..${m.dims.rear.toFixed(2)}), top ${box.max.y.toFixed(2)} vs roof ${(m.dims.height - spec.rideHeight).toFixed(2)}`);
 
     // --- budget ---
+    // Draw calls as a browser sees them. The contact shadow is hidden here
+    // only because Node has no canvas to draw its texture into.
     let calls = 0, shadowCasters = 0;
     m.group.traverseVisible((o) => { if (o.isMesh) { calls++; if (o.castShadow) shadowCasters++; } });
+    const cs = m.group.getObjectByName('contactShadow');
+    if (cs && !cs.visible) calls++;
     budget.push({ detail, id: c.id, body: spec.body, tris: m.triangles, calls, shadowCasters });
 
     // --- now break it ------------------------------------------------------
@@ -441,7 +445,8 @@ for (const k of bad) for (const msg of problems[k]) console.log(`        ${k.pad
   const [hC0, hC1] = stat(hi, 'calls'), [lC0, lC1] = stat(lo, 'calls');
   const [hS0, hS1] = stat(hi, 'shadowCasters'), [lS0, lS1] = stat(lo, 'shadowCasters');
   // The first version of this file cost 24 draw calls and ~1,600 triangles
-  // per car at high detail, 12 and ~1,380 at low. Draw calls are what dozens
+  // per car at high detail, 12 and ~1,380 at low (it had no contact shadow;
+  // the one here is one of the calls counted). Draw calls are what dozens
   // of traffic cars actually spend, so they must not grow; triangles are
   // cheap on any GPU from the last decade and are allowed to.
   check('player detail stays within 28 draw calls a car', hC1 <= 28, `${hC0}-${hC1} calls, ${hS0}-${hS1} shadow casters, ${hT0}-${hT1} triangles`);

@@ -32,6 +32,7 @@ const CHECKS = [
   ['net', 'remote cars move smoothly, and old and new pages can both still play'],
   ['ui', 'every screen builds and focuses its action; no emoji, no fire, no scolding'],
   ['biome', 'five places a kid can name, one world for every player, and no seams'],
+  ['realism', 'buildings are drawn where they are solid, and the roadside follows its rules'],
 ];
 
 const results = [];

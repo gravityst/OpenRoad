@@ -281,6 +281,67 @@ export const CARS = [
 
 export const CAR_BY_ID = Object.fromEntries(CARS.map((c) => [c.id, c]));
 
+// ---------------------------------------------------------------------------
+// Traffic only
+// ---------------------------------------------------------------------------
+//
+// The working vehicles the other drivers use and the garage never sells. A
+// country road with nothing on it but private cars reads as a car park that
+// moves; the white vans, the lorries, the bus and the tractor are what make it
+// read as a place people live and work.
+//
+// Traffic is kinematic (ai/traffic.js), so a spec here is only what the
+// renderer, the car-to-car collision and the traffic driver read — no engine.
+// Beside the usual size and mass:
+//
+//   share    fraction of the traffic pool, against 0.66 for all the cars
+//   roads    road kinds it will drive on; a bus does not take a dirt track
+//   top      m/s it will not exceed whatever the limit: a 7.5-tonne lorry is
+//            governed to about 80 km/h, a tractor manages about 38
+//   accel    m/s^2 it pulls away at, [least, most]
+//   alat     m/s^2 of cornering its driver will accept — a double-decker's is
+//            a hatchback's minus the passengers standing up
+//   length   m, bumper to bumper, for the following distance and the
+//            collision box (a wheelbase formula makes a bus 9.9 m long)
+//
+// Every marque here is invented, like the cars'.
+const PAVED = ['highway', 'avenue', 'link', 'street', 'rural'];
+export const TRAFFIC = [
+  {
+    id: 'carrier', brand: 'Kestrel', model: 'Carrier', role: 'van', body: 'van', share: 0.10,
+    // White vans are white. The odd fleet colour keeps a queue from looking cloned.
+    colours: [0xf2f2ef, 0xeeeeea, 0xf2f2ef, 0xc9cdd1, 0x2b5fa8, 0x1e2226],
+    roads: [...PAVED, 'gravel'], top: 26, accel: [1.3, 2.2], alat: 2.8, length: 5.45,
+    spec: { mass: 2350, wheelbase: 3.45, track: 1.70, wheelRadius: 0.36, rideHeight: 0.34 },
+  },
+  {
+    id: 'workmate', brand: 'Norvex', model: 'Workmate', role: 'pickup', body: 'pickup', share: 0.07,
+    colours: [0xf1f1ee, 0x9a2f2a, 0x2f3a44, 0x6b7a3a, 0xb9bcc0, 0x1c1e21],
+    roads: [...PAVED, 'gravel', 'dirt', 'track'], top: 27, accel: [1.5, 2.4], alat: 3.0, length: 5.5,
+    spec: { mass: 2250, wheelbase: 3.30, track: 1.72, wheelRadius: 0.40, rideHeight: 0.40 },
+  },
+  {
+    id: 'lorry', brand: 'Caldwell', model: 'C75', role: 'lorry', body: 'box', share: 0.07,
+    colours: [0xd9dcdf, 0x1f4f86, 0xb8342b, 0xeceae4, 0x2e6a3f, 0x36393e],
+    roads: [...PAVED, 'gravel'], top: 22, accel: [0.7, 1.1], alat: 2.0, length: 7.7,
+    spec: { mass: 7500, wheelbase: 4.2, track: 1.90, wheelRadius: 0.46, rideHeight: 0.46 },
+  },
+  {
+    id: 'bus', brand: 'Caldwell', model: 'Countrylink', role: 'bus', body: 'bus', share: 0.04,
+    colours: [0xeae8e2],
+    roads: [...PAVED], top: 21, accel: [0.6, 0.9], alat: 1.8, length: 12.4,
+    spec: { mass: 12500, wheelbase: 6.1, track: 2.05, wheelRadius: 0.50, rideHeight: 0.50 },
+  },
+  {
+    id: 'tractor', brand: 'Fenwright', model: '140', role: 'tractor', body: 'tractor', share: 0.04,
+    // The four colours a farmyard is painted in.
+    colours: [0x2f7d3a, 0xb8322a, 0x1f5fa8, 0xd9731f],
+    roads: ['rural', 'gravel', 'dirt', 'track'], top: 10.5, accel: [0.6, 0.9], alat: 1.6, length: 4.9,
+    spec: { mass: 5200, wheelbase: 2.55, track: 1.80, wheelRadius: 0.85, rideHeight: 0.85, frontWheelRadius: 0.52 },
+  },
+];
+export const TRAFFIC_BY_ID = Object.fromEntries(TRAFFIC.map((c) => [c.id, c]));
+
 /** The car a new player starts in. */
 // The starter is a rally car, not a shopping car.
 //
@@ -294,7 +355,7 @@ export const STARTER = 'kaida2';
  * `colour` is carried through so the renderer and the menu agree on the paint.
  */
 export function specFor(id, colourIndex = 0) {
-  const car = CAR_BY_ID[id] || CAR_BY_ID[STARTER];
+  const car = CAR_BY_ID[id] || TRAFFIC_BY_ID[id] || CAR_BY_ID[STARTER];
   return {
     ...car.spec,
     name: `${car.brand} ${car.model}`,

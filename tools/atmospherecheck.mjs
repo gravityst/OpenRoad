@@ -94,7 +94,11 @@ console.log(`roads: ${st.families} surfaces in ${st.layers} layers of ${st.layer
 
   // Every vertex's layer and detail index must exist, and nothing is NaN.
   let out = 0, nan = 0, verts = 0, fringeBad = 0;
+  // The road surface meshes only: roads.group also holds the roadside
+  // furniture (posts, rails, signs), which has no road layers to check.
+  // realismcheck asserts this walks every one of the surface meshes.
   for (const m of roads.group.children) {
+    if (m.name !== 'roads.region') continue;
     const a = m.geometry.attributes;
     const r = a.aRoad.array, p = a.position.array, uv = a.uv.array;
     for (let i = 0; i < r.length / 3; i++) {
@@ -191,6 +195,7 @@ console.log(`roads: ${st.families} surfaces in ${st.layers} layers of ${st.layer
   specs.forEach((s, f) => { if (s.kind === 'patch') for (let v = 0; v < s.variants; v++) patchLayer.add(atlas.first[f] + v); });
   const acc = { ribbon: [0, 0, 0, Infinity], patch: [0, 0, 0, Infinity] };
   for (const m of roads.group.children) {
+    if (m.name !== 'roads.region') continue;
     const a = m.geometry.attributes, idx = m.geometry.index.array;
     const p = a.position.array, r = a.aRoad.array;
     for (let t = 0; t < idx.length; t += 3) {

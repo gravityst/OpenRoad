@@ -33,7 +33,8 @@
 // lateral error is self-correcting rather than accumulating.
 
 import { clamp, lerp, mulberry } from '../world/noise.js';
-import { CARS, specFor } from '../vehicles/catalog.js';
+import { pointOnEdge } from '../world/layout.js';
+import { CARS, TRAFFIC, specFor } from '../vehicles/catalog.js';
 
 const TAU = Math.PI * 2;
 
@@ -51,10 +52,55 @@ const RANK = {
 };
 
 // Which classes turn up on the road, and how often. A city where every third
-// car is a supercar is a car park, not a city.
+// car is a supercar is a car park, not a city. These share CAR_SHARE of the
+// pool; the working vehicles in catalog.js's TRAFFIC take the rest.
 const CLASS_MIX = { city: 0.30, utility: 0.25, luxury: 0.18, sport: 0.13, offroad: 0.11, super: 0.03 };
+const CAR_SHARE = 0.68;
+// A pool that happens to roll no bus has no buses all session. These are the
+// fewest of each working vehicle a pool of about seventy is built with.
+const AT_LEAST = { bus: 2, tractor: 2, lorry: 3, van: 4, pickup: 2 };
 
-const A_LAT = 3.2;        // m/s^2 of lateral acceleration a traffic driver will accept
+// ---------------------------------------------------------------------------
+// Bus stops
+// ---------------------------------------------------------------------------
+
+// A stop is a point on a paved road, served in both directions: the shelter
+// for each direction stands on that direction's right, STAGGER metres further
+// along its way, so the two never face each other across the road.
+export const STAGGER = 14;
+const STOP_ROADS = { rural: 1, street: 1, avenue: 1, link: 1 };
+
+/**
+ * Where the buses stop, by rule, from the world alone — so the traffic that
+ * stops at them and the roads that draw the shelters agree without talking.
+ *
+ * Every repair shop gets one (they are the named places on the map), then
+ * every group of farmhouses: the house nearest the road that has no stop
+ * within 420 m gets one on its road, and everything within 420 m of that is
+ * served. Sheds and barns do not ride buses. Stops keep 30 m clear of either
+ * end of their road, which is where the junctions are.
+ */
+export function busStops(world, ground) {
+  if (!ground || !ground.nearestRoad) return [];
+  const homes = (world.lots || []).filter((l) => l.kind === 'house' && l.height >= 4.5);
+  const anchors = [...(world.garages || []).map((g) => ({ x: g.x, z: g.z, garage: true })), ...homes];
+  const stops = [];
+  const ok = (e) => STOP_ROADS[e.kind] === 1 && e.length > 2 * (30 + STAGGER) + 10;
+  for (const a of anchors) {
+    let near = false;
+    for (const st of stops) if ((st.x - a.x) * (st.x - a.x) + (st.z - a.z) * (st.z - a.z) < 420 * 420) { near = true; break; }
+    if (near) continue;
+    const r = ground.nearestRoad(a.x, a.z, a.garage ? 90 : 150, ok);
+    if (!r) continue;
+    const s = clamp(r.s, 30 + STAGGER, r.edge.length - 30 - STAGGER);
+    // Where the stop actually is once kept clear of the junctions.
+    const p = pointOnEdge(r.edge, s);
+    stops.push({ edge: r.edge.i, s, x: p.x, z: p.z, garage: !!a.garage });
+  }
+  return stops;
+}
+
+const A_LAT = 3.2;        // m/s^2 of lateral acceleration a car driver will accept
 const B_COMF = 2.8;       // m/s^2 they will plan to brake at for something they can see
 const B_MAX = 7.5;        // m/s^2 they will actually use when surprised
 const GAP_MIN = 2.6;      // m of standstill gap, bumper to bumper
@@ -165,17 +211,23 @@ export function createTraffic(world, ground, opts = {}) {
    * and toward bigger roads. A driver who turns at random makes the city feel
    * like a maze of one-block trips; one who never turns never leaves the ring.
    */
-  function chooseNext(node, fromEdge, hx, hz) {
+  function chooseNext(node, fromEdge, hx, hz, car) {
     const list = node.edges;
     let n = 0, total = 0;
+    const roads = car ? car.roads : null;
+    const tractor = car ? car.role === 'tractor' : false;
     for (let k = 0; k < list.length && n < MAX_DEGREE; k++) {
       const e = edges[list[k]];
       const dir = e.a === node.i ? 1 : e.b === node.i ? -1 : 0;
       if (!dir) continue;
+      // A bus does not take a dirt track, and a tractor keeps off the main
+      // road where it can. Nothing allowed at all falls through to the U-turn.
+      if (roads && !roads.has(e.kind)) continue;
       endTangent(e, dir, false, _h2);
       const dot = _h2.tx * hx + _h2.tz * hz;
       const straight = 0.5 + 0.5 * dot;
       let w = (RANK[e.kind] ?? 1) * (0.05 + straight * straight * 1.7);
+      if (tractor && (e.kind === 'gravel' || e.kind === 'dirt' || e.kind === 'track')) w *= 4;
       if (e === fromEdge) w *= 0.015;      // a U-turn is a last resort, not a choice
       if (e.length < 6) w *= 0.4;          // crossing stubs are not destinations
       candW[n] = w; candE[n] = e.i; candD[n] = dir; total += w; n++;
@@ -191,11 +243,11 @@ export function createTraffic(world, ground, opts = {}) {
     return _pick;
   }
 
-  /** Fills `slot` with the road taken after `prev`, and records prev's turn. */
-  function fillSlot(slot, prev) {
+  /** Fills `slot` with the road `car` takes after `prev`, and records prev's turn. */
+  function fillSlot(slot, prev, car) {
     const node = nodes[prev.endNode];
     endTangent(prev.e, prev.dir, true, _h1);          // heading arriving at the node
-    const p = chooseNext(node, prev.e, _h1.tx, _h1.tz);
+    const p = chooseNext(node, prev.e, _h1.tx, _h1.tz, car);
     setSlot(slot, edges[p.ei], p.dir);
     endTangent(slot.e, slot.dir, false, _h2);         // heading leaving it
     // Signed turn, positive = right, because right(f) = (-fz, fx) here.
@@ -352,17 +404,37 @@ export function createTraffic(world, ground, opts = {}) {
   // entries quietly end up twice as common as the ones with one.
   const perClass = {};
   for (let i = 0; i < CARS.length; i++) perClass[CARS[i].class] = (perClass[CARS[i].class] || 0) + 1;
+  const PROTOS = [...CARS, ...TRAFFIC];
   const mix = [];
-  for (let i = 0; i < CARS.length; i++) {
-    const w = Math.max(1, Math.round(((CLASS_MIX[CARS[i].class] ?? 0.1) / perClass[CARS[i].class]) * 200));
+  for (let i = 0; i < PROTOS.length; i++) {
+    const p = PROTOS[i];
+    const share = p.role ? p.share : ((CLASS_MIX[p.class] ?? 0.1) / perClass[p.class]) * CAR_SHARE;
+    const w = Math.max(1, Math.round(share * 400));
     for (let k = 0; k < w; k++) mix.push(i);
+  }
+  // Guaranteed minimums first, then the weighted draw.
+  const picks = [];
+  for (const [role, n] of Object.entries(AT_LEAST)) {
+    const p = TRAFFIC.find((t) => t.role === role);
+    if (p) for (let k = 0; k < n && picks.length < maxCars; k++) picks.push(p);
+  }
+  while (picks.length < maxCars) picks.push(PROTOS[mix[(rnd() * mix.length) | 0]]);
+  // Shuffled, so the reserved vehicles are not always the first slots a
+  // spawn reaches for.
+  for (let i = picks.length - 1; i > 0; i--) {
+    const j = (rnd() * (i + 1)) | 0;
+    const t = picks[i]; picks[i] = picks[j]; picks[j] = t;
   }
 
   const cars = [];
   for (let i = 0; i < maxCars; i++) {
-    const proto = CARS[mix[(rnd() * mix.length) | 0]];
+    const proto = picks[i];
     const spec = specFor(proto.id, (rnd() * proto.colours.length) | 0);
+    // Which operator's livery a lorry or bus wears.
+    spec.livery = (rnd() * 6) | 0;
     const wheelbase = spec.wheelbase ?? 2.7;
+    const role = proto.role || 'car';
+    const accel = proto.accel ? lerp(proto.accel[0], proto.accel[1], rnd()) : 1.5 + rnd() * 1.5;
     cars.push({
       id: i,
       active: false,
@@ -390,12 +462,23 @@ export function createTraffic(world, ground, opts = {}) {
       wheelbase,
       wheelRadius: spec.wheelRadius ?? 0.34,
       rideHeight: spec.rideHeight ?? 0.28,
-      halfLen: (wheelbase * 1.55 + 0.5) * 0.5,
+      halfLen: proto.length ? proto.length * 0.5 : (wheelbase * 1.55 + 0.5) * 0.5,
+
+      // --- what kind of vehicle, and so what kind of driving ---
+      role,
+      top: proto.top ?? Infinity,          // m/s it is governed to, or can manage
+      alat: proto.alat ?? A_LAT,           // m/s^2 of cornering it will take
+      roads: proto.roads ? new Set(proto.roads) : null,
+      beacon: role === 'tractor',          // a slow vehicle's amber beacon
+      stopFor: 0,                          // s left standing at a bus stop
+      stopDone: -1,                        // the stop it last served
+      pull: 0,                             // 0..1, how far it has pulled in to the kerb
 
       // --- driver personality ---
       eager: 0.84 + rnd() * 0.28,          // fraction of the limit they aim for
-      accel: 1.5 + rnd() * 1.5,            // m/s^2 they pull away at
-      timeGap: 1.05 + rnd() * 0.85,        // s of headway they keep
+      accel,                               // m/s^2 they pull away at
+      // Big vehicles keep further back: they need it, and they know it.
+      timeGap: (1.05 + rnd() * 0.85) * (role === 'lorry' || role === 'bus' ? 1.35 : 1),
 
       // --- route ---
       route: [makeSlot(), makeSlot(), makeSlot(), makeSlot()],
@@ -411,6 +494,41 @@ export function createTraffic(world, ground, opts = {}) {
       waiting: 0,
       fused: 0,
     });
+  }
+
+  // Bus stops, indexed by the road they are on (see busStops()). A stop is
+  // called at by a bus travelling either way; each way has its own shelter,
+  // STAGGER metres further along that way.
+  const stops = opts.stops ?? busStops(world, ground);
+  const stopsOn = new Map();
+  for (let i = 0; i < stops.length; i++) {
+    const st = stops[i];
+    let L = stopsOn.get(st.edge);
+    if (!L) stopsOn.set(st.edge, (L = []));
+    L.push(i);
+  }
+  /** Travel distance into `slot` at which stop `i` is called at, going that way. */
+  const stopAt = (slot, i) => (slot.dir > 0 ? stops[i].s + STAGGER : slot.len - (stops[i].s - STAGGER));
+  const _stop = { d: -1, id: -1 };
+  /** The next stop ahead of a bus within `reach` m on its route, or d = -1. */
+  function nextStop(car, reach) {
+    _stop.d = -1; _stop.id = -1;
+    let base = -car.s;
+    for (let r = 0; r < 2; r++) {
+      const slot = car.route[r];
+      const L = slot.e ? stopsOn.get(slot.e.i) : null;
+      if (L) {
+        for (let k = 0; k < L.length; k++) {
+          const d = base + stopAt(slot, L[k]);
+          const id = L[k] * 2 + (slot.dir > 0 ? 0 : 1);
+          if (d > -2 && d < reach && id !== car.stopDone && (_stop.d < 0 || d < _stop.d)) { _stop.d = d; _stop.id = id; }
+        }
+      }
+      if (_stop.d >= 0) return _stop;
+      base += slot.len;
+      if (base > reach) break;
+    }
+    return _stop;
   }
 
   let active = 0;
@@ -435,7 +553,7 @@ export function createTraffic(world, ground, opts = {}) {
     car.speedCap = undefined;
     car.wrecked = false;
     setSlot(car.route[0], e, dir);
-    for (let i = 1; i < 4; i++) fillSlot(car.route[i], car.route[i - 1]);
+    for (let i = 1; i < 4; i++) fillSlot(car.route[i], car.route[i - 1], car);
     car.s = clamp(s, 0, car.route[0].len);
     car.edge = e;
     laneAt(car.route[0], car.s, _pt);
@@ -458,6 +576,9 @@ export function createTraffic(world, ground, opts = {}) {
     car.stuck = 0;
     car.waiting = 0;
     car.fused = 0;
+    car.stopFor = 0;
+    car.stopDone = -1;
+    car.pull = 0;
     car.active = true;
     car.respawnId++;
     active++;
@@ -556,27 +677,47 @@ export function createTraffic(world, ground, opts = {}) {
     }
     if (vCap < 2) return false;
 
-    for (let i = 0; i < cars.length; i++) {
-      if (!cars[i].active) { place(cars[i], e, dir, travel, vCap); return true; }
+    // A free slot whose vehicle drives this kind of road, looked for from a
+    // cursor that moves on, so the pool's vehicles take their turns rather
+    // than the lowest-numbered slots doing all the driving.
+    const n = cars.length;
+    for (let k = 0; k < n; k++) {
+      const c = cars[(spawnCursor + k) % n];
+      if (c.active || (c.roads && !c.roads.has(e.kind))) continue;
+      spawnCursor = (spawnCursor + k + 1) % n;
+      place(c, e, dir, travel, Math.min(vCap, c.top));
+      return true;
     }
     return false;
   }
+  let spawnCursor = 0;
 
   // =========================================================================
   // Driving
   // =========================================================================
 
   /**
-   * The interaction term of an intelligent-driver model. Returns the (negative)
-   * acceleration this obstacle demands; the caller keeps the harshest one.
+   * The intelligent-driver model's acceleration with this obstacle ahead: the
+   * free-road term (freeAcc, set per car before any obstacle is looked at)
+   * plus the interaction term. The caller keeps the harshest one.
+   *
+   * It used to return the interaction term alone, and the caller kept the
+   * lower of that and the free-road term. For anything far away the
+   * interaction term is a hair below zero, so a car at a standstill with a
+   * stop line 100 m ahead was handed -0.00006 m/s^2 instead of its full
+   * pull-away, every frame, for ever: struck by the player and stopped, it
+   * never moved again (a car at a give-way only bids for the junction inside
+   * 25 m). Added, as the model has it, a distant obstacle costs nothing and a
+   * near one everything.
    */
+  let freeAcc = 0;
   function follow(car, gap, vLead, s0, T) {
     const v = car.speed;
     const dv = v - vLead;
     const star = s0 + Math.max(0, v * T + (v * dv) / (2 * Math.sqrt(car.accel * B_COMF)));
     const g = gap > 0.4 ? gap : 0.4;
     const q = star / g;
-    return -car.accel * q * q;
+    return freeAcc - car.accel * q * q;
   }
 
   /**
@@ -607,14 +748,15 @@ export function createTraffic(world, ground, opts = {}) {
       const k = dot <= 0.05 ? 0.5 : Math.min(0.5, crs / (dot * step));
       ptx = _pt.tx; ptz = _pt.tz;
 
-      const vCorner = Math.sqrt(A_LAT / Math.max(k, 1e-4));
+      const vCorner = Math.sqrt(car.alat / Math.max(k, 1e-4));
       const vLimit = slot.speed * car.eager;
       const vHere = vCorner < vLimit ? vCorner : vLimit;
       // Where we must already be at vHere by the time we have travelled d.
       const vAllow = Math.sqrt(vHere * vHere + 2 * B_COMF * d);
       if (vAllow < v0) v0 = vAllow;
     }
-    const capped = Math.max(v0, 2.5);
+    // A lorry is governed, a tractor flat out at 38 km/h, whatever the sign says.
+    const capped = Math.min(Math.max(v0, 2.5), car.top);
     return cap === undefined ? capped : Math.min(capped, cap);
   }
 
@@ -825,6 +967,7 @@ export function createTraffic(world, ground, opts = {}) {
         const vr = car.speed / v0;
         a = car.accel * (1 - vr * vr * vr * vr);
       }
+      freeAcc = a;
       a = obstacles(car, a, playerX, playerZ, playerSpeed, phx, phz);
 
       const node = nodes[slot.endNode];
@@ -863,14 +1006,42 @@ export function createTraffic(world, ground, opts = {}) {
       car.waiting = car.speed < 0.5 ? car.waiting + dt : 0;
       if (car.waiting > 6 && closestGap > 14 && !held && a < 0.5) a = 0.5;
 
+      // Buses call at their stops: indicate, pull in to the kerb, stand for a
+      // few seconds, indicate out and go. Everything behind waits, as it does.
+      let pullWant = 0;
+      if (car.role === 'bus' && stops.length) {
+        if (car.stopFor > 0) {
+          car.stopFor -= dt;
+          a = -B_MAX;
+          pullWant = 1;
+          car.indicator = car.stopFor < 1.8 ? -1 : 0;
+          car.indHold = 0.2;
+          if (car.stopFor <= 0) { car.stopFor = 0; car.indHold = 1.4; }
+        } else {
+          const st = nextStop(car, clamp(car.speed * car.speed / (2 * B_COMF) + 30, 40, 140));
+          if (st.d >= 0) {
+            const q = follow(car, st.d, 0, 0.3, 0.4);
+            if (q < a) a = q;
+            if (st.d < 60) { pullWant = 1; car.indicator = 1; car.indHold = 0.2; }
+            if (st.d < 1.5 && car.speed < 0.7) {
+              car.stopFor = 5 + rnd() * 4;
+              car.stopDone = st.id;
+            }
+          }
+        }
+      }
+      car.pull += clamp(pullWant - car.pull, -0.45 * dt, 0.45 * dt);
+
       if (a > car.accel) a = car.accel;
       if (a < -B_MAX) a = -B_MAX;
       car.braking = a < -1.3;
       car.speed += a * dt;
       if (!(car.speed > 0)) car.speed = 0;   // also catches NaN, which `< 0` does not
 
-      // Steering: pure pursuit onto a point ahead on the lane.
+      // Steering: pure pursuit onto a point ahead on the lane — pulled toward
+      // the kerb by up to 1.3 m while a bus is calling at a stop.
       routeAt(car, clamp(4.5 + car.speed * 0.8, 6.5, 26), _tgt);
+      if (car.pull > 0) { _tgt.x -= _tgt.tz * car.pull * 1.3; _tgt.z += _tgt.tx * car.pull * 1.3; }
       const dx = _tgt.x - car.x, dz = _tgt.z - car.z;
       const L2 = dx * dx + dz * dz;
       const rx = -car.fz, rz = car.fx;
@@ -934,7 +1105,7 @@ export function createTraffic(world, ground, opts = {}) {
         car.route[1] = car.route[2];
         car.route[2] = car.route[3];
         car.route[3] = crossed;
-        fillSlot(car.route[3], car.route[2]);
+        fillSlot(car.route[3], car.route[2], car);
       }
 
       if (car.holdDist > 0) {
@@ -1016,6 +1187,20 @@ export function createTraffic(world, ground, opts = {}) {
     // the session so the renderer can build one mesh per slot and only toggle
     // visibility. Skip entries whose `active` is false.
     cars,
+    /** Where the buses stop: busStops(world, ground), as this pool uses them. */
+    stops,
+    /**
+     * Put pool slot `i` on edge `ei`, travelling `dir` (+1 with the edge's
+     * points, -1 against), `travel` metres in, at `speed`. For harnesses and
+     * demos; the pool spawns on its own otherwise.
+     */
+    spawnAt(i, ei, dir, travel, speed) {
+      const car = cars[i], e = edges[ei];
+      if (!car || !e) return false;
+      if (car.active) despawn(car);
+      place(car, e, dir, clamp(travel, 0, e.length), speed ?? e.speed);
+      return true;
+    },
     update,
     dispose,
     get count() { return active; },

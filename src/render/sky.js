@@ -1368,3 +1368,107 @@ export function createSky(scene, renderer, opts = {}) {
     get quality() { return tier; },
   };
 }
+
+// ---------------------------------------------------------------------------
+// Headlamps
+//
+// The car's lamps have always been emissive paint: they glow, and light
+// nothing. At night that left the player driving into a black road under the
+// moon, which is most of why night was unplayable rather than atmospheric.
+// This is the light itself — one spot, wide enough for both lamps, aimed
+// down the road from the front of the car — so the tarmac, the verges, the
+// lane markings and the barn in the bend all light up as the car comes round.
+//
+// It lives here because the sky owns every other light in the world and sets
+// how bright night is. main.js hangs it off the player's car:
+//
+//   const lamps = mSky && mSky.createHeadlamps ? mSky.createHeadlamps(carRoot) : null;
+//   // each frame, next to carModel.setHeadlights(...):
+//   if (lamps) lamps.update(dt, headlights || night > 0.35);
+//
+// One light, no shadow: a spot light costs every lit fragment one more term,
+// which is cheap; a shadowed one costs another scene render, which is not.
+// It is never removed or hidden once created, only dimmed to zero, because
+// adding or removing a light recompiles every lit material in the scene —
+// a stall the first time the player flicks the lights on.
+// ---------------------------------------------------------------------------
+/**
+ * The beam pattern, projected by the spot light like a slide.
+ *
+ * A bare spot light is brightest on its axis and falls off to the edge, which
+ * is the wrong way round for a car: light on a flat road falls off as the
+ * cube of distance at grazing incidence, so an evenly lit road needs almost
+ * all the intensity in a thin band just under the horizontal and very little
+ * in the foreground. That is what real low beams do, and it is this: a sharp
+ * cutoff at the horizon, intensity growing with the distance at which each
+ * ray meets the road, and a wide dimmer spill to the sides for the verges.
+ */
+function beamTexture(lampHeight, halfAngle) {
+  const N = 128;
+  const data = new Uint8Array(N * N * 4);
+  const t = Math.tan(halfAngle);
+  for (let y = 0; y < N; y++) {
+    // Texture v runs up; the centre row is the lamp's axis.
+    const below = (0.5 - (y + 0.5) / N) * 2 * t;          // tan of the angle below the axis
+    let m;
+    if (below <= 0) {
+      m = 0.05 + 0.95 * Math.exp(-(below / 0.012) * (below / 0.012));   // cutoff
+    } else {
+      const d = lampHeight / below;                       // where this ray lands
+      m = Math.min(1, Math.pow(d / 24, 2.4));
+    }
+    for (let x = 0; x < N; x++) {
+      const across = ((x + 0.5) / N - 0.5) * 2;
+      const lat = 0.30 + 0.70 * Math.exp(-(across / 0.45) * (across / 0.45));
+      const v = Math.max(0, Math.min(1, m * lat));
+      const o = (y * N + x) * 4;
+      data[o] = data[o + 1] = data[o + 2] = v * 255;
+      data[o + 3] = 255;
+    }
+  }
+  const tex = new THREE.DataTexture(data, N, N, THREE.RGBAFormat, THREE.UnsignedByteType);
+  tex.magFilter = THREE.LinearFilter;
+  tex.minFilter = THREE.LinearFilter;
+  tex.colorSpace = THREE.NoColorSpace;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+export function createHeadlamps(parent, opts = {}) {
+  const front = opts.front ?? 2.05;           // m ahead of the car's origin
+  const height = opts.height ?? 0.72;         // m above the ground
+  // Tuned by reading back road pixels at 23:00 under a clear sky: the lane
+  // 10-35 m ahead lifts from about 12/255 to 60-160/255 once night exposure
+  // has opened up — enough to drive by, never daylight. A car or a wall
+  // facing the lamps inside 15 m blooms white, as it does in life.
+  const peak = opts.intensity ?? 36000;
+  const half = 0.62;
+  const group = new THREE.Group();
+  group.name = 'headlamps';
+  // Forward is -Z. Physical falloff: the pattern does the shaping.
+  const lamp = new THREE.SpotLight(0xfff0d8, 0, 160, half, 0.25, 2);
+  lamp.position.set(0, height, -front);
+  lamp.target.position.set(0, height, -front - 30);   // axis level; the map dips the beam
+  lamp.map = beamTexture(height, half);
+  lamp.castShadow = false;
+  group.add(lamp);
+  group.add(lamp.target);
+  if (parent) parent.add(group);
+
+  let level = 0;
+  return {
+    group, lamp,
+    /** `on` is whether the lamps are switched on; dt smooths the switch. */
+    update(dt, on) {
+      // Filament lamps take a moment to come up and a little longer to die.
+      const tau = on ? 0.06 : 0.12;
+      level += ((on ? 1 : 0) - level) * (1 - Math.exp(-Math.max(0, dt) / tau));
+      lamp.intensity = peak * level;
+    },
+    dispose() {
+      group.removeFromParent();
+      if (lamp.map) lamp.map.dispose();
+      lamp.dispose();
+    },
+  };
+}

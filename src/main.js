@@ -2024,9 +2024,10 @@ async function boot() {
   // A material's shader program is compiled the first time something using it
   // is drawn, and that compile stalls the frame. A cold 60 s drive across the
   // map compiled 20 programs mid-drive, the worst frame 172 ms. So everything
-  // that exists at boot is compiled here, on the loading bar, instead — the
-  // same drive now compiles 8 (goal markers built on demand, a few car parts)
-  // and its worst frame is 37 ms:
+  // that exists at boot is compiled here, on the loading bar, instead. A
+  // 13.6 km tour of every corner of the map at 216 km/h now compiles none
+  // (round3/base compiled 2-4, at 25-144 ms a frame; the shadow type at the
+  // top of boot() is half of why):
   //  * the traffic pool's cars are built now rather than on the first frame
   //    (they are hidden until they spawn, but a hidden car's materials still
   //    compile — that is the point);

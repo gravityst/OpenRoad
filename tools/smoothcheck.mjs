@@ -481,7 +481,16 @@ function effectsOn(dpr, quality, log = []) {
   r.setRenderTarget = (t) => { bound = t; };
   r.getRenderTarget = () => bound;
   r.compileAsync = () => { seen.push(bound); return Promise.resolve(); };
-  const fx = createEffects(r, new THREE.Scene(), new THREE.PerspectiveCamera(), { quality: 'medium', width: 1440, height: 900 });
+  // A hidden mesh with a texture: its texture must go to the GPU now too, not
+  // on the frame it first appears.
+  const uploaded = new Set();
+  r.initTexture = (t) => uploaded.add(t);
+  const scene = new THREE.Scene();
+  const tex = new THREE.Texture();
+  const hidden = new THREE.Mesh(new THREE.PlaneGeometry(), new THREE.MeshStandardMaterial({ map: tex, normalMap: new THREE.Texture() }));
+  hidden.visible = false;
+  scene.add(hidden);
+  const fx = createEffects(r, scene, new THREE.PerspectiveCamera(), { quality: 'medium', width: 1440, height: 900 });
   fx.compile();
   fx.setQuality('off');
   fx.compile();
@@ -489,10 +498,11 @@ function effectsOn(dpr, quality, log = []) {
   const warm = src.slice(src.indexOf("'warming up the paint shop'"));
   const ok = seen.length === 2 && seen[0] && seen[0].isWebGLRenderTarget && seen[1] === null && bound === null &&
     /renderer\.shadowMap\.type = THREE\.PCFShadowMap;/.test(src) && !/PCFSoftShadowMap;/.test(src) &&
-    /effects\.compile\(scene\)/.test(warm.slice(0, 1500));
+    /effects\.compile\(scene\)/.test(warm.slice(0, 1500)) && uploaded.has(tex) && uploaded.size === 2;
   check('the loading screen compiles the shaders the frame will actually use', ok,
     `post chain: compiled into ${seen[0] && seen[0].isWebGLRenderTarget ? 'its own buffer' : 'the canvas'}; ` +
-    `'off': into ${seen[1] === null ? 'the canvas' : 'a buffer'}; PCF shadows set up front; warm-up goes through effects`);
+    `'off': into ${seen[1] === null ? 'the canvas' : 'a buffer'}; PCF shadows set up front; warm-up goes through effects; ` +
+    `${uploaded.size} of a hidden mesh's 2 textures uploaded`);
 }
 
 // ---------------------------------------------------------------------------

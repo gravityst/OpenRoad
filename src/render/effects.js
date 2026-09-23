@@ -723,13 +723,41 @@ export function createEffects(renderer, scene, camera, opts = {}) {
   function compile(root = scene) {
     const prev = renderer.getRenderTarget();
     renderer.setRenderTarget(composer ? composer.readBuffer : null);
+    let done;
     try {
-      if (renderer.compileAsync) return renderer.compileAsync(root, camera, scene);
-      renderer.compile(root, camera, scene);
-      return Promise.resolve(root);
+      if (renderer.compileAsync) done = renderer.compileAsync(root, camera, scene);
+      else { renderer.compile(root, camera, scene); done = Promise.resolve(root); }
     } finally {
       renderer.setRenderTarget(prev);
     }
+    uploadTextures(root);
+    return done;
+  }
+
+  // A texture is uploaded the first time something using it is drawn — on a
+  // hidden object, that is mid-drive, the same as a shader. Straight after
+  // loading, 19 of the scene's 67 textures (car lamps, grilles, tyres, the
+  // wheel blur, the light pools, nine 256x192 labels) had never been sent to
+  // the GPU. Each is small, but they arrive in clumps: a 29-45 ms frame 87 s
+  // into a drive where two did. Uploaded here, they land on the loading bar.
+  const TEXTURE_SLOTS = ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'emissiveMap', 'aoMap',
+    'alphaMap', 'bumpMap', 'lightMap', 'specularMap', 'displacementMap', 'clearcoatNormalMap'];
+  function uploadTextures(root) {
+    if (!renderer.initTexture) return;
+    const seen = new Set();
+    const up = (t) => {
+      if (!t || !t.isTexture || seen.has(t) || t.isRenderTargetTexture) return;
+      seen.add(t);
+      try { renderer.initTexture(t); } catch { /* then it uploads when first drawn, as before */ }
+    };
+    root.traverse((o) => {
+      const mats = !o.material ? null : Array.isArray(o.material) ? o.material : [o.material];
+      if (!mats) return;
+      for (const m of mats) {
+        for (const k of TEXTURE_SLOTS) up(m[k]);
+        if (m.uniforms) for (const u in m.uniforms) up(m.uniforms[u].value);
+      }
+    });
   }
 
   /**

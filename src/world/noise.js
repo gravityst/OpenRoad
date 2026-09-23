@@ -73,6 +73,30 @@ export function ridged(x, z, seed, octaves = 4) {
   return (sum / norm) * 2 - 1;
 }
 
+function hash3(ix, iy, iz, seed) {
+  let h = (ix | 0) * 374761393 + (iy | 0) * 668265263 + (iz | 0) * 2147483647 + (seed | 0) * 1274126177;
+  h = (h ^ (h >>> 13)) * 1274126177;
+  h = h ^ (h >>> 16);
+  return (h >>> 0) / 4294967296;
+}
+
+/**
+ * 3D value noise in [-1,1], same quintic fade as the 2D one. Only generation
+ * code uses it — boulder shapes are a function of DIRECTION, so a 2D field
+ * would put a seam round every rock's equator.
+ */
+export function valueNoise3(x, y, z, seed) {
+  const x0 = Math.floor(x), y0 = Math.floor(y), z0 = Math.floor(z);
+  const u = quintic(x - x0), v = quintic(y - y0), w = quintic(z - z0);
+  let acc = 0;
+  for (let k = 0; k < 8; k++) {
+    const dx = k & 1, dy = (k >> 1) & 1, dz = (k >> 2) & 1;
+    const wt = (dx ? u : 1 - u) * (dy ? v : 1 - v) * (dz ? w : 1 - w);
+    acc += wt * hash3(x0 + dx, y0 + dy, z0 + dz, seed);
+  }
+  return acc * 2 - 1;
+}
+
 /** Small, fast, seedable PRNG for one-shot generation decisions. */
 export function mulberry(seed) {
   let a = seed >>> 0;

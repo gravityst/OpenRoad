@@ -181,9 +181,12 @@ export function makeTerrain(seed) {
     // and over a third of the world went sandy. This recomputes the same
     // valley term height() uses, so sand follows the river wherever the river
     // happens to be.
-    const rv2 = valueNoise(x / 2600, z / 2600, s + 404);
-    const inValley = Math.exp(-Math.pow((z * 0.6 + x * 0.32) / 520 - rv2 * 1.6 - 1.35, 2));
-    if (inValley > 0.62 && n < 0.34) return 'sand';
+    //
+    // And then that was still a kilometre-wide strip of beach, a fifth of the
+    // map, because "in the valley" is most of a Gaussian that wide. Sand is now
+    // the dry wash itself — a few dozen metres of it meandering down the
+    // bottom — and the rest of the valley floor is the lushest grass on the map.
+    if (riverBed(x, z, s) > 0.5) return 'sand';
     if (n > 0.40 && h > 16) return 'dirt';
     return 'grass';
   }
@@ -1070,10 +1073,69 @@ function buildLots(world, rnd, ground) {
   for (const lot of world.lots) lot.y = world.terrain.height(lot.x, lot.z);
 }
 
+// Species indices, matching SPECIES in src/render/foliage.js. `variant` on a
+// 'tree' prop is one of these; on a 'bush' prop, 0 is a broadleaf shrub and 1
+// a juniper-type evergreen.
+export const TREE = { oak: 0, spruce: 1, birch: 2, pine: 3, beech: 4, fir: 5 };
+export const BUSH = { shrub: 0, juniper: 1 };
+
+/**
+ * How far into the river valley (x, z) is: 1 on the valley floor, falling to 0
+ * about half a kilometre out on either side. The same Gaussian makeTerrain
+ * cuts the valley with, so it is where the valley actually is. Renderers use it
+ * for moisture: the valley floor is the lushest ground on the map.
+ */
+export function valleyWeight(x, z, seed) {
+  const s = seed | 0;
+  const rv = valueNoise(x / 2600, z / 2600, s + 404);
+  const arg = (z * 0.6 + x * 0.32) / 520 - rv * 1.6 - 1.35;
+  return Math.exp(-arg * arg);
+}
+
+/**
+ * The dry river bed: 0 outside it, rising to 1 along a meandering thalweg in
+ * the bottom of the valley makeTerrain cuts. The valley itself is a kilometre
+ * wide and was all sand, which read as a desert strip across a green country;
+ * what a valley floor actually has is lush grass and a stony wash a few dozen
+ * metres across winding down the middle of it.
+ */
+export function riverBed(x, z, seed) {
+  const s = seed | 0;
+  const rv = valueNoise(x / 2600, z / 2600, s + 404);
+  const arg = (z * 0.6 + x * 0.32) / 520 - rv * 1.6 - 1.35
+            + fbm(x / 520, z / 520, s + 409, 3) * 0.055;
+  // 0.0013 of `arg` per metre across the valley, so 0.03 is ~23 m either side.
+  return smoothstep(0.034, 0.012, Math.abs(arg));
+}
+
+/**
+ * Everything that grows or lies on the ground, and the street lighting.
+ *
+ * The countryside is built in layers, each a separate pass so each can be
+ * tuned without disturbing the rest:
+ *
+ *   woodland   a domain-warped noise mask, ~22% of the map, planted on a
+ *              jittered 7.2 m grid. Conifer stands on the high ground and in
+ *              patches elsewhere, broadleaf in the lowlands, birch along the
+ *              margins. The edge is ragged and shrubby, because a real wood
+ *              edge is where the light is.
+ *   hedgerows  along the lanes, where a noise says a farmer kept one: a shrub
+ *              every few metres and a standard tree every dozen or so.
+ *   open land  lone field trees, copses of four to nine, scattered bushes.
+ *   the valley riverside birch and scrub along the dry bed, stones in it.
+ *   rock       outcrops where the ground is steep or crests, as clusters of
+ *              boulders with stones around them, in one rock type per area.
+ *
+ * Nothing is planted on a carriageway, within reach of a circuit's run-off, in
+ * a building footprint or on a garage forecourt.
+ */
 function buildProps(world, rnd, ground) {
   const terrain = world.terrain;
+  const seed = world.seed | 0;
+  const half = world.half;
+  const props = world.props;
 
-  // Street lighting along city roads.
+  // Street lighting along the paved roads.
   for (const e of world.edges) {
     if (LOOSE[e.kind]) continue;
     const spacing = e.kind === 'highway' ? 46 : e.kind === 'rural' ? 90 : 32;
@@ -1084,7 +1146,7 @@ function buildProps(world, rnd, ground) {
       if (!p) continue;
       const side = k % 2 === 0 ? 1 : -1;
       const off = e.width / 2 + 1.6;
-      world.props.push({
+      props.push({
         type: e.kind === 'rural' ? 'polelight' : 'streetlight',
         x: p.x + p.nx * off * side, z: p.z + p.nz * off * side, y: p.y,
         rot: Math.atan2(-p.nx * side, -p.nz * side),
@@ -1093,34 +1155,267 @@ function buildProps(world, rnd, ground) {
     }
   }
 
-  // Trees: clumped by a density mask, hugging the lanes as hedgerows, never on
-  // the carriageway.
-  for (let i = 0; i < 46000; i++) {
-    const x = (rnd() * 2 - 1) * world.half, z = (rnd() * 2 - 1) * world.half;
-    const road = ground.roadAt(x, z);
-    if (road.onRoad || road.dist < 9) continue;
-    const g = ground.sample(x, z);
-    if (g.surface === 'rock' || g.surface === 'sand') continue;
-    if (terrain.slope(x, z) > 0.55) continue;
-    const dens = fbm(x / 260, z / 260, world.seed + 55, 3);
-    const near = smoothstep(120, 26, road.dist);
-    if (rnd() > clamp(dens * 0.55 + 0.12 + near * 0.35, 0, 1)) continue;
-    world.props.push({
-      type: 'tree', x, z, y: g.y,
-      rot: rnd() * 6.283, scale: 0.85 + rnd() * 1.5, variant: (rnd() * 3) | 0,
-    });
+  // ---- Exclusions ---------------------------------------------------------
+  // Buildings, bucketed so the test is a handful of distance checks.
+  const LC = 64;
+  const lotCells = new Map();
+  const lkey = (i, j) => i * 65536 + j;
+  for (const lot of world.lots) {
+    const r = Math.hypot(lot.w, lot.d) * 0.5 + 6;
+    for (let i = Math.floor((lot.x - r) / LC); i <= Math.floor((lot.x + r) / LC); i++) {
+      for (let j = Math.floor((lot.z - r) / LC); j <= Math.floor((lot.z + r) / LC); j++) {
+        const k = lkey(i, j);
+        let L = lotCells.get(k);
+        if (!L) lotCells.set(k, (L = []));
+        L.push([lot.x, lot.z, r]);
+      }
+    }
+  }
+  // Garage forecourts are somewhere you drive onto; keep 42 m of them clear.
+  for (const g of world.garages) {
+    for (let i = -1; i <= 1; i++) {
+      for (let j = -1; j <= 1; j++) {
+        const kk = lkey(Math.floor(g.x / LC) + i, Math.floor(g.z / LC) + j);
+        let L = lotCells.get(kk);
+        if (!L) lotCells.set(kk, (L = []));
+        L.push([g.x, g.z, 42]);
+      }
+    }
+  }
+  const inLot = (x, z) => {
+    const L = lotCells.get(lkey(Math.floor(x / LC), Math.floor(z / LC)));
+    if (!L) return false;
+    for (let i = 0; i < L.length; i++) {
+      const q = L[i];
+      const dx = x - q[0], dz = z - q[1];
+      if (dx * dx + dz * dz < q[2] * q[2]) return true;
+    }
+    return false;
+  };
+
+  // Clearance from the edge of the nearest road, in metres. Circuits keep a
+  // run-off area clear; a tree three metres off a racing line is a wall.
+  const road = { onRoad: false, dist: Infinity, edge: null, s: 0, tx: 0, tz: 0, speedLimit: 0, width: 0, kind: '' };
+  const clearance = (x, z) => {
+    ground.roadAt(x, z, road);
+    if (!road.edge) return Infinity;
+    const edge = road.dist - road.width * 0.5;
+    const k = road.kind;
+    return k === 'circuit' || k === 'rallyx' ? edge - 12 : edge;
+  };
+
+  const g = { y: 0, nx: 0, ny: 1, nz: 0, surface: 'grass', grip: 0, roughness: 0, rolling: 0, dust: 0 };
+  const inBounds = (x, z) => Math.abs(x) < half - 6 && Math.abs(z) < half - 6;
+
+  // ---- Masks --------------------------------------------------------------
+  // Woodland: a warped fbm, thresholded. The warp is what makes the woods
+  // irregular — plain fbm thresholds into blobs that all look like each other.
+  const forest = (x, z) => {
+    const wx = x + fbm(x / 1300, z / 1300, seed + 61, 2) * 420;
+    const wz = z + fbm(x / 1300, z / 1300, seed + 62, 2) * 420;
+    return fbm(wx / 640, wz / 640, seed + 55, 4);
+  };
+  // Where conifers rather than broadleaves hold the ground: uphill, and in
+  // plantation-sized patches anywhere. The map's median height is about -21 m
+  // and its 95th percentile +18 m, so "uphill" is measured on that scale.
+  const coniferShare = (x, z, h) =>
+    clamp(smoothstep(-34, 14, h) * 0.72 + fbm(x / 900, z / 900, seed + 91, 3) * 1.1, 0, 1);
+
+  function pickTree(x, z, h, edge, r) {
+    const c = coniferShare(x, z, h);
+    if (r() < c) {
+      const q = r();
+      // Pine takes the dry crests and the forest margins.
+      if (q < 0.14 + edge * 0.25) return TREE.pine;
+      return q < 0.72 ? TREE.spruce : TREE.fir;
+    }
+    const q = r();
+    if (q < 0.09 + edge * 0.22) return TREE.birch;
+    return q < 0.60 ? TREE.beech : TREE.oak;
   }
 
-  // Rocks on the high ground.
-  for (let i = 0; i < 5200; i++) {
-    const x = (rnd() * 2 - 1) * world.half, z = (rnd() * 2 - 1) * world.half;
-    const road = ground.roadAt(x, z);
-    if (road.onRoad || road.dist < 7) continue;
-    if (terrain.slope(x, z) < 0.28 && rnd() < 0.7) continue;
-    world.props.push({
-      type: 'rock', x, z, y: ground.sample(x, z).y,
-      rot: rnd() * 6.283, scale: 0.6 + rnd() * 2.2, variant: (rnd() * 3) | 0,
-    });
+  const plant = (type, variant, x, z, y, scale) => {
+    props.push({ type, x, z, y, rot: rnd() * 6.2832, scale, variant });
+  };
+
+  // ---- Woodland -----------------------------------------------------------
+  const FS = 7.2;
+  const fN = Math.floor((half * 2) / FS);
+  for (let j = 0; j < fN; j++) {
+    for (let i = 0; i < fN; i++) {
+      const x = -half + (i + 0.15 + rnd() * 0.7) * FS;
+      const z = -half + (j + 0.15 + rnd() * 0.7) * FS;
+      const F = forest(x, z);
+      if (F < 0.08) continue;
+      // Density ramps up over the edge band; `edge` is 1 at the margin.
+      const edge = 1 - smoothstep(0.10, 0.26, F);
+      const roll = rnd();
+      if (roll > smoothstep(0.08, 0.20, F) * 0.92) {
+        // An empty slot at the margin is where the scrub goes.
+        if (edge > 0.3 && roll < 0.97 && inBounds(x, z)) {
+          if (clearance(x, z) < 2.4 || inLot(x, z)) continue;
+          ground.sample(x, z, g);
+          if (g.surface === 'sand' || g.surface === 'rock' || g.ny < 0.8) continue;
+          plant('bush', rnd() < 0.2 ? BUSH.juniper : BUSH.shrub, x, z, g.y, 0.7 + rnd() * 0.7);
+        }
+        continue;
+      }
+      if (!inBounds(x, z)) continue;
+      if (clearance(x, z) < 4.5 || inLot(x, z)) continue;
+      ground.sample(x, z, g);
+      if (g.surface === 'sand' || g.surface === 'rock' || g.ny < 0.83) continue;
+      const v = pickTree(x, z, g.y, edge, rnd);
+      // Forest trees are drawn up tall by their neighbours; margin trees are
+      // younger and smaller.
+      const sc = (0.78 + rnd() * 0.42) * lerp(1.0, 0.72, edge * rnd());
+      plant('tree', v, x, z, g.y, sc);
+      // Understorey, thin inside the wood and thicker toward the light.
+      if (rnd() < 0.05 + edge * 0.25) {
+        const bx = x + (rnd() - 0.5) * FS, bz = z + (rnd() - 0.5) * FS;
+        if (clearance(bx, bz) > 2.4 && !inLot(bx, bz)) {
+          plant('bush', rnd() < 0.3 ? BUSH.juniper : BUSH.shrub, bx, bz, ground.heightAt(bx, bz), 0.6 + rnd() * 0.6);
+        }
+      }
+    }
+  }
+
+  // ---- Hedgerows ----------------------------------------------------------
+  for (const e of world.edges) {
+    if (e.kind === 'circuit' || e.kind === 'rallyx') continue;
+    const paved = e.kind === 'rural' || e.kind === 'street' || e.kind === 'avenue';
+    for (const side of [-1, 1]) {
+      let s = rnd() * 4;
+      let nextTree = 6 + rnd() * 14;
+      while (s < e.length) {
+        const p = pointOnEdge(e, s);
+        s += 2.4 + rnd() * 1.4;
+        if (!p) continue;
+        // Kept or grubbed out, a few hundred metres at a time, independently
+        // on each side of the lane.
+        const keep = fbm(p.x / 260 + side * 3.1, p.z / 260, seed + 131, 2);
+        if (keep < (paved ? 0.02 : 0.18)) continue;
+        const off = e.width * 0.5 + (paved ? 4.2 : 3.4) + rnd() * 1.6;
+        const x = p.x + p.nx * off * side, z = p.z + p.nz * off * side;
+        if (!inBounds(x, z) || inLot(x, z) || clearance(x, z) < 2.6) continue;
+        if (forest(x, z) > 0.12) continue;          // the wood is already there
+        ground.sample(x, z, g);
+        if (g.surface === 'sand' || g.surface === 'rock' || g.ny < 0.8) continue;
+        nextTree -= 3;
+        if (nextTree <= 0 && clearance(x, z) > 4.2) {
+          nextTree = 9 + rnd() * 16;
+          const q = rnd();
+          plant('tree', q < 0.45 ? TREE.oak : q < 0.75 ? TREE.beech : TREE.birch, x, z, g.y, 0.7 + rnd() * 0.45);
+        } else {
+          plant('bush', BUSH.shrub, x, z, g.y, 0.8 + rnd() * 0.6);
+        }
+      }
+    }
+  }
+
+  // ---- Open country -------------------------------------------------------
+  const OS = 44;
+  const oN = Math.floor((half * 2) / OS);
+  for (let j = 0; j < oN; j++) {
+    for (let i = 0; i < oN; i++) {
+      const cx = -half + (i + rnd()) * OS, cz = -half + (j + rnd()) * OS;
+      const roll = rnd();
+      if (!inBounds(cx, cz) || forest(cx, cz) > 0.06) continue;
+      if (roll < 0.075) {
+        // A lone field tree, usually an oak, grown wide in the open.
+        if (clearance(cx, cz) < 6 || inLot(cx, cz)) continue;
+        ground.sample(cx, cz, g);
+        if (g.surface !== 'grass' || g.ny < 0.85) continue;
+        plant('tree', rnd() < 0.7 ? TREE.oak : TREE.beech, cx, cz, g.y, 0.95 + rnd() * 0.4);
+        if (rnd() < 0.5) {
+          const a = rnd() * 6.28, d = 4 + rnd() * 4;
+          plant('bush', BUSH.shrub, cx + Math.cos(a) * d, cz + Math.sin(a) * d, ground.heightAt(cx + Math.cos(a) * d, cz + Math.sin(a) * d), 0.8 + rnd() * 0.5);
+        }
+      } else if (roll < 0.105) {
+        // A copse.
+        const n = 4 + Math.floor(rnd() * 6);
+        const conifer = rnd() < 0.3;
+        for (let k = 0; k < n; k++) {
+          const a = rnd() * 6.28, d = Math.sqrt(rnd()) * 13;
+          const x = cx + Math.cos(a) * d, z = cz + Math.sin(a) * d;
+          if (clearance(x, z) < 4.5 || inLot(x, z)) continue;
+          ground.sample(x, z, g);
+          if (g.surface === 'sand' || g.surface === 'rock' || g.ny < 0.83) continue;
+          const v = conifer ? (rnd() < 0.6 ? TREE.spruce : TREE.pine) : (rnd() < 0.4 ? TREE.birch : rnd() < 0.5 ? TREE.oak : TREE.beech);
+          plant('tree', v, x, z, g.y, 0.7 + rnd() * 0.45);
+          if (rnd() < 0.6) plant('bush', BUSH.shrub, x + (rnd() - 0.5) * 6, z + (rnd() - 0.5) * 6, g.y, 0.7 + rnd() * 0.5);
+        }
+      } else if (roll < 0.36) {
+        // Scrub in the grass.
+        if (clearance(cx, cz) < 2.6 || inLot(cx, cz)) continue;
+        ground.sample(cx, cz, g);
+        if (g.surface === 'sand' || g.surface === 'rock' || g.ny < 0.8) continue;
+        const dry = g.y > 20 && rnd() < 0.5;
+        plant('bush', dry ? BUSH.juniper : BUSH.shrub, cx, cz, g.y, 0.6 + rnd() * 0.7);
+      }
+    }
+  }
+
+  // ---- The valley ---------------------------------------------------------
+  // Birch and scrub on the banks of the dry bed, stones in it.
+  const VS = 9;
+  const vN = Math.floor((half * 2) / VS);
+  for (let j = 0; j < vN; j++) {
+    const z0 = -half + j * VS;
+    for (let i = 0; i < vN; i++) {
+      const x = -half + (i + rnd()) * VS, z = z0 + rnd() * VS;
+      const bed = riverBed(x, z, seed);
+      const bank = riverBed(x + 26, z - 14, seed) + riverBed(x - 26, z + 14, seed) - bed * 2;
+      const roll = rnd();
+      if (bed > 0.5) {
+        if (roll < 0.35 && inBounds(x, z) && clearance(x, z) > 1.5) {
+          plant('stone', 0, x, z, ground.heightAt(x, z), 0.18 + rnd() * rnd() * 0.7);
+        }
+      } else if (bank > 0.4 && roll < 0.22) {
+        if (!inBounds(x, z) || clearance(x, z) < 4.5 || inLot(x, z)) continue;
+        ground.sample(x, z, g);
+        if (g.surface === 'rock' || g.ny < 0.83) continue;
+        if (rnd() < 0.55) plant('tree', rnd() < 0.8 ? TREE.birch : TREE.oak, x, z, g.y, 0.65 + rnd() * 0.45);
+        else plant('bush', BUSH.shrub, x, z, g.y, 0.8 + rnd() * 0.6);
+      }
+    }
+  }
+
+  // ---- Rock ---------------------------------------------------------------
+  // Outcrops where the ground is steep or on a crest, one rock type per area.
+  const RS = 52;
+  const rN = Math.floor((half * 2) / RS);
+  for (let j = 0; j < rN; j++) {
+    for (let i = 0; i < rN; i++) {
+      const cx = -half + (i + rnd()) * RS, cz = -half + (j + rnd()) * RS;
+      const roll = rnd();
+      if (!inBounds(cx, cz)) continue;
+      const sl = terrain.slope(cx, cz);
+      const h = terrain.height(cx, cz);
+      const crest = h - 0.25 * (terrain.height(cx + 24, cz) + terrain.height(cx - 24, cz) +
+                                terrain.height(cx, cz + 24) + terrain.height(cx, cz - 24));
+      // This country is gentle — the 99th-percentile slope is 18 degrees — so
+      // "steep" starts early, and crests do as much of the work as slope.
+      const want = smoothstep(0.15, 0.32, sl) * 0.6 + smoothstep(0.3, 1.8, crest) * 0.45 + 0.03;
+      if (roll > want) continue;
+      const variant = fbm(cx / 700, cz / 700, seed + 171, 2) > 0.18 ? 1
+        : fbm(cx / 700, cz / 700, seed + 172, 2) > 0.2 ? 2 : 0;
+      const n = 1 + Math.floor(rnd() * 6);
+      for (let k = 0; k < n; k++) {
+        const a = rnd() * 6.28, d = Math.sqrt(rnd()) * (4 + n * 2);
+        const x = cx + Math.cos(a) * d, z = cz + Math.sin(a) * d;
+        if (clearance(x, z) < 3 || inLot(x, z)) continue;
+        // One big one, the rest smaller: outcrops are not a pile of equals.
+        const sc = k === 0 ? 1.4 + rnd() * 1.8 : 0.5 + rnd() * rnd() * 2.0;
+        plant('rock', variant, x, z, ground.heightAt(x, z), sc);
+      }
+      const m = 3 + Math.floor(rnd() * 10);
+      for (let k = 0; k < m; k++) {
+        const a = rnd() * 6.28, d = 3 + rnd() * 14;
+        const x = cx + Math.cos(a) * d, z = cz + Math.sin(a) * d;
+        if (clearance(x, z) < 1.5 || inLot(x, z)) continue;
+        plant('stone', 0, x, z, ground.heightAt(x, z), 0.15 + rnd() * 0.35);
+      }
+    }
   }
 }
 

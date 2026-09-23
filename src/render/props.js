@@ -1,4 +1,4 @@
-// Trees, rocks and street furniture.
+// Trees, bushes, rocks and street furniture.
 //
 // COORDINATE CONVENTION — the same one the physics uses, stated here because
 // getting it backwards has already cost this project real time:
@@ -11,43 +11,37 @@
 // forward direction points away from the carriageway. Local +Z therefore lands
 // over the road, which is where a lamp belongs.
 //
-// WHAT MAKES THIS EXPENSIVE, AND WHAT WAS DONE ABOUT IT
+// WHAT THE COUNTRYSIDE COSTS, AND WHY IT IS AFFORDABLE
 //
-// world.props is mostly trees, and the generator scatters tens of thousands of
-// candidates to get them. Three things had to be true at once: one draw call
-// per species, no per-frame allocation, and no per-frame rebuild of the
-// instance buffers. Nothing below scales with the size of world.props once the
-// grid is built, so turning the tree density up costs load time and memory but
-// not frame time.
+// The world now carries woodland rather than a sprinkling of lollipops: on the
+// order of a hundred thousand trees and bushes (layout.js). None of that is
+// drawn per object. Every species is three InstancedMeshes, one per level of
+// detail, and the levels hand over with a screen-door crossfade:
 //
-//   * Draw calls. Trunk and canopy are merged into a single geometry per
-//     species and coloured with a vertex attribute, so a species is one
-//     InstancedMesh and one material — not one per material slot. Per-instance
-//     hue comes from instanceColor, which the shader multiplies into the same
-//     vColor, so scale and colour variation cost nothing extra.
+//   near   the full tree — every leaf card and branch (foliage.js). Out to
+//          64 m at 'high', which in the thickest forest is a few hundred trees.
+//   mid    a third of the cards, scaled up to cover the same canopy, on the
+//          major limbs only. Out to 175 m.
+//   far    a two-triangle impostor billboard, rasterised from the near mesh at
+//          load. Out to 1 km, which is what puts forest on the far hillsides
+//          instead of bare green.
 //
-//   * Culling. Instances are counting-sorted into a grid at load, so every cell
-//     owns a CONTIGUOUS run of the source matrix array. Showing the world
-//     around the camera is then a couple of hundred run copies into the live
-//     instance buffer, not a per-instance distance test over every prop.
+// The handover is a dither, not a pop: across a band at each boundary the two
+// levels draw COMPLEMENTARY halves of an interleaved-gradient screen pattern,
+// so every pixel belongs to exactly one of them and the swap reads as a brief
+// shimmer rather than a tree changing shape. Instances outside a level's band
+// are collapsed to a point in the vertex shader and never reach the rasteriser.
 //
-//   * Rebuild rate. The copy runs with a radius of cull + REBUILD_STEP, so the
-//     set stays correct until the camera has moved REBUILD_STEP metres. At
-//     100 km/h that is a rebuild roughly every 1.2 s per field, and at most one
-//     field rebuilds on any given frame. Between rebuilds update() does nothing
-//     but two subtractions per field.
+// Culling is still the grid scheme this file always had: instances are counting
+// -sorted into 32 m cells at load, so each cell owns a contiguous run of a
+// precomputed matrix array, and refreshing a field is a few thousand run copies
+// rather than a distance test per tree. A field's set stays valid until the
+// camera has moved its rebuild step; the stalest field refreshes each frame.
 //
-// WHY LOW-POLY CANOPIES AND NOT CROSS-BILLBOARDS
-//
-// Cross-billboards win on triangle count and lose on everything else at speed.
-// They need an alpha-tested foliage texture (another thing to generate), they
-// shear visibly as you drive past because the two quads are seen edge-on in
-// turn, and alpha-test makes them a separate, slower depth path. A twenty-face
-// icosahedron is only about sixty triangles once a trunk is attached, holds a
-// solid silhouette from every angle, and shades correctly under the sun. With
-// the counts kept in the low thousands by distance culling, triangles are not
-// the scarce resource here — silhouette and colour variation are, and those are
-// exactly what a lit solid gives you and a flat billboard does not.
+// Draw calls: 8 species x 3 levels, 2 rock levels x 3 shapes, stones, tree
+// contact shadows, lamps. ~38 in all, against ~10 before, for roughly thirty
+// times the vegetation. Triangle counts per tier are in the TIERS table and
+// measured by tools/naturecheck.mjs.
 //
 // WHY THE LAMP POOLS ARE FAKE
 //
@@ -57,51 +51,270 @@
 // emissive head plus an additive ground decal, and setNight() fades both.
 
 import * as THREE from 'three';
-import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
-import { mulberry, clamp, lerp, smoothstep } from '../world/noise.js';
+import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
+import { mulberry, clamp, lerp, smoothstep, valueNoise, valueNoise3 } from '../world/noise.js';
+import {
+  paintAtlas, buildSpecies, meshFrom, rasterImpostors, SPECIES, ATLAS_W, ATLAS_H,
+} from './foliage.js';
 
 // How far the camera may travel before a field's visible set is stale. Every
-// field builds with `radius + REBUILD_STEP`, which is what makes that safe.
+// field builds with `radius + step`, which is what makes that safe; `step` is
+// this for the big fields and a fifth of the radius for the small ones. A frame
+// that has already overrun defers a refresh until the field is 1.5 steps stale
+// — deferred, not vetoed, or a machine below 20 fps would never rebuild and
+// would drive straight out of its own scenery.
 const REBUILD_STEP = 34;
 
-// How stale a field is allowed to get before it refreshes even on a frame that
-// has already overrun. Without this, a machine sitting below 20 fps skips every
-// rebuild forever and drives straight out of its own scenery.
-const STALE_LIMIT = REBUILD_STEP * 1.5;
+// One grid for everything. Per-cell culling lets an instance survive up to a
+// cell diagonal past the radius; at 32 m that is 45 m, which is 70% of the
+// near radius but only matters to the vertex shader, which collapses anything
+// outside its band anyway. The far fields reach a kilometre, and a coarser grid
+// would only save a loop over empty offsets.
+const CELL = 32;
 
-/**
- * Grid pitch for a field, from its cull radius.
- *
- * Culling is per cell, so an instance can survive up to a cell diagonal past
- * the radius. That slop is a fixed number of metres, which means a coarse grid
- * that is nearly free for a 450 m tree cull nearly doubles the reach of a
- * 130 m decal cull — measured at 229 m before this was tied to the radius.
- * A seventh of the radius keeps the overshoot around 20% for every field while
- * leaving cells big enough that a refresh copies a few hundred long runs
- * rather than a few thousand short ones.
- */
-function cellFor(cull) {
-  return clamp(Math.round(cull / 7), 24, 64);
+// Distances per quality tier, in metres from the camera (horizontal). `near`,
+// `mid` and `far` are where each tree level ENDS; bushes stop sooner because a
+// two-metre shrub is a pixel at 400 m. Shadows: at 'high' the mid-level trees
+// cast into the sun's shadow map (the near level would cost three times the
+// triangles for a shadow nobody can tell apart), and near trees receive it.
+//
+// 'low' has no near level at all: the mid tree starts at the bumper. It is a
+// sparser tree, but at 'low' the budget is the point.
+//
+// The mid band is where the triangles go — it covers eight times the ground of
+// the near band — so it hands over to impostors at 125 m. A seventeen-metre
+// spruce at that range is about 130 px tall at 1080p, which a normal-mapped
+// billboard carries. Worst case measured by tools/naturecheck.mjs, in the
+// densest 64 m block of woodland on the map.
+export const TIERS = {
+  low:    { near: 0,  mid: 70,  far: 520,  bushFar: 220, rockNear: 22, rockFar: 240, stone: 45,  shadows: false },
+  medium: { near: 38, mid: 100, far: 800,  bushFar: 300, rockNear: 36, rockFar: 330, stone: 75,  shadows: false },
+  high:   { near: 50, mid: 125, far: 1000, bushFar: 380, rockNear: 50, rockFar: 420, stone: 110, shadows: true },
+};
+const MAX = TIERS.high;
+// Crossfade width as a fraction of the boundary distance: 7 m at the near
+// boundary, 17 m at mid, a gentle 140 m fade into the fog at the far edge.
+const BAND = 0.14;
+
+// The rest of the renderer takes a tier NAME and main.js passes
+// settings.quality straight through, but a 0..1 number is still accepted.
+function tierOf(q) {
+  if (typeof q === 'number' && Number.isFinite(q)) return q < 0.34 ? 'low' : q < 0.75 ? 'medium' : 'high';
+  if (q === 'ultra') return 'high';
+  if (q === 'off') return 'low';
+  return TIERS[q] ? q : 'high';
 }
 
-// The rest of the renderer (terrain, roads, effects, city) takes a tier NAME,
-// and main.js passes settings.quality straight through to all of them, this one
-// included. Accepting only a 0..1 number here meant every tier fell through to
-// full quality and the graphics setting did nothing to the props.
-const QUALITY_TIERS = { off: 0, low: 0.25, medium: 0.6, high: 1, ultra: 1 };
+// ---------------------------------------------------------------------------
+// Shader injection
+// ---------------------------------------------------------------------------
+// Injected into three's own Lambert and depth materials rather than replacing
+// them, so fog, shadows, tone mapping and the hemisphere light all keep working
+// without being reimplemented. Every replacement is anchored on a chunk name;
+// if a future three.js renames one, that replacement silently does nothing and
+// the material still draws — plainer, never broken.
 
-// Full-quality cull radii. setQuality() scales these down; the instance buffers
-// are sized for the full radius so quality can move freely without reallocating.
-const CULL = {
-  tree: 450,
-  rock: 340,
-  light: 330,
-  pool: 260,
-  shade: 130,
-};
+const LOD_PARS = `
+uniform vec4 orLod;        // inner fade start, end; outer fade start, end (m)
+uniform vec3 orFocus;      // the real camera, for the shadow pass
+varying vec2 vOrLod;       // x: how far in past the inner edge, y: past the outer
+`;
+
+// Horizontal distance from camera to the instance's base, and the two fades.
+// A level shows a pixel when dither < inner && dither >= outer, so the next
+// level out, whose INNER fade is this level's OUTER one, takes exactly the
+// pixels this one gives up.
+const LOD_VERT = `
+vec3 orBase = vec3( instanceMatrix[ 3 ][ 0 ], instanceMatrix[ 3 ][ 1 ], instanceMatrix[ 3 ][ 2 ] );
+float orDist = length( orBase.xz - cameraPosition.xz );
+vOrLod = vec2( smoothstep( orLod.x, orLod.y, orDist ), smoothstep( orLod.z, orLod.w, orDist ) );
+`;
+
+// Collapsing the whole instance to one point outside the clip volume: its
+// triangles become degenerate and are dropped before rasterisation. In the
+// shadow pass `cameraPosition` is the sun's, so the test there is against the
+// real camera (orFocus) and the reach of the shadow map instead: sky.js covers
+// 110 m either side of the car, and a tree further out than that can only
+// shade ground nobody is shown with a shadow.
+const LOD_COLLAPSE = `
+#ifndef OR_SHADOW
+if ( vOrLod.x <= 0.0 || vOrLod.y >= 1.0 ) gl_Position = vec4( 0.0, 0.0, -2.0, 1.0 );
+#else
+if ( length( orBase.xz - orFocus.xz ) > 150.0 ) gl_Position = vec4( 0.0, 0.0, -2.0, 1.0 );
+#endif
+`;
+
+const LOD_FRAG_PARS = `
+varying vec2 vOrLod;
+// Interleaved gradient noise: a fixed per-pixel threshold with no visible
+// structure, so the crossfade dissolves instead of drawing a checkerboard.
+float orDither() {
+  return fract( 52.9829189 * fract( dot( gl_FragCoord.xy, vec2( 0.06711056, 0.00583715 ) ) ) );
+}
+`;
+
+const LOD_FRAG = `
+{
+  float orH = orDither();
+  if ( orH >= vOrLod.x || orH < vOrLod.y ) discard;
+}
+`;
+
+// Alpha-tested foliage loses coverage down the mip chain — a mip averages leaf
+// with sky and the alpha test then throws the average away — so a tree thins to
+// a skeleton exactly as it gets far enough to need the density most. Scaling
+// alpha up with the mip level puts the coverage back (the fix from
+// Golus's "Anti-aliased Alpha Test"); 0.25 per level was picked by eye.
+const ALPHA_MIP = `
+#ifdef USE_MAP
+{
+  vec2 orTs = vec2( textureSize( map, 0 ) );
+  vec2 orDx = dFdx( vMapUv * orTs ), orDy = dFdy( vMapUv * orTs );
+  diffuseColor.a *= 1.0 + max( 0.0, 0.5 * log2( max( dot( orDx, orDx ), dot( orDy, orDy ) ) ) ) * 0.25;
+}
+#endif
+`;
+
+const WIND_PARS = `
+attribute vec2 wind;       // x: metres of sway per unit wind, y: leaf flutter
+uniform vec4 orWind;       // xy direction (world XZ), z strength, w time (s)
+`;
+
+// A tree bends as a whole — two incommensurate sines with a slow gust envelope,
+// phased by position so a wood ripples rather than marching in step — and its
+// leaves flutter along their own normals at a much higher rate. The sway is
+// applied in WORLD space, after the instance transform, so the wind blows the
+// same way through every tree whatever its rotation.
+const WIND_VERT = `
+float orPh = dot( orBase.xz, vec2( 0.071, 0.113 ) );
+float orT = orWind.w;
+float orGust = 0.6 + 0.4 * sin( orT * 0.37 + orPh * 0.13 ) * sin( orT * 0.23 + 1.3 );
+float orSway = ( sin( orT * 1.07 + orPh ) * 0.7 + sin( orT * 2.31 + orPh * 1.9 ) * 0.3 ) * orGust + 0.4;
+vec3 orOff = vec3( orWind.x, 0.0, orWind.y ) * ( orSway * orWind.z * wind.x );
+transformed += normal * ( sin( orT * 7.3 + dot( position, vec3( 3.1, 2.3, 1.7 ) ) + orPh * 3.0 ) * 0.045 * wind.y * orWind.z );
+`;
+
+const PROJECT_WIND = `
+vec4 mvPosition = instanceMatrix * vec4( transformed, 1.0 );
+mvPosition.xyz += orOff;
+mvPosition = modelViewMatrix * mvPosition;
+gl_Position = projectionMatrix * mvPosition;
+${LOD_COLLAPSE}
+`;
+
+const WORLDPOS_WIND = `
+#if defined( USE_ENVMAP ) || defined( DISTANCE ) || defined ( USE_SHADOWMAP ) || defined ( USE_TRANSMISSION ) || NUM_SPOT_LIGHT_COORDS > 0
+  vec4 worldPosition = instanceMatrix * vec4( transformed, 1.0 );
+  worldPosition.xyz += orOff;
+  worldPosition = modelMatrix * worldPosition;
+#endif
+`;
+
+// Canopy lighting. Wrapped diffuse, because light scatters through a crown
+// into its own shade and a hard terminator makes a tree look like a painted
+// ball; plus a forward-scattering term, so a tree between the camera and a low
+// sun lights up yellow-green at its edges the way real leaves do.
+function canopyLambert() {
+  const src = THREE.ShaderChunk.lights_lambert_pars_fragment || '';
+  const anchor = 'float dotNL = saturate( dot( geometryNormal, directLight.direction ) );\n\tvec3 irradiance = dotNL * directLight.color;';
+  if (src.indexOf(anchor) < 0) return src;
+  return src.replace(anchor,
+    'float orNL = dot( geometryNormal, directLight.direction );\n' +
+    '\tfloat dotNL = saturate( orNL * 0.72 + 0.28 );\n' +
+    '\tfloat orBack = pow( saturate( dot( - geometryViewDir, directLight.direction ) ), 5.0 ) * 0.45;\n' +
+    '\tvec3 irradiance = ( dotNL + orBack ) * directLight.color;');
+}
+
+/**
+ * Patch a Lambert material. `kind` is 'canopy' (leaf cards: wind, LOD, alpha
+ * mip fix, canopy normals and lighting), 'impostor' (billboards) or 'rock'
+ * (LOD only).
+ */
+function inject(material, kind, uniforms) {
+  material.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, uniforms);
+    let v = shader.vertexShader, f = shader.fragmentShader;
+    if (v.indexOf('#include <project_vertex>') < 0 || v.indexOf('#include <begin_vertex>') < 0) return;
+
+    if (kind === 'canopy') {
+      v = v.replace('#include <common>', `#include <common>\n${LOD_PARS}\n${WIND_PARS}`)
+        .replace('#include <begin_vertex>', `#include <begin_vertex>\n${LOD_VERT}\n${WIND_VERT}`)
+        .replace('#include <project_vertex>', PROJECT_WIND)
+        .replace('#include <worldpos_vertex>', WORLDPOS_WIND);
+      f = f.replace('#include <common>', `#include <common>\n${LOD_FRAG_PARS}`)
+        .replace('#include <map_fragment>', `#include <map_fragment>\n${LOD_FRAG}\n${ALPHA_MIP}`)
+        // The canopy normal is the normal of the crown, not of the card, so it
+        // must not flip with the side of the card that happens to face us.
+        .replace('#include <normal_fragment_begin>', '#include <normal_fragment_begin>\n#ifdef DOUBLE_SIDED\nnormal *= faceDirection;\n#endif')
+        .replace('#include <lights_lambert_pars_fragment>', canopyLambert());
+    } else if (kind === 'impostor') {
+      v = v.replace('#include <common>', `#include <common>\n${LOD_PARS}\nvarying vec3 vOrRight;\nvarying vec3 vOrFwd;`)
+        // Two views of every species, picked per tree by a hash of its position.
+        .replace('#include <uv_vertex>', `#include <uv_vertex>
+#ifdef USE_MAP
+vMapUv.y += step( 0.5, fract( sin( dot( vec2( instanceMatrix[ 3 ][ 0 ], instanceMatrix[ 3 ][ 2 ] ), vec2( 12.9898, 78.233 ) ) ) * 43758.5453 ) ) * 0.5;
+#endif`)
+        .replace('#include <begin_vertex>', `#include <begin_vertex>\n${LOD_VERT}`)
+        .replace('#include <project_vertex>', `
+float orSx = length( vec3( instanceMatrix[ 0 ][ 0 ], instanceMatrix[ 0 ][ 1 ], instanceMatrix[ 0 ][ 2 ] ) );
+float orSy = length( vec3( instanceMatrix[ 1 ][ 0 ], instanceMatrix[ 1 ][ 1 ], instanceMatrix[ 1 ][ 2 ] ) );
+vec3 orTo = cameraPosition - orBase;
+orTo.y = 0.0;
+float orTl = length( orTo );
+orTo = orTl > 0.001 ? orTo / orTl : vec3( 0.0, 0.0, 1.0 );
+vec3 orRight = vec3( orTo.z, 0.0, - orTo.x );
+vOrRight = orRight; vOrFwd = orTo;
+vec4 mvPosition = modelViewMatrix * vec4( orBase + orRight * ( position.x * orSx ) + vec3( 0.0, position.y * orSy, 0.0 ), 1.0 );
+gl_Position = projectionMatrix * mvPosition;
+${LOD_COLLAPSE}`);
+      f = f.replace('#include <common>', `#include <common>\n${LOD_FRAG_PARS}\nuniform sampler2D orNormalMap;\nvarying vec3 vOrRight;\nvarying vec3 vOrFwd;`)
+        .replace('#include <map_fragment>', `#include <map_fragment>\n${LOD_FRAG}\n${ALPHA_MIP}`)
+        // The normal map is in the billboard's own frame: x right, y up, z to
+        // the camera. Rebuild it in world space, then take it to view space.
+        .replace('#include <normal_fragment_begin>', `#include <normal_fragment_begin>
+{
+  vec3 orNT = texture2D( orNormalMap, vMapUv ).xyz * 2.0 - 1.0;
+  vec3 orNW = orNT.x * vOrRight + vec3( 0.0, orNT.y, 0.0 ) + orNT.z * vOrFwd;
+  normal = normalize( ( viewMatrix * vec4( orNW, 0.0 ) ).xyz );
+}`)
+        .replace('#include <lights_lambert_pars_fragment>', canopyLambert());
+    } else {
+      v = v.replace('#include <common>', `#include <common>\n${LOD_PARS}`)
+        .replace('#include <begin_vertex>', `#include <begin_vertex>\n${LOD_VERT}`)
+        .replace('#include <project_vertex>', `#include <project_vertex>\n${LOD_COLLAPSE}`);
+      f = f.replace('#include <common>', `#include <common>\n${LOD_FRAG_PARS}`)
+        .replace('#include <color_fragment>', `#include <color_fragment>\n${LOD_FRAG}`);
+    }
+    shader.vertexShader = v;
+    shader.fragmentShader = f;
+  };
+  // Every parameter three hashes into a program key is identical between these
+  // and any other vertex-coloured Lambert in the scene, so without a key of
+  // their own they would be handed someone else's program.
+  material.customProgramCacheKey = () => 'openroad-props-' + kind;
+  material.needsUpdate = true;
+  return material;
+}
+
+/** A depth material for shadow casting that sways with the tree it belongs to. */
+function windDepth(uniforms) {
+  const m = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking });
+  m.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, uniforms);
+    const v = shader.vertexShader;
+    if (v.indexOf('#include <project_vertex>') < 0 || v.indexOf('#include <begin_vertex>') < 0) return;
+    shader.vertexShader = '#define OR_SHADOW\n' + v
+      .replace('#include <common>', `#include <common>\n${LOD_PARS}\n${WIND_PARS}`)
+      .replace('#include <begin_vertex>', `#include <begin_vertex>\n${LOD_VERT}\n${WIND_VERT}`)
+      .replace('#include <project_vertex>', PROJECT_WIND);
+    shader.fragmentShader = shader.fragmentShader.replace('#include <map_fragment>', `#include <map_fragment>\n${ALPHA_MIP}`);
+  };
+  m.customProgramCacheKey = () => 'openroad-props-depth';
+  return m;
+}
 
 // ---------------------------------------------------------------------------
-// Geometry helpers
+// Geometry
 // ---------------------------------------------------------------------------
 
 /** Scale (uniform unless told otherwise) then translate, in that order. */
@@ -111,31 +324,19 @@ function part(geo, x, y, z, sx, sy, sz) {
   return geo;
 }
 
-/**
- * Bakes a colour into a geometry, jittered per triangle.
- *
- * Everything here is flat-shaded, so without this a canopy is one uniform
- * green blob and reads as plastic. A few percent of per-face brightness noise
- * costs nothing — the geometry is stored once and instanced — and is the
- * difference between "a green ball" and "foliage" in peripheral vision.
- *
- * Also drops UVs: none of these materials carry a map, and the attribute would
- * otherwise have to survive the merge and sit in VRAM unused.
- */
+/** Bakes a colour into a geometry, jittered per triangle. */
 function paint(geo, hex, jitter, rnd) {
   const g = geo.index === null ? geo : geo.toNonIndexed();
   if (g !== geo) geo.dispose();
   if (g.getAttribute('uv')) g.deleteAttribute('uv');
-
   const pos = g.getAttribute('position');
   const col = new Float32Array(pos.count * 3);
-  const base = new THREE.Color(hex);   // Color converts sRGB hex to the working space
+  const base = new THREE.Color(hex);
   for (let f = 0; f + 2 < pos.count; f += 3) {
     const k = 1 + (rnd() * 2 - 1) * jitter;
-    const r = base.r * k, gg = base.g * k, b = base.b * k;
     for (let v = 0; v < 3; v++) {
       const o = (f + v) * 3;
-      col[o] = r; col[o + 1] = gg; col[o + 2] = b;
+      col[o] = base.r * k; col[o + 1] = base.g * k; col[o + 2] = base.b * k;
     }
   }
   g.setAttribute('color', new THREE.BufferAttribute(col, 3));
@@ -149,77 +350,79 @@ function merged(parts) {
   return g;
 }
 
-// --- Species ---------------------------------------------------------------
-// `height` and `spread` are metres at instance scale 1, and are what the
-// contact-shadow decal and the caller's spawn clearance are sized from.
-
-function deciduousTree(rnd) {
-  const bark = 0x5b4632, leaf = 0x4f7a33;
-  return {
-    geo: merged([
-      paint(part(new THREE.CylinderGeometry(0.16, 0.28, 3.0, 6, 1, true), 0, 1.5, 0), bark, 0.15, rnd),
-      paint(part(new THREE.IcosahedronGeometry(2.20, 0), 0, 4.50, 0, 1.15, 0.92, 1.10), leaf, 0.13, rnd),
-      paint(part(new THREE.IcosahedronGeometry(1.50, 0), -1.40, 3.60, 0.50), leaf, 0.13, rnd),
-      paint(part(new THREE.IcosahedronGeometry(1.35, 0), 1.25, 4.00, -0.65), leaf, 0.13, rnd),
-    ]),
-    height: 6.5, spread: 3.3, hue: 0.22, sink: 0.18,
-  };
-}
-
-function coniferTree(rnd) {
-  const bark = 0x4a3a2b, needle = 0x2f5537;
-  return {
-    geo: merged([
-      paint(part(new THREE.CylinderGeometry(0.12, 0.22, 2.0, 5, 1, true), 0, 1.0, 0), bark, 0.15, rnd),
-      paint(part(new THREE.ConeGeometry(1.85, 3.2, 6, 1, false), 0, 2.60, 0), needle, 0.12, rnd),
-      paint(part(new THREE.ConeGeometry(1.40, 2.8, 6, 1, false), 0, 4.20, 0), needle, 0.12, rnd),
-      paint(part(new THREE.ConeGeometry(0.90, 2.4, 6, 1, false), 0, 5.70, 0), needle, 0.12, rnd),
-    ]),
-    height: 6.9, spread: 2.9, hue: 0.10, sink: 0.16,
-  };
-}
-
-function scrubTree(rnd) {
-  const bark = 0x584a34, leaf = 0x6f8b3c;
-  return {
-    geo: merged([
-      paint(part(new THREE.CylinderGeometry(0.10, 0.18, 0.8, 5, 1, true), 0, 0.40, 0), bark, 0.15, rnd),
-      paint(part(new THREE.IcosahedronGeometry(1.25, 0), 0, 1.20, 0, 1.35, 0.72, 1.25), leaf, 0.16, rnd),
-      paint(part(new THREE.IcosahedronGeometry(0.88, 0), 0.90, 0.95, -0.50, 1.15, 0.78, 1.05), leaf, 0.16, rnd),
-    ]),
-    height: 2.2, spread: 2.6, hue: 0.26, sink: 0.12,
-  };
-}
+// Rock palettes, sRGB: weathered granite, warm sandstone, dark basalt.
+const ROCK_TONES = [[0.52, 0.51, 0.48], [0.58, 0.52, 0.43], [0.37, 0.37, 0.36]];
 
 /**
- * A boulder: an icosahedron pushed around by a smooth field.
+ * A boulder, built as a SHAPE first and a mesh second, so the near and far
+ * levels are the same stone at two resolutions.
  *
- * PolyhedronGeometry is already non-indexed, so each corner exists once per
- * face it touches. The displacement therefore has to be a continuous function
- * of DIRECTION and nothing else — anything per-vertex would move the copies of
- * a shared corner apart and tear the shell open.
+ * The shape is a sphere pushed about by 3D noise and then cut by three to five
+ * random planes. The noise gives the weathered roundness; the planes give the
+ * flat fracture faces that are what actually make something read as rock
+ * rather than as a potato. Colour is baked per vertex: mottling, darker in the
+ * hollows and at the ground line, moss on upward faces, a few lichen blotches.
  */
-function rockGeometry(detail, squash, rnd) {
-  const g = new THREE.IcosahedronGeometry(1, detail);
+function rockShape(rnd, tone) {
+  const planes = [];
+  const n = 3 + Math.floor(rnd() * 3);
+  for (let i = 0; i < n; i++) {
+    const z = rnd() * 1.6 - 0.6, t = rnd() * Math.PI * 2, r = Math.sqrt(Math.max(0, 1 - z * z));
+    planes.push([r * Math.cos(t), z, r * Math.sin(t), 0.62 + rnd() * 0.25]);
+  }
+  return {
+    seed: Math.floor(rnd() * 1e6), planes, tone,
+    amp: 0.22 + rnd() * 0.12, squash: 0.55 + rnd() * 0.25,
+    moss: 0.3 + rnd() * 0.5,
+  };
+}
+
+function rockGeometry(shape, detail) {
+  let g = new THREE.IcosahedronGeometry(1, detail);
   g.deleteAttribute('uv');
+  g.deleteAttribute('normal');
+  g = mergeVertices(g);
   const a = g.getAttribute('position').array;
-  const p0 = rnd() * 6.283, p1 = rnd() * 6.283, p2 = rnd() * 6.283;
-  const amp = 0.20 + rnd() * 0.16;
+  const rad = new Float32Array(a.length / 3);
+  let rmax = 0;
   for (let i = 0; i < a.length; i += 3) {
-    const x = a[i], y = a[i + 1], z = a[i + 2];
-    const lobe = Math.sin(x * 3.1 + p0) * Math.cos(z * 2.7 + p1) * 0.6 +
-                 Math.sin(y * 4.3 + p2) * 0.4;
-    const k = 1 + lobe * amp;
-    a[i] = x * k; a[i + 1] = y * k * squash; a[i + 2] = z * k;
+    let x = a[i], y = a[i + 1], z = a[i + 2];
+    const k = 1 + shape.amp * (valueNoise3(x * 1.3, y * 1.3, z * 1.3, shape.seed) * 0.75 +
+                               valueNoise3(x * 3.4, y * 3.4, z * 3.4, shape.seed + 7) * 0.25);
+    x *= k; y *= k; z *= k;
+    for (const p of shape.planes) {
+      const d = x * p[0] + y * p[1] + z * p[2] - p[3];
+      if (d > 0) { x -= p[0] * d; y -= p[1] * d; z -= p[2] * d; }
+    }
+    y *= shape.squash;
+    // A flat underside, buried by the placement: rocks sit IN the ground.
+    if (y < -0.32) y = -0.32 + (y + 0.32) * 0.15;
+    a[i] = x; a[i + 1] = y; a[i + 2] = z;
+    rad[i / 3] = Math.hypot(x, y / shape.squash, z);
+    rmax = Math.max(rmax, rad[i / 3]);
   }
   g.computeVertexNormals();
-  const rock = new THREE.Color(0x6d6862);
+  const nrm = g.getAttribute('normal').array;
   const col = new Float32Array(a.length);
-  for (let f = 0; f < col.length; f += 9) {
-    const k = 1 + (rnd() * 2 - 1) * 0.18;
-    for (let v = 0; v < 9; v += 3) {
-      col[f + v] = rock.r * k; col[f + v + 1] = rock.g * k; col[f + v + 2] = rock.b * k;
-    }
+  const base = new THREE.Color().setRGB(shape.tone[0], shape.tone[1], shape.tone[2], THREE.SRGBColorSpace);
+  const moss = new THREE.Color().setRGB(0.27, 0.31, 0.15, THREE.SRGBColorSpace);
+  const lichen = new THREE.Color().setRGB(0.66, 0.64, 0.46, THREE.SRGBColorSpace);
+  for (let i = 0; i < a.length; i += 3) {
+    const x = a[i], y = a[i + 1], z = a[i + 2];
+    const mot = valueNoise3(x * 4.1, y * 4.1, z * 4.1, shape.seed + 11) * 0.5 +
+                valueNoise3(x * 11, y * 11, z * 11, shape.seed + 12) * 0.25;
+    const hollow = clamp(rad[i / 3] / rmax, 0, 1);
+    const ao = lerp(0.55, 1.0, smoothstep(0.55, 0.98, hollow)) * lerp(0.6, 1.0, smoothstep(-0.32, 0.1, y));
+    let r = base.r * (1 + mot * 0.28) * ao, gg = base.g * (1 + mot * 0.28) * ao, b = base.b * (1 + mot * 0.26) * ao;
+    // Moss on the tops, broken up by noise.
+    const up = nrm[i + 1];
+    const mn = valueNoise3(x * 2.3, y * 2.3, z * 2.3, shape.seed + 21);
+    const m = smoothstep(0.35, 0.8, up) * smoothstep(0.1 - shape.moss * 0.5, 0.5, mn) * shape.moss;
+    r = lerp(r, moss.r * ao, m); gg = lerp(gg, moss.g * ao, m); b = lerp(b, moss.b * ao, m);
+    const ln = valueNoise3(x * 6.5, y * 6.5, z * 6.5, shape.seed + 31);
+    const l = smoothstep(0.55, 0.7, ln) * 0.7;
+    r = lerp(r, lichen.r, l); gg = lerp(gg, lichen.g, l); b = lerp(b, lichen.b, l);
+    col[i] = r; col[i + 1] = gg; col[i + 2] = b;
   }
   g.setAttribute('color', new THREE.BufferAttribute(col, 3));
   g.computeBoundingSphere();
@@ -256,21 +459,18 @@ function lampGeometry(w, h, d, x, y, z, hex, rnd) {
 }
 
 // ---------------------------------------------------------------------------
-// Procedural decal textures
+// Textures
 // ---------------------------------------------------------------------------
 
 /**
  * A soft radial disc. `edgePower` shapes the falloff: the light pool wants a
  * long tail (a lamp does not stop at a rim), the contact shadow wants a tight
- * core so it reads as contact rather than as a grey plate.
+ * core so it reads as contact rather than as a grey plate. A DataTexture, not a
+ * canvas, so this module builds headless for tools/naturecheck.mjs.
  */
 function discTexture(rgb, peakAlpha, edgePower) {
   const S = 128;
-  const canvas = document.createElement('canvas');
-  canvas.width = S; canvas.height = S;
-  const ctx = canvas.getContext('2d');
-  const img = ctx.createImageData(S, S);
-  const d = img.data;
+  const d = new Uint8Array(S * S * 4);
   for (let j = 0; j < S; j++) {
     for (let i = 0; i < S; i++) {
       const dx = (i + 0.5) / S * 2 - 1, dy = (j + 0.5) / S * 2 - 1;
@@ -281,19 +481,45 @@ function discTexture(rgb, peakAlpha, edgePower) {
       d[o + 3] = Math.round(clamp(a, 0, 1) * 255);
     }
   }
-  ctx.putImageData(img, 0, 0);
-  const tex = new THREE.CanvasTexture(canvas);
+  const tex = new THREE.DataTexture(d, S, S, THREE.RGBAFormat);
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.minFilter = THREE.LinearMipmapLinearFilter;
   tex.magFilter = THREE.LinearFilter;
   tex.generateMipmaps = true;
+  tex.needsUpdate = true;
   return tex;
+}
+
+function dataTexture(px, w, h, srgb) {
+  const t = new THREE.DataTexture(px, w, h, THREE.RGBAFormat);
+  t.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+  t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
+  t.magFilter = THREE.LinearFilter;
+  t.minFilter = THREE.LinearMipmapLinearFilter;
+  t.generateMipmaps = true;
+  // Foliage is seen edge-on a great deal, and trilinear alone smears it.
+  t.anisotropy = 4;
+  t.needsUpdate = true;
+  return t;
 }
 
 /** A unit quad lying in the XZ plane, ready to be scaled to a decal radius. */
 function decalGeometry() {
   const g = new THREE.PlaneGeometry(2, 2);
   g.rotateX(-Math.PI / 2);
+  return g;
+}
+
+/** The impostor quad for one species: its own UV cell, base at y0. */
+function impostorGeometry(q, s, S) {
+  const g = new THREE.BufferGeometry();
+  const x = q.halfW;
+  g.setAttribute('position', new THREE.Float32BufferAttribute([-x, q.y0, 0, x, q.y0, 0, x, q.y1, 0, -x, q.y1, 0], 3));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute([0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1], 3));
+  const u0 = s / S, u1 = (s + 1) / S;
+  g.setAttribute('uv', new THREE.Float32BufferAttribute([u0, 0, u1, 0, u1, 0.5, u0, 0.5], 2));
+  g.setIndex([0, 1, 2, 0, 2, 3]);
+  g.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, (q.y0 + q.y1) / 2, 0), Math.hypot(x, q.y1 - q.y0));
   return g;
 }
 
@@ -314,81 +540,85 @@ export function createProps(world, ground, opts = {}) {
   const _pos = new THREE.Vector3();
   const _quat = new THREE.Quaternion();
   const _scale = new THREE.Vector3();
-  const _euler = new THREE.Euler();
+  const _euler = new THREE.Euler(0, 0, 0, 'YXZ');
   const _mat = new THREE.Matrix4();
-  const out = { x: 0, y: 0, z: 0, rot: 0, sx: 1, sy: 1, sz: 1, r: 1, g: 1, b: 1 };
+  const out = { x: 0, y: 0, z: 0, rot: 0, lx: 0, lz: 0, sx: 1, sy: 1, sz: 1, r: 1, g: 1, b: 1 };
+
+  const G = Math.ceil((half * 2) / CELL) + 1;
+  const cellOf = (x, z) => {
+    const i = clamp(Math.floor((x + half) / CELL), 0, G - 1);
+    const j = clamp(Math.floor((z + half) / CELL), 0, G - 1);
+    return j * G + i;
+  };
 
   const fields = [];
   const disposables = [];
+  const stats = {
+    fields: 0, meshes: 0, instances: {}, capacity: {}, species: [],
+    buildMs: { atlas: 0, species: 0, impostors: 0, stores: 0 },
+  };
+  const clock = typeof performance !== 'undefined' ? performance : Date;
 
   // -------------------------------------------------------------------------
-  // The instanced field
+  // Stores and fields
   // -------------------------------------------------------------------------
 
   /**
-   * Builds one InstancedMesh over a subset of world.props.
+   * Counting-sort a subset of world.props into the shared cell grid and bake
+   * one matrix (and optionally one tint) per instance. Every level of detail
+   * of a species is a field over the same store, so the forest exists once in
+   * memory however many ways it is drawn.
    *
-   * `place(prop, out)` fills the scratch record for one instance; it is called
-   * once per prop, in the order the props appear, so a shared RNG stays
-   * deterministic. The grid cell is taken from prop.x/prop.z rather than from
+   * `place(prop, out)` is called once per prop in prop order, so a shared RNG
+   * stays deterministic. The cell is taken from prop.x/prop.z rather than from
    * the placed position — a lamp pool sits a couple of metres off its pole,
-   * which is nothing against a 64 m cell, and using the prop keeps the sort
-   * key identical between the counting pass and the placing pass.
+   * which is nothing against a 32 m cell.
    */
-  function makeField(spec) {
-    const { name, indices, place, geometry, material, cull, tint } = spec;
+  function makeStore(indices, place, tint) {
     const n = indices.length;
     if (n === 0) return null;
-
-    const cell = spec.cell || cellFor(cull * range);
-    const G = Math.ceil((half * 2) / cell) + 1;
-    const cellOf = (x, z) => {
-      const i = clamp(Math.floor((x + half) / cell), 0, G - 1);
-      const j = clamp(Math.floor((z + half) / cell), 0, G - 1);
-      return j * G + i;
-    };
-
-    // ---- Counting sort into contiguous per-cell runs -----------------------
     const start = new Int32Array(G * G + 1);
     for (let k = 0; k < n; k++) {
       const p = world.props[indices[k]];
       start[cellOf(p.x, p.z) + 1]++;
     }
     for (let c = 0; c < G * G; c++) start[c + 1] += start[c];
-
     const cursor = Int32Array.from(start);
     const srcM = new Float32Array(n * 16);
     const srcC = tint ? new Float32Array(n * 3) : null;
     for (let k = 0; k < n; k++) {
       const p = world.props[indices[k]];
+      out.lx = 0; out.lz = 0;
       place(p, out);
       const slot = cursor[cellOf(p.x, p.z)]++;
-      _euler.set(0, out.rot, 0);
+      // Lean first (about X and Z, a few degrees), then the heading.
+      _euler.set(out.lx, out.rot, out.lz, 'YXZ');
       _quat.setFromEuler(_euler);
       _pos.set(out.x, out.y, out.z);
       _scale.set(out.sx, out.sy, out.sz);
       _mat.compose(_pos, _quat, _scale);
       _mat.toArray(srcM, slot * 16);
-      if (srcC) {
-        srcC[slot * 3] = out.r; srcC[slot * 3 + 1] = out.g; srcC[slot * 3 + 2] = out.b;
-      }
+      if (srcC) { srcC[slot * 3] = out.r; srcC[slot * 3 + 1] = out.g; srcC[slot * 3 + 2] = out.b; }
     }
+    return { n, start, srcM, srcC, sat: null };
+  }
 
-    // ---- Capacity ---------------------------------------------------------
-    // The exact worst case: the most instances any square block of cells the
-    // cull can reach holds. A summed-area table answers that for every camera
-    // position at once, which beats guessing and then either wasting a
-    // megabyte or silently clipping a forest.
-    const R = Math.ceil((cull * range + REBUILD_STEP) / cell);
+  /** The most instances any disc of radius `r` can reach, over every position. */
+  function capacityFor(store, r) {
+    const R = Math.ceil(r / CELL);
     const W = G + 1;
-    const sat = new Int32Array(W * W);
-    for (let j = 0; j < G; j++) {
-      for (let i = 0; i < G; i++) {
-        const c = j * G + i;
-        sat[(j + 1) * W + i + 1] = (start[c + 1] - start[c]) +
-          sat[j * W + i + 1] + sat[(j + 1) * W + i] - sat[j * W + i];
+    if (!store.sat) {
+      const sat = new Int32Array(W * W);
+      for (let j = 0; j < G; j++) {
+        for (let i = 0; i < G; i++) {
+          const c = j * G + i;
+          sat[(j + 1) * W + i + 1] = (store.start[c + 1] - store.start[c]) +
+            sat[j * W + i + 1] + sat[(j + 1) * W + i] - sat[j * W + i];
+        }
       }
+      store.sat = sat;
     }
+    const sat = store.sat;
     let cap = 0;
     for (let j = 0; j < G; j++) {
       const j0 = Math.max(0, j - R), j1 = Math.min(G - 1, j + R) + 1;
@@ -398,23 +628,40 @@ export function createProps(world, ground, opts = {}) {
         if (s > cap) cap = s;
       }
     }
-    cap = Math.min(n, cap);
-    if (cap === 0) return null;
+    return Math.min(store.n, cap);
+  }
 
-    // ---- Cell visiting order, nearest first --------------------------------
-    // Precomputed so a refresh walks a flat Int16Array instead of building a
-    // candidate list. Nearest-first only matters if capacity is ever reached,
-    // which the exact figure above should prevent — but it costs nothing to
-    // make the failure mode "the far edge thins" rather than "a hole appears".
+  const offsCache = new Map();
+  /** Cell offsets within R cells, nearest first. */
+  function offsetsFor(R) {
+    let offs = offsCache.get(R);
+    if (offs) return offs;
     const tmp = [];
     for (let dj = -R; dj <= R; dj++) {
-      for (let di = -R; di <= R; di++) tmp.push([di * di + dj * dj, di, dj]);
+      for (let di = -R; di <= R; di++) {
+        if ((Math.max(0, Math.abs(di) - 1) ** 2 + Math.max(0, Math.abs(dj) - 1) ** 2) * CELL * CELL > (R * CELL) ** 2) continue;
+        tmp.push([di * di + dj * dj, di, dj]);
+      }
     }
     tmp.sort((a, b) => a[0] - b[0]);
-    const offs = new Int16Array(tmp.length * 2);
+    offs = new Int16Array(tmp.length * 2);
     for (let k = 0; k < tmp.length; k++) { offs[k * 2] = tmp[k][1]; offs[k * 2 + 1] = tmp[k][2]; }
+    offsCache.set(R, offs);
+    return offs;
+  }
 
-    // ---- Mesh -------------------------------------------------------------
+  /**
+   * One InstancedMesh over a store. `maxRadius` sizes the buffers (the 'high'
+   * figure, so quality can change without reallocating); `radiusFor(tier)` is
+   * the live radius.
+   */
+  function makeField(store, spec) {
+    if (!store) return null;
+    const { name, geometry, material, maxRadius } = spec;
+    const cap = capacityFor(store, maxRadius * range + REBUILD_STEP + CELL);
+    if (cap === 0) return null;
+    const offs = offsetsFor(Math.ceil((maxRadius * range + REBUILD_STEP) / CELL) + 1);
+
     const mesh = new THREE.InstancedMesh(geometry, material, cap);
     mesh.name = name;
     mesh.count = 0;
@@ -426,29 +673,40 @@ export function createProps(world, ground, opts = {}) {
     mesh.receiveShadow = false;
     mesh.matrixAutoUpdate = false;
     mesh.updateMatrix();
+    if (spec.depthMaterial) mesh.customDepthMaterial = spec.depthMaterial;
+    if (spec.renderOrder) mesh.renderOrder = spec.renderOrder;
     const dstM = mesh.instanceMatrix.array;
-
     let dstC = null;
-    if (tint) {
+    if (store.srcC) {
       mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(cap * 3).fill(1), 3);
       mesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
       dstC = mesh.instanceColor.array;
     }
     group.add(mesh);
 
+    const { start, srcM, srcC } = store;
     const field = {
-      name, mesh, extras: [], cap, total: n,
-      cull, radius: cull * range,
+      name, mesh, extras: [], cap, total: store.n, spec,
+      radius: maxRadius * range, step: REBUILD_STEP,
       atX: Infinity, atZ: Infinity, dirty: true,
+      tris: (geometry.index ? geometry.index.count : geometry.attributes.position.count) / 3,
     };
 
+    /**
+     * Rebuild the visible set around the camera.
+     *
+     * Cells wholly inside the circle are copied as runs; cells straddling it
+     * are copied instance by instance with a distance test. Copying straddling
+     * cells whole was fine when a tree cost sixty triangles, but at eight
+     * hundred a 32 m cell of slop around a 64 m radius submitted five times the
+     * trees that could be seen.
+     */
     field.refresh = function refresh(camX, camZ) {
-      const radius = field.radius + REBUILD_STEP;
+      const radius = field.radius + field.step;
       const r2 = radius * radius;
-      const ci = Math.floor((camX + half) / cell);
-      const cj = Math.floor((camZ + half) / cell);
+      const ci = Math.floor((camX + half) / CELL);
+      const cj = Math.floor((camZ + half) / CELL);
       let w = 0;
-
       for (let t = 0; t < offs.length; t += 2) {
         const i = ci + offs[t], j = cj + offs[t + 1];
         if (i < 0 || j < 0 || i >= G || j >= G) continue;
@@ -456,40 +714,40 @@ export function createProps(world, ground, opts = {}) {
         const s = start[c];
         let len = start[c + 1] - s;
         if (len === 0) continue;
-
-        // Distance to the nearest point of the cell, so a cell only qualifies
-        // if it actually touches the circle.
-        const x0 = i * cell - half, z0 = j * cell - half;
-        const dx = camX < x0 ? x0 - camX : camX > x0 + cell ? camX - x0 - cell : 0;
-        const dz = camZ < z0 ? z0 - camZ : camZ > z0 + cell ? camZ - z0 - cell : 0;
+        // Nearest and farthest points of the cell from the camera.
+        const x0 = i * CELL - half, z0 = j * CELL - half;
+        const dx = camX < x0 ? x0 - camX : camX > x0 + CELL ? camX - x0 - CELL : 0;
+        const dz = camZ < z0 ? z0 - camZ : camZ > z0 + CELL ? camZ - z0 - CELL : 0;
         if (dx * dx + dz * dz > r2) continue;
-
-        if (w + len > cap) len = cap - w;
-        if (len <= 0) break;
-
-        // Copied by hand rather than with dst.set(src.subarray(...)): subarray
-        // allocates a view object per call, and this runs a couple of hundred
-        // times per rebuild. A flat loop over a few hundred thousand floats is
-        // a fraction of a millisecond and allocates nothing.
-        let sm = s * 16, dm = w * 16;
-        for (let k = len * 16; k > 0; k--) dstM[dm++] = srcM[sm++];
-        if (dstC) {
-          let sc = s * 3, dc = w * 3;
-          for (let k = len * 3; k > 0; k--) dstC[dc++] = srcC[sc++];
+        const fx = Math.max(Math.abs(camX - x0), Math.abs(camX - x0 - CELL));
+        const fz = Math.max(Math.abs(camZ - z0), Math.abs(camZ - z0 - CELL));
+        if (fx * fx + fz * fz <= r2) {
+          if (w + len > cap) len = cap - w;
+          if (len <= 0) break;
+          // Copied by hand rather than with dst.set(src.subarray(...)):
+          // subarray allocates a view object per call.
+          let sm = s * 16, dm = w * 16;
+          for (let k = len * 16; k > 0; k--) dstM[dm++] = srcM[sm++];
+          if (dstC) {
+            let sc = s * 3, dc = w * 3;
+            for (let k = len * 3; k > 0; k--) dstC[dc++] = srcC[sc++];
+          }
+          w += len;
+        } else {
+          for (let q = s; q < s + len && w < cap; q++) {
+            const ex = srcM[q * 16 + 12] - camX, ez = srcM[q * 16 + 14] - camZ;
+            if (ex * ex + ez * ez > r2) continue;
+            let sm = q * 16, dm = w * 16;
+            for (let k = 16; k > 0; k--) dstM[dm++] = srcM[sm++];
+            if (dstC) { dstC[w * 3] = srcC[q * 3]; dstC[w * 3 + 1] = srcC[q * 3 + 1]; dstC[w * 3 + 2] = srcC[q * 3 + 2]; }
+            w++;
+          }
         }
-        w += len;
         if (w >= cap) break;
       }
-
       mesh.count = w;
       for (let k = 0; k < field.extras.length; k++) field.extras[k].count = w;
       if (w > 0) {
-        // Upload only the slice in use; capacity is sized for the worst clump
-        // in the world and is usually several times what is on screen. The
-        // renderer clears the ranges once it has uploaded them, so the clear
-        // here is for the case where it never did — a hidden mesh, or a
-        // refresh that found nothing — whose stale range would otherwise merge
-        // with this one and widen the upload.
         mesh.instanceMatrix.clearUpdateRanges();
         mesh.instanceMatrix.addUpdateRange(0, w * 16);
         mesh.instanceMatrix.needsUpdate = true;
@@ -503,6 +761,8 @@ export function createProps(world, ground, opts = {}) {
     };
 
     fields.push(field);
+    stats.instances[name] = store.n;
+    stats.capacity[name] = cap;
     return field;
   }
 
@@ -531,36 +791,91 @@ export function createProps(world, ground, opts = {}) {
   // Sort the prop list
   // -------------------------------------------------------------------------
 
-  const treeIdx = [[], [], []];
+  const TREES = SPECIES.filter((s) => s.kind === 'tree').length;
+  const BUSHES = SPECIES.length - TREES;
+  const treeIdx = Array.from({ length: TREES }, () => []);
+  const bushIdx = Array.from({ length: BUSHES }, () => []);
   const rockIdx = [[], [], []];
+  const stoneIdx = [];
   const streetIdx = [];
   const poleIdx = [];
   const lightIdx = [];
+  const shadeIdx = [];
   for (let i = 0; i < world.props.length; i++) {
     const p = world.props[i];
-    const v = clamp(p.variant | 0, 0, 2);
-    if (p.type === 'tree') treeIdx[v].push(i);
-    else if (p.type === 'rock') rockIdx[v].push(i);
+    if (p.type === 'tree') { treeIdx[clamp(p.variant | 0, 0, TREES - 1)].push(i); shadeIdx.push(i); }
+    else if (p.type === 'bush') bushIdx[clamp(p.variant | 0, 0, BUSHES - 1)].push(i);
+    else if (p.type === 'rock') rockIdx[clamp(p.variant | 0, 0, 2)].push(i);
+    else if (p.type === 'stone') stoneIdx.push(i);
     else if (p.type === 'streetlight') { streetIdx.push(i); lightIdx.push(i); }
     else if (p.type === 'polelight') { poleIdx.push(i); lightIdx.push(i); }
   }
-  const treeAll = treeIdx[0].concat(treeIdx[1], treeIdx[2]);
 
   // -------------------------------------------------------------------------
-  // Materials
+  // Species, atlases, materials
   // -------------------------------------------------------------------------
 
-  // Lambert, not Standard: foliage and bark have no interesting specular, and
-  // this is the material that gets evaluated a few hundred thousand times a
-  // frame. flatShading suits the faceted geometry and skips normal smoothing.
-  const foliageMat = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true });
-  const rockMat = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true });
+  let t0 = clock.now();
+  const atlasPx = paintAtlas(seed | 0);
+  const atlas = dataTexture(atlasPx, ATLAS_W, ATLAS_H, true);
+  stats.buildMs.atlas = Math.round(clock.now() - t0);
+
+  t0 = clock.now();
+  const descs = buildSpecies(seed | 0);
+  const nearGeo = descs.map((d) => meshFrom(d, 'near'));
+  const midGeo = descs.map((d) => meshFrom(d, 'mid'));
+  stats.buildMs.species = Math.round(clock.now() - t0);
+
+  t0 = clock.now();
+  const imp = rasterImpostors(descs, nearGeo, atlasPx);
+  const impAlbedo = dataTexture(imp.albedo, imp.width, imp.height, true);
+  const impNormal = dataTexture(imp.normal, imp.width, imp.height, false);
+  const impGeo = imp.quads.map((q, s) => impostorGeometry(q, s, descs.length));
+  stats.buildMs.impostors = Math.round(clock.now() - t0);
+  for (let s = 0; s < descs.length; s++) {
+    stats.species.push({
+      name: descs[s].name, kind: descs[s].kind, height: descs[s].height, spread: descs[s].spread,
+      nearTris: nearGeo[s].index.count / 3, midTris: midGeo[s].index.count / 3, farTris: 2,
+    });
+  }
+  disposables.push(atlas, impAlbedo, impNormal, ...nearGeo, ...midGeo, ...impGeo);
+
+  // Wind: xz direction (the same way the clouds drift in sky.js), strength,
+  // time. One uniform object shared by every material that sways.
+  const windU = { value: new THREE.Vector4(0.82, 0.57, opts.wind ?? 0.7, 0) };
+  const focusU = { value: new THREE.Vector3() };
+
+  const lodU = (a, b, c, d) => ({ value: new THREE.Vector4(a, b, c, d) });
+  const U = {
+    near: lodU(-2, -1, 1e6, 2e6), mid: lodU(-2, -1, 1e6, 2e6), far: lodU(-2, -1, 1e6, 2e6),
+    bushNear: lodU(-2, -1, 1e6, 2e6), bushMid: lodU(-2, -1, 1e6, 2e6), bushFar: lodU(-2, -1, 1e6, 2e6),
+    rockNear: lodU(-2, -1, 1e6, 2e6), rockFar: lodU(-2, -1, 1e6, 2e6), stone: lodU(-2, -1, 1e6, 2e6),
+  };
+
+  const canopyMat = (lod) => inject(new THREE.MeshLambertMaterial({
+    vertexColors: true, map: atlas, alphaTest: 0.5, side: THREE.DoubleSide,
+  }), 'canopy', { orLod: lod, orWind: windU, orFocus: focusU });
+  const impostorMat = (lod) => inject(new THREE.MeshLambertMaterial({
+    map: impAlbedo, alphaTest: 0.5, side: THREE.DoubleSide,
+  }), 'impostor', { orLod: lod, orNormalMap: { value: impNormal }, orFocus: focusU });
+  const rockMat = (lod) => inject(new THREE.MeshLambertMaterial({ vertexColors: true }), 'rock', { orLod: lod, orFocus: focusU });
+
+  const mats = {
+    near: canopyMat(U.near), mid: canopyMat(U.mid), far: impostorMat(U.far),
+    bushNear: canopyMat(U.bushNear), bushMid: canopyMat(U.bushMid), bushFar: impostorMat(U.bushFar),
+    rockNear: rockMat(U.rockNear), rockFar: rockMat(U.rockFar), stone: rockMat(U.stone),
+  };
+  // The depth pass sees the mid level's own LOD uniform only to satisfy the
+  // shader's declarations; OR_SHADOW switches the collapse off, because the
+  // "camera" in a shadow pass is the sun.
+  const depthMat = windDepth({ orLod: U.mid, orWind: windU, orFocus: focusU });
+  disposables.push(...Object.values(mats), depthMat);
+
   const poleMat = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true });
   const lampMat = new THREE.MeshLambertMaterial({
     vertexColors: true, flatShading: true,
     emissive: new THREE.Color(0xffb356), emissiveIntensity: 0,
   });
-
   const poolTex = discTexture([255, 226, 178], 1.0, 2.1);
   const poolMat = new THREE.MeshBasicMaterial({
     map: poolTex, color: 0xffc98a, transparent: true, opacity: 0,
@@ -571,92 +886,133 @@ export function createProps(world, ground, opts = {}) {
     map: shadeTex, color: 0x000000, transparent: true, opacity: 0.40,
     depthWrite: false, toneMapped: false,
   });
-
-  disposables.push(foliageMat, rockMat, poleMat, lampMat, poolMat, shadeMat, poolTex, shadeTex);
+  disposables.push(poleMat, lampMat, poolMat, shadeMat, poolTex, shadeTex);
 
   // -------------------------------------------------------------------------
   // Build the fields
   // -------------------------------------------------------------------------
 
-  const rnd = mulberry(seed ^ 0x51ed2f);
-  const species = [deciduousTree(rnd), coniferTree(rnd), scrubTree(rnd)];
-  const rocks = [
-    rockGeometry(0, 0.62, rnd),
-    rockGeometry(0, 0.48, rnd),
-    rockGeometry(1, 0.70, rnd),
-  ];
-  const streetGeo = streetlightBody(rnd);
-  const poleGeo = polelightBody(rnd);
-  const streetLampGeo = lampGeometry(0.56, 0.16, 0.34, 0, 6.92, 1.86, 0xc4c8cc, rnd);
-  const poleLampGeo = lampGeometry(0.42, 0.14, 0.30, 0, 6.02, 0.50, 0xc4c8cc, rnd);
-  const decalGeo = decalGeometry();
-  for (const s of species) disposables.push(s.geo);
-  disposables.push(...rocks, streetGeo, poleGeo, streetLampGeo, poleLampGeo, decalGeo);
+  const groundY = (x, z) => ground.heightAt(x, z);
+  const propY = (p) => (p.y === undefined || p.y === null ? groundY(p.x, p.z) : p.y);
+
+  /**
+   * Per-instance tint: a random drift about white per tree, times a slow
+   * spatial drift shared by a whole stand, so a hillside of spruce is subtly
+   * bluer than the next one over and no two neighbours are twins.
+   */
+  function tintFrom(r, x, z, spread, sat, o) {
+    const stand = valueNoise(x / 190, z / 190, (seed | 0) + 4242);
+    const v = (0.84 + r() * 0.30) * (1 + stand * 0.10);
+    const h = (r() * 2 - 1) * spread + stand * spread * 0.8;
+    o.r = clamp(v * (1 + h), 0.35, 1.5);
+    o.g = clamp(v * (1 + h * 0.35 * sat), 0.35, 1.5);
+    o.b = clamp(v * (1 - h * 0.9), 0.35, 1.5);
+  }
+
+  t0 = clock.now();
+  const treeStores = [], bushStores = [];
+  for (let v = 0; v < TREES; v++) {
+    const d = descs[v];
+    const r = mulberry((seed | 0) + 101 + v * 977);
+    const conifer = d.kind === 'conifer' || d.name === 'pine';
+    treeStores.push(makeStore(treeIdx[v], (p, o) => {
+      const s = p.scale || 1;
+      o.x = p.x; o.z = p.z;
+      o.y = propY(p) - 0.05 * s;
+      o.rot = p.rot || 0;
+      o.sy = s * (0.90 + r() * 0.2);
+      o.sx = o.sz = s * (0.90 + r() * 0.2);
+      // Conifers grow plumb; broadleaves lean toward the light, a few degrees.
+      const lean = conifer ? 0.025 : 0.07;
+      o.lx = (r() * 2 - 1) * lean; o.lz = (r() * 2 - 1) * lean;
+      tintFrom(r, p.x, p.z, conifer ? 0.10 : 0.16, 1, o);
+    }, true));
+  }
+  for (let v = 0; v < BUSHES; v++) {
+    const r = mulberry((seed | 0) + 211 + v * 577);
+    bushStores.push(makeStore(bushIdx[v], (p, o) => {
+      const s = p.scale || 1;
+      o.x = p.x; o.z = p.z;
+      o.y = propY(p) - 0.12 * s;
+      o.rot = p.rot || 0;
+      o.sy = s * (0.8 + r() * 0.4);
+      o.sx = o.sz = s * (0.85 + r() * 0.3);
+      o.lx = (r() * 2 - 1) * 0.08; o.lz = (r() * 2 - 1) * 0.08;
+      tintFrom(r, p.x, p.z, 0.18, 1, o);
+    }, true));
+  }
+  stats.buildMs.stores = Math.round(clock.now() - t0);
+
+  const treeFields = [];
+  for (let v = 0; v < TREES; v++) {
+    const st = treeStores[v];
+    const name = descs[v].name;
+    const near = makeField(st, { name: name + '.near', geometry: nearGeo[v], material: mats.near, maxRadius: MAX.near });
+    const mid = makeField(st, { name: name + '.mid', geometry: midGeo[v], material: mats.mid, maxRadius: MAX.mid, depthMaterial: depthMat });
+    const far = makeField(st, { name: name + '.far', geometry: impGeo[v], material: mats.far, maxRadius: MAX.far });
+    treeFields.push({ near, mid, far });
+  }
+  const bushFields = [];
+  for (let v = 0; v < BUSHES; v++) {
+    const st = bushStores[v];
+    const s = TREES + v;
+    const name = descs[s].name;
+    bushFields.push({
+      near: makeField(st, { name: name + '.near', geometry: nearGeo[s], material: mats.bushNear, maxRadius: MAX.near }),
+      mid: makeField(st, { name: name + '.mid', geometry: midGeo[s], material: mats.bushMid, maxRadius: MAX.mid }),
+      far: makeField(st, { name: name + '.far', geometry: impGeo[s], material: mats.bushFar, maxRadius: MAX.bushFar }),
+    });
+  }
+
+  // Rocks: three shapes, each at two resolutions.
+  const rnd = mulberry((seed | 0) ^ 0x51ed2f);
+  const shapes = [rockShape(rnd, ROCK_TONES[0]), rockShape(rnd, ROCK_TONES[1]), rockShape(rnd, ROCK_TONES[2])];
+  const rockNearGeo = shapes.map((sh) => rockGeometry(sh, 3));
+  const rockFarGeo = shapes.map((sh) => rockGeometry(sh, 1));
+  disposables.push(...rockNearGeo, ...rockFarGeo);
+  for (let v = 0; v < 3; v++) {
+    const r = mulberry((seed | 0) + 401 + v * 613);
+    const st = makeStore(rockIdx[v], (p, o) => {
+      const s = p.scale || 1;
+      o.x = p.x; o.z = p.z;
+      // Buried by a third of its height, so a boulder sits in the hillside
+      // instead of balancing on it.
+      o.y = propY(p) - 0.12 * s;
+      o.rot = p.rot || 0;
+      o.lx = (r() * 2 - 1) * 0.22; o.lz = (r() * 2 - 1) * 0.22;
+      o.sx = s * (0.85 + r() * 0.35);
+      o.sy = s * (0.80 + r() * 0.40);
+      o.sz = s * (0.85 + r() * 0.35);
+      tintFrom(r, p.x, p.z, 0.06, 0.3, o);
+    }, true);
+    makeField(st, { name: 'rock' + v + '.near', geometry: rockNearGeo[v], material: mats.rockNear, maxRadius: MAX.rockNear });
+    makeField(st, { name: 'rock' + v + '.far', geometry: rockFarGeo[v], material: mats.rockFar, maxRadius: MAX.rockFar });
+  }
+  {
+    const r = mulberry((seed | 0) + 733);
+    const st = makeStore(stoneIdx, (p, o) => {
+      const s = p.scale || 0.3;
+      o.x = p.x; o.z = p.z;
+      o.y = propY(p) - 0.10 * s;
+      o.rot = p.rot || 0;
+      o.lx = (r() * 2 - 1) * 0.3; o.lz = (r() * 2 - 1) * 0.3;
+      o.sx = s * (0.8 + r() * 0.4); o.sy = s * (0.6 + r() * 0.4); o.sz = s * (0.8 + r() * 0.4);
+      tintFrom(r, p.x, p.z, 0.06, 0.3, o);
+    }, true);
+    makeField(st, { name: 'stones', geometry: rockFarGeo[(seed | 0) % 3 === 0 ? 1 : 0], material: mats.stone, maxRadius: MAX.stone });
+  }
 
   // Where each lamp head actually hangs, in the pole's local +Z. Used to put
   // the light pool under the lamp rather than under the pole.
   const STREET_ARM = 1.86;
   const POLE_ARM = 0.50;
-
-  const groundY = (x, z) => ground.heightAt(x, z);
-  const propY = (p) => (p.y === undefined || p.y === null ? groundY(p.x, p.z) : p.y);
-
-  /** Warm/cool drift about white, so instanceColor tints without darkening. */
-  function tintFrom(r, spread, o) {
-    const v = 0.80 + r() * 0.42;
-    const h = (r() * 2 - 1) * spread;
-    o.r = clamp(v * (1 + h), 0.35, 1.45);
-    o.g = clamp(v * (1 + h * 0.30), 0.35, 1.45);
-    o.b = clamp(v * (1 - h * 0.85), 0.35, 1.45);
-  }
-
-  for (let v = 0; v < 3; v++) {
-    const sp = species[v];
-    const r = mulberry(seed + 101 + v * 977);
-    makeField({
-      name: 'trees' + v,
-      indices: treeIdx[v],
-      geometry: sp.geo,
-      material: foliageMat,
-      cull: CULL.tree,
-      tint: true,
-      place(p, o) {
-        const s = p.scale || 1;
-        o.x = p.x; o.z = p.z;
-        o.y = propY(p) - sp.sink * s;
-        o.rot = p.rot || 0;
-        // A little non-uniform stretch: two trees of the same species and the
-        // same scale should still not be the same tree.
-        o.sy = s * (0.88 + r() * 0.26);
-        o.sx = o.sz = s * (0.94 + r() * 0.14);
-        tintFrom(r, sp.hue, o);
-      },
-    });
-  }
-
-  for (let v = 0; v < 3; v++) {
-    const r = mulberry(seed + 401 + v * 613);
-    makeField({
-      name: 'rocks' + v,
-      indices: rockIdx[v],
-      geometry: rocks[v],
-      material: rockMat,
-      cull: CULL.rock,
-      tint: true,
-      place(p, o) {
-        const s = p.scale || 1;
-        o.x = p.x; o.z = p.z;
-        // Buried by a third of its radius, so a boulder sits in the hillside
-        // instead of balancing on it.
-        o.y = propY(p) - 0.32 * s;
-        o.rot = p.rot || 0;
-        o.sx = s * (0.90 + r() * 0.30);
-        o.sy = s * (0.85 + r() * 0.35);
-        o.sz = s * (0.90 + r() * 0.30);
-        tintFrom(r, 0.14, o);
-      },
-    });
-  }
+  const lrnd = mulberry((seed | 0) ^ 0x2f1a);
+  const streetGeo = streetlightBody(lrnd);
+  const poleGeo = polelightBody(lrnd);
+  const streetLampGeo = lampGeometry(0.56, 0.16, 0.34, 0, 6.92, 1.86, 0xc4c8cc, lrnd);
+  const poleLampGeo = lampGeometry(0.42, 0.14, 0.30, 0, 6.02, 0.50, 0xc4c8cc, lrnd);
+  const decalGeo = decalGeometry();
+  disposables.push(streetGeo, poleGeo, streetLampGeo, poleLampGeo, decalGeo);
 
   function lightPlace(p, o) {
     o.x = p.x; o.z = p.z;
@@ -666,96 +1022,144 @@ export function createProps(world, ground, opts = {}) {
     o.rot = p.rot || 0;
     o.sx = o.sy = o.sz = p.scale || 1;
   }
+  const fixed = (r) => ({ maxRadius: r });
 
-  const streetField = makeField({
-    name: 'streetlights', indices: streetIdx, geometry: streetGeo,
-    material: poleMat, cull: CULL.light, tint: false, place: lightPlace,
-  });
+  const streetField = makeField(makeStore(streetIdx, lightPlace, false),
+    { name: 'streetlights', geometry: streetGeo, material: poleMat, ...fixed(330) });
   if (streetField) shareInstances(streetField, streetLampGeo, lampMat, 'streetlamps');
-
-  const poleField = makeField({
-    name: 'polelights', indices: poleIdx, geometry: poleGeo,
-    material: poleMat, cull: CULL.light, tint: false, place: lightPlace,
-  });
+  const poleField = makeField(makeStore(poleIdx, lightPlace, false),
+    { name: 'polelights', geometry: poleGeo, material: poleMat, ...fixed(330) });
   if (poleField) shareInstances(poleField, poleLampGeo, lampMat, 'polelamps');
 
-  const poolField = makeField({
-    name: 'lightpools', indices: lightIdx, geometry: decalGeo,
-    material: poolMat, cull: CULL.pool, tint: false,
-    place(p, o) {
-      const s = p.scale || 1;
-      const arm = (p.type === 'streetlight' ? STREET_ARM : POLE_ARM) * s;
-      const rot = p.rot || 0;
-      // Local +Z under a Y rotation lands at (sin rot, cos rot).
-      o.x = p.x + Math.sin(rot) * arm;
-      o.z = p.z + Math.cos(rot) * arm;
-      // Lifted a hand's width and drawn without depth writes. Streetlights
-      // stand on graded verge beside a flat carriageway, so a flat quad is a
-      // good enough stand-in for a projected decal and costs one triangle pair.
-      o.y = groundY(o.x, o.z) + 0.10;
-      o.rot = rot;
-      o.sx = o.sy = o.sz = (p.type === 'streetlight' ? 7.4 : 5.6) * s;
-    },
-  });
-  if (poolField) { poolField.mesh.renderOrder = 3; poolField.mesh.visible = false; }
+  const poolField = makeField(makeStore(lightIdx, (p, o) => {
+    const s = p.scale || 1;
+    const arm = (p.type === 'streetlight' ? STREET_ARM : POLE_ARM) * s;
+    const rot = p.rot || 0;
+    // Local +Z under a Y rotation lands at (sin rot, cos rot).
+    o.x = p.x + Math.sin(rot) * arm;
+    o.z = p.z + Math.cos(rot) * arm;
+    // Lifted a hand's width and drawn without depth writes. Streetlights
+    // stand on graded verge beside a flat carriageway, so a flat quad is a
+    // good enough stand-in for a projected decal and costs one triangle pair.
+    o.y = groundY(o.x, o.z) + 0.10;
+    o.rot = rot;
+    o.sx = o.sy = o.sz = (p.type === 'streetlight' ? 7.4 : 5.6) * s;
+  }, false), { name: 'lightpools', geometry: decalGeo, material: poolMat, ...fixed(260), renderOrder: 3 });
+  if (poolField) poolField.mesh.visible = false;
 
   let shadeField = null;
   if (wantShade) {
-    shadeField = makeField({
-      name: 'treeshadows', indices: treeAll, geometry: decalGeo,
-      material: shadeMat, cull: CULL.shade, tint: false,
-      place(p, o) {
-        const sp = species[clamp(p.variant | 0, 0, 2)];
-        const s = p.scale || 1;
-        o.x = p.x; o.z = p.z;
-        o.y = propY(p) + 0.07;
-        o.rot = p.rot || 0;
-        o.sx = o.sy = o.sz = sp.spread * 0.46 * s;
-      },
-    });
-    if (shadeField) shadeField.mesh.renderOrder = 2;
+    shadeField = makeField(makeStore(shadeIdx, (p, o) => {
+      const d = descs[clamp(p.variant | 0, 0, TREES - 1)];
+      const s = p.scale || 1;
+      o.x = p.x; o.z = p.z;
+      o.y = propY(p) + 0.07;
+      o.rot = p.rot || 0;
+      o.sx = o.sy = o.sz = d.spread * 0.55 * s;
+    }, false), { name: 'treeshadows', geometry: decalGeo, material: shadeMat, ...fixed(130), renderOrder: 2 });
+  }
+
+  // -------------------------------------------------------------------------
+  // Quality
+  // -------------------------------------------------------------------------
+
+  let tier = 'high';
+  let night = 0;
+  let windTime = 0;
+  let primed = false;
+
+  /** Set a level's fade band: in from `a`, out at `b` (either may be absent). */
+  function band(u, a, b) {
+    const v = u.value;
+    if (a > 0) { v.x = a * (1 - BAND * 0.5); v.y = a * (1 + BAND * 0.5); } else { v.x = -2; v.y = -1; }
+    if (b > 0) { v.z = b * (1 - BAND * 0.5); v.w = b * (1 + BAND * 0.5); } else { v.z = 1e6; v.w = 2e6; }
+  }
+
+  function applyTier() {
+    const T = TIERS[tier];
+    const n = T.near * range, m = T.mid * range, f = T.far * range, bf = T.bushFar * range;
+    band(U.near, 0, n); band(U.mid, n, m); band(U.far, m, f);
+    band(U.bushNear, 0, n); band(U.bushMid, n, m); band(U.bushFar, m, bf);
+    band(U.rockNear, 0, T.rockNear * range); band(U.rockFar, T.rockNear * range, T.rockFar * range);
+    band(U.stone, 0, T.stone * range);
+    // A field keeps everything out to the far side of its outer band.
+    const reach = (x) => x * (1 + BAND * 0.5);
+    for (const f2 of fields) {
+      // Small fields rebuild more often and carry a smaller margin; a near
+      // tree is eight hundred triangles and every metre of margin is paid
+      // for all the way round the circle.
+      f2.step = clamp(f2.spec.maxRadius * range * 0.12, 8, 24);
+      const name = f2.name;
+      if (name.endsWith('.near')) f2.radius = reach(name.startsWith('rock') ? T.rockNear * range : n);
+      else if (name.endsWith('.mid')) f2.radius = reach(m);
+      else if (name.endsWith('.far')) {
+        f2.radius = reach(name.startsWith('rock') ? T.rockFar * range
+          : f2.mesh.material === mats.bushFar ? bf : f);
+      } else if (name === 'stones') f2.radius = reach(T.stone * range);
+      else f2.radius = f2.spec.maxRadius * range * (tier === 'low' ? 0.6 : tier === 'medium' ? 0.8 : 1);
+      if (f2.step > f2.radius * 0.3) f2.step = Math.max(8, f2.radius * 0.3);
+      f2.dirty = true;
+      // A level with no radius is switched off outright rather than drawn
+      // with every instance collapsed.
+      f2.mesh.visible = f2.radius > 0 && !(f2.name === 'lightpools' || f2.name === 'treeshadows');
+    }
+    setNight(night);   // pools and contact shadows own their own visibility
+    for (const tf of treeFields) {
+      if (tf.mid) tf.mid.mesh.castShadow = T.shadows;
+      if (tf.near) tf.near.mesh.receiveShadow = T.shadows;
+      if (tf.mid) tf.mid.mesh.receiveShadow = false;
+    }
+  }
+
+  /**
+   * 'low' | 'medium' | 'high' ('ultra' is 'high'), or a 0..1 number. This is
+   * what main.js calls with settings.quality.
+   */
+  function setQuality(q) {
+    tier = tierOf(q);
+    applyTier();
+    setNight(night);   // shadow decals are gated on quality
   }
 
   // -------------------------------------------------------------------------
   // Per-frame
   // -------------------------------------------------------------------------
 
-  let quality = 1;
-  let night = 0;
-  let cursorField = 0;
-  let primed = false;
-
-  function markAll() {
-    for (let i = 0; i < fields.length; i++) fields[i].dirty = true;
-  }
-
   function update(cameraPos, dt) {
     if (!cameraPos) return;
     const cx = cameraPos.x, cz = cameraPos.z;
+    const step = dt > 0 && dt < 0.25 ? dt : 0;
+    windTime += step;
+    // Wrapped well before float precision matters to a sine in the shader.
+    if (windTime > 3600) windTime -= 3600;
+    windU.value.w = windTime;
 
-    // A frame that has already overrun is the worst possible place to spend
-    // another few tenths of a millisecond rebuilding instance buffers, and the
-    // rebuild margin gives us plenty of frames to catch up in. But the skip has
-    // to be a deferral, not a veto: a machine that stays under 20 fps would
-    // otherwise never rebuild at all, and the visible set would stay pinned
-    // where the camera was when the frame rate went. Past STALE_LIMIT the set
-    // is genuinely wrong, so it gets rebuilt whatever the frame cost.
-    const late = primed && dt > 0.05;
-    let budget = primed ? 1 : fields.length;
-    primed = true;
+    if (!primed) {
+      primed = true;
+      for (let i = 0; i < fields.length; i++) if (fields[i].mesh.visible) fields[i].refresh(cx, cz);
+      return;
+    }
 
-    for (let n = 0; n < fields.length && budget > 0; n++) {
-      const f = fields[cursorField];
-      cursorField = cursorField + 1 === fields.length ? 0 : cursorField + 1;
-      if (!f.mesh.visible) continue;
-      if (!f.dirty) {
+    // The stalest field refreshes, and a second one too if it is already
+    // past its margin — which only happens at very high speed or after a stall.
+    // A frame that has already overrun defers anything short of genuinely wrong.
+    const late = dt > 0.05;
+    focusU.value.set(cx, cameraPos.y, cz);
+    for (let pass = 0; pass < 3; pass++) {
+      // Staleness in units of each field's own step: 1 means due, 1.5 means
+      // its margin is nearly spent.
+      let best = null, bestK = 0;
+      for (let i = 0; i < fields.length; i++) {
+        const f = fields[i];
+        if (!f.mesh.visible) continue;
         const dx = cx - f.atX, dz = cz - f.atZ;
-        const d2 = dx * dx + dz * dz;
-        if (d2 < REBUILD_STEP * REBUILD_STEP) continue;
-        if (late && d2 < STALE_LIMIT * STALE_LIMIT) continue;
+        const k = f.dirty ? 1e9 : (dx * dx + dz * dz) / (f.step * f.step);
+        if (k > bestK) { bestK = k; best = f; }
       }
-      f.refresh(cx, cz);
-      budget--;
+      if (!best || bestK < 1) break;
+      if (late && bestK < 2.25) break;
+      best.refresh(cx, cz);
+      if (bestK < 2.25) break;
     }
   }
 
@@ -763,9 +1167,7 @@ export function createProps(world, ground, opts = {}) {
   function setNight(t) {
     night = clamp(t, 0, 1);
     const lit = smoothstep(0.18, 0.72, night);
-
     lampMat.emissiveIntensity = lit * 2.6;
-
     if (poolField) {
       poolMat.opacity = lit * 0.85;
       const on = poolMat.opacity > 0.01;
@@ -774,28 +1176,37 @@ export function createProps(world, ground, opts = {}) {
     }
     if (shadeField) {
       // Sun shadows go with the sun. Leaving them on after dark would paint
-      // black discs under trees lit only by a streetlight.
-      shadeMat.opacity = (1 - lit) * 0.40 * (quality >= 0.5 ? 1 : 0);
+      // black discs under trees lit only by a streetlight. With real shadow
+      // maps at 'high' the disc is only the contact darkening under a crown.
+      const k = tier === 'high' ? 0.30 : tier === 'medium' ? 0.42 : 0;
+      shadeMat.opacity = (1 - lit) * k;
       const on = shadeMat.opacity > 0.01;
       if (on && !shadeField.mesh.visible) shadeField.dirty = true;
       shadeField.mesh.visible = on;
     }
   }
 
-  /**
-   * 0 = the cheapest thing that still reads as a world, 1 = everything.
-   * Also accepts the tier names the other render modules take ('low',
-   * 'medium', 'high', 'ultra'), because that is what main.js actually passes.
-   */
-  function setQuality(q) {
-    const t = Number.isFinite(q) ? q : QUALITY_TIERS[q];
-    quality = clamp(Number.isFinite(t) ? t : 1, 0, 1);
-    for (let i = 0; i < fields.length; i++) {
-      const f = fields[i];
-      f.radius = lerp(f.cull * 0.42, f.cull, quality) * range;
+  /** Wind strength, 0 (still) to ~2 (a gale). main.js can tie it to weather. */
+  function setWind(strength, dirX, dirZ) {
+    windU.value.z = clamp(strength, 0, 3);
+    if (dirX !== undefined && dirZ !== undefined) {
+      const l = Math.hypot(dirX, dirZ) || 1;
+      windU.value.x = dirX / l; windU.value.y = dirZ / l;
     }
-    markAll();
-    setNight(night);   // shadow decals are gated on quality
+  }
+
+  /** What is drawn right now: instances and triangles, per level and in total. */
+  function drawn() {
+    const r = { instances: 0, triangles: 0, calls: 0, byLevel: { near: 0, mid: 0, far: 0, other: 0 } };
+    for (const f of fields) {
+      if (!f.mesh.visible || f.mesh.count === 0) continue;
+      const tris = f.mesh.count * f.tris;
+      r.instances += f.mesh.count; r.triangles += tris; r.calls++;
+      const lvl = f.name.endsWith('.near') ? 'near' : f.name.endsWith('.mid') ? 'mid' : f.name.endsWith('.far') ? 'far' : 'other';
+      r.byLevel[lvl] += tris;
+      for (const e of f.extras) { r.triangles += e.count * f.tris; r.calls++; }
+    }
+    return r;
   }
 
   function dispose() {
@@ -805,9 +1216,7 @@ export function createProps(world, ground, opts = {}) {
       f.mesh.dispose();
       // Extras are NOT disposed: InstancedMesh.dispose() makes the renderer
       // free whatever instanceMatrix the mesh is holding, and an extra is
-      // holding its owner's. Removing it is enough — the owner's dispose above
-      // released the one buffer they share, and the geometry and material it
-      // uses are in `disposables`.
+      // holding its owner's. Removing it is enough.
       for (let k = 0; k < f.extras.length; k++) group.remove(f.extras[k]);
       f.extras.length = 0;
     }
@@ -817,11 +1226,11 @@ export function createProps(world, ground, opts = {}) {
     group.clear();
   }
 
-  setQuality(opts.quality === undefined ? 1 : opts.quality);
+  setQuality(opts.quality === undefined ? 'high' : opts.quality);
   setNight(opts.night === undefined ? 0 : opts.night);
 
-  const stats = { fields: fields.length, meshes: group.children.length, instances: {}, capacity: {} };
-  for (const f of fields) { stats.instances[f.name] = f.total; stats.capacity[f.name] = f.cap; }
+  stats.fields = fields.length;
+  stats.meshes = group.children.length;
 
-  return { group, update, setNight, setQuality, dispose, stats };
+  return { group, update, setNight, setQuality, setWind, dispose, stats, drawn, tiers: TIERS };
 }

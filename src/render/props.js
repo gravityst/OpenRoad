@@ -57,7 +57,7 @@ import {
   mulberry, clamp, lerp, smoothstep, valueNoise, valueNoise3, tileFbm, tileCells,
 } from '../world/noise.js';
 import {
-  paintAtlas, buildSpecies, meshFrom, rasterImpostors, SPECIES, ATLAS_W, ATLAS_H,
+  paintAtlas, buildSpecies, meshFrom, rasterImpostors, SPECIES, ATLAS_W, ATLAS_H, CELLS,
 } from './foliage.js';
 
 // How far the camera may travel before a field's visible set is stale. Every
@@ -166,6 +166,57 @@ const LOD_FRAG = `
 }
 `;
 
+// ---------------------------------------------------------------------------
+// Biome colour (world/biomes.js)
+// ---------------------------------------------------------------------------
+// The biome field is baked into a small texture over the map (R desert, G
+// snow, B autumn, A coast) and every plant reads it at its own base, in the
+// vertex shader, once. What it does with it is on the FOLIAGE only — a pixel
+// greener than it is red — so trunks and branches keep their bark:
+//
+//   autumn  each tree its own colour from gold through orange to red, by a
+//           hash of where it stands, one in ten still hanging on to green;
+//           brightened half as much again, because a canopy in autumn is.
+//   desert  dusty grey-green: sage, not lawn.
+//   snow    whatever faces up is white — leaves, branches, the tops of
+//           rocks — so a spruce wears its snow in layers.
+//
+// Colours are LINEAR (the shader works after the sRGB decode); the snow is
+// the same albedo the ground's snow is painted at.
+const BIO_VERT_PARS = `
+uniform sampler2D orBiome;
+uniform vec2 orBiomeK;     // 1 / map span, strength (0 for palms and cacti)
+varying vec4 vOrBio;
+varying float vOrHue;
+varying float vOrUp;
+`;
+const BIO_VERT = `
+vOrBio = texture2D( orBiome, orBase.xz * orBiomeK.x + 0.5 ) * orBiomeK.y;
+vOrHue = fract( sin( dot( orBase.xz, vec2( 12.9898, 78.233 ) ) ) * 43758.5453 );
+vOrUp = normalize( mat3( instanceMatrix ) * objectNormal ).y;
+`;
+const BIO_FRAG_PARS = `
+varying vec4 vOrBio;
+varying float vOrHue;
+varying float vOrUp;
+vec3 orBiomeLeaf( vec3 c ) {
+  float lum = dot( c, vec3( 0.2126, 0.7152, 0.0722 ) );
+  float leaf = smoothstep( 0.0, 0.03, c.g - c.r );
+  vec3 aut = vOrHue < 0.4 ? mix( vec3( 1.0, 0.60, 0.07 ), vec3( 1.0, 0.30, 0.03 ), vOrHue / 0.4 )
+                          : mix( vec3( 1.0, 0.30, 0.03 ), vec3( 0.85, 0.07, 0.035 ), ( vOrHue - 0.4 ) / 0.6 );
+  aut *= lum * 1.7 / max( 0.05, dot( aut, vec3( 0.2126, 0.7152, 0.0722 ) ) );
+  float green = step( 0.9, fract( vOrHue * 7.13 ) );
+  c = mix( c, aut, vOrBio.b * leaf * ( 1.0 - green * 0.7 ) );
+  c = mix( c, vec3( lum * 1.3, lum * 1.18, lum * 0.78 ), vOrBio.r * leaf * 0.8 );
+  return c;
+}
+vec3 orBiomeSnow( vec3 c, float up ) {
+  // Only what faces well up holds snow, and never all of it: a conifer's
+  // crown normals all lean upward, and from 0.1 up the whole tree went white.
+  return mix( c, vec3( 0.50, 0.55, 0.63 ), vOrBio.g * smoothstep( 0.45, 0.85, up ) * 0.8 );
+}
+`;
+
 // Alpha-tested foliage loses coverage down the mip chain — a mip averages leaf
 // with sky and the alpha test then throws the average away — so a tree thins to
 // a skeleton exactly as it gets far enough to need the density most. Scaling
@@ -238,6 +289,8 @@ function canopyLambert() {
 // tangent-space normal of both.
 const ROCK_FRAG_PARS = `
 uniform sampler2D orRockTex;
+uniform sampler2D orBiome;
+uniform vec2 orBiomeK;
 varying vec3 vRkPos;
 varying vec3 vRkN;
 vec3 orRkW;
@@ -251,6 +304,10 @@ const ROCK_FRAG_ALBEDO = `
   vec3 p = vRkPos * ( 1.0 / 1.9 );
   orRkT = texture2D( orRockTex, p.zy ) * orRkW.x + texture2D( orRockTex, p.xz ) * orRkW.y + texture2D( orRockTex, p.xy ) * orRkW.z;
   diffuseColor.rgb *= ( 0.62 + 0.76 * orRkT.r ) * ( 1.0 - orRkT.g * 0.6 );
+  // Rust-red in the canyon, snow-capped in the peaks.
+  vec4 orB = texture2D( orBiome, vRkPos.xz * orBiomeK.x + 0.5 ) * orBiomeK.y;
+  diffuseColor.rgb *= mix( vec3( 1.0 ), vec3( 1.32, 0.78, 0.55 ), orB.r );
+  diffuseColor.rgb = mix( diffuseColor.rgb, vec3( 0.54, 0.59, 0.67 ), orB.g * smoothstep( 0.35, 0.8, n.y ) * 0.9 );
 }
 `;
 const ROCK_FRAG_NORMAL = `
@@ -332,24 +389,25 @@ function inject(material, kind, uniforms) {
     if (v.indexOf('#include <project_vertex>') < 0 || v.indexOf('#include <begin_vertex>') < 0) return;
 
     if (kind === 'canopy') {
-      v = v.replace('#include <common>', `#include <common>\n${LOD_PARS}\n${WIND_PARS}`)
-        .replace('#include <begin_vertex>', `#include <begin_vertex>\n${LOD_VERT}\n${WIND_VERT}`)
+      v = v.replace('#include <common>', `#include <common>\n${LOD_PARS}\n${WIND_PARS}\n${BIO_VERT_PARS}`)
+        .replace('#include <begin_vertex>', `#include <begin_vertex>\n${LOD_VERT}\n${WIND_VERT}\n${BIO_VERT}`)
         .replace('#include <project_vertex>', PROJECT_WIND)
         .replace('#include <worldpos_vertex>', WORLDPOS_WIND);
-      f = f.replace('#include <common>', `#include <common>\n${LOD_FRAG_PARS}`)
+      f = f.replace('#include <common>', `#include <common>\n${LOD_FRAG_PARS}\n${BIO_FRAG_PARS}`)
         .replace('#include <map_fragment>', `#include <map_fragment>\n${LOD_FRAG}\n${ALPHA_MIP}`)
+        .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.rgb = orBiomeSnow( orBiomeLeaf( diffuseColor.rgb ), vOrUp );')
         // The canopy normal is the normal of the crown, not of the card, so it
         // must not flip with the side of the card that happens to face us.
         .replace('#include <normal_fragment_begin>', '#include <normal_fragment_begin>\n#ifdef DOUBLE_SIDED\nnormal *= faceDirection;\n#endif')
         .replace('#include <lights_lambert_pars_fragment>', canopyLambert());
     } else if (kind === 'impostor') {
-      v = v.replace('#include <common>', `#include <common>\n${LOD_PARS}\nvarying vec3 vOrRight;\nvarying vec3 vOrFwd;`)
+      v = v.replace('#include <common>', `#include <common>\n${LOD_PARS}\n${BIO_VERT_PARS}\nvarying vec3 vOrRight;\nvarying vec3 vOrFwd;`)
         // Two views of every species, picked per tree by a hash of its position.
         .replace('#include <uv_vertex>', `#include <uv_vertex>
 #ifdef USE_MAP
 vMapUv.y += step( 0.5, fract( sin( dot( vec2( instanceMatrix[ 3 ][ 0 ], instanceMatrix[ 3 ][ 2 ] ), vec2( 12.9898, 78.233 ) ) ) * 43758.5453 ) ) * 0.5;
 #endif`)
-        .replace('#include <begin_vertex>', `#include <begin_vertex>\n${LOD_VERT}`)
+        .replace('#include <begin_vertex>', `#include <begin_vertex>\n${LOD_VERT}\n${BIO_VERT}`)
         .replace('#include <project_vertex>', `
 float orSx = length( vec3( instanceMatrix[ 0 ][ 0 ], instanceMatrix[ 0 ][ 1 ], instanceMatrix[ 0 ][ 2 ] ) );
 float orSy = length( vec3( instanceMatrix[ 1 ][ 0 ], instanceMatrix[ 1 ][ 1 ], instanceMatrix[ 1 ][ 2 ] ) );
@@ -362,8 +420,9 @@ vOrRight = orRight; vOrFwd = orTo;
 vec4 mvPosition = modelViewMatrix * vec4( orBase + orRight * ( position.x * orSx ) + vec3( 0.0, position.y * orSy, 0.0 ), 1.0 );
 gl_Position = projectionMatrix * mvPosition;
 ${LOD_COLLAPSE}`);
-      f = f.replace('#include <common>', `#include <common>\n${LOD_FRAG_PARS}\nuniform sampler2D orNormalMap;\nvarying vec3 vOrRight;\nvarying vec3 vOrFwd;`)
+      f = f.replace('#include <common>', `#include <common>\n${LOD_FRAG_PARS}\n${BIO_FRAG_PARS}\nuniform sampler2D orNormalMap;\nvarying vec3 vOrRight;\nvarying vec3 vOrFwd;`)
         .replace('#include <map_fragment>', `#include <map_fragment>\n${LOD_FRAG}\n${ALPHA_MIP}`)
+        .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.rgb = orBiomeLeaf( diffuseColor.rgb );')
         // The normal map is in the billboard's own frame: x right, y up, z to
         // the camera. Rebuild it in world space, then take it to view space.
         .replace('#include <normal_fragment_begin>', `#include <normal_fragment_begin>
@@ -371,6 +430,7 @@ ${LOD_COLLAPSE}`);
   vec3 orNT = texture2D( orNormalMap, vMapUv ).xyz * 2.0 - 1.0;
   vec3 orNW = orNT.x * vOrRight + vec3( 0.0, orNT.y, 0.0 ) + orNT.z * vOrFwd;
   normal = normalize( ( viewMatrix * vec4( orNW, 0.0 ) ).xyz );
+  diffuseColor.rgb = orBiomeSnow( diffuseColor.rgb, normalize( orNW ).y );
 }`)
         .replace('#include <lights_lambert_pars_fragment>', canopyLambert());
     } else {
@@ -622,6 +682,86 @@ function impostorGeometry(q, s, S) {
   return g;
 }
 
+
+// ---------------------------------------------------------------------------
+// The biomes' own plants
+// ---------------------------------------------------------------------------
+// Written as foliage.js DESCRIPTIONS (tubes and cards), so each gets the same
+// near, mid and impostor levels, wind and canopy lighting as every tree,
+// without a line of foliage.js changing. Instances turn and scale them.
+
+const n3 = (a) => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
+
+/**
+ * A coconut-type palm: a slender trunk curving away from upright, ringed
+ * pale (the birch bark's horizontal marks read as a palm's leaf scars), and
+ * eleven long arching fronds cut from the fir spray, brightened to a sunlit
+ * yellow-green. 8.5 m to the crown.
+ */
+function palmDesc(rnd) {
+  const D = { kind: 'palm', tubes: [], cards: [], height: 0, spread: 0, sink: 0.3 };
+  const H = 8.5, n = 8;
+  const pts = [], radii = [];
+  for (let k = 0; k <= n; k++) {
+    const t = k / n;
+    pts.push([1.25 * t * t, -0.3 + (H + 0.3) * t, 0]);
+    radii.push(0.21 * (1 - 0.32 * t) + 0.08 * smoothstep(0.18, 0, t));
+  }
+  D.tubes.push({ pts, radii, sides: 7, midSides: 5, bark: 1, rgb: [0.80, 0.70, 0.56], mid: true });
+  const top = pts[n];
+  const F = 11;
+  const phase = rnd() * 6.28;
+  for (let f = 0; f < F; f++) {
+    const a = phase + (f / F) * Math.PI * 2 + (rnd() - 0.5) * 0.3;
+    const d = [Math.cos(a), 0, Math.sin(a)];
+    const L = 4.1 + rnd() * 1.1;
+    const base = [top[0] + d[0] * 0.18, top[1] - 0.12, top[2] + d[2] * 0.18];
+    D.cards.push({
+      type: 'frond', base, d, L, W: 1.45 + rnd() * 0.3,
+      rise: 0.5 + rnd() * 0.25, droop: 1.0 + rnd() * 0.35, fold: 0.45, segs: 3,
+      cell: CELLS.fir, rgb: [1.45, 1.5, 0.95],
+      shade: (q) => {
+        const r = [q[0] - top[0], 0, q[2] - top[2]];
+        const rl = Math.hypot(r[0], r[2]);
+        return [n3([r[0] * 0.8, 0.9, r[2] * 0.8]), lerp(0.62, 1.0, clamp(rl / 4, 0, 1))];
+      },
+      mid: f % 2 === 0, midScale: [1.05, 1.45],
+    });
+  }
+  D.height = H + 1;
+  D.spread = 4.6;
+  return D;
+}
+
+/**
+ * A saguaro-type cactus: a ribbed column with a domed top and two or three
+ * arms that go out and turn up. The furrowed bark cell's vertical ridges,
+ * tinted green, are the ribs. 5.2 m tall.
+ */
+function cactusDesc(rnd) {
+  const D = { kind: 'cactus', tubes: [], cards: [], height: 0, spread: 0, sink: 0.2 };
+  const R = 0.36;
+  const rgb = [0.50, 1.22, 0.46];
+  const prof = [[-0.3, 1], [0.6, 1], [1.8, 0.98], [3.0, 0.95], [4.1, 0.92], [4.7, 0.84], [5.0, 0.66], [5.15, 0.36], [5.22, 0.04]];
+  D.tubes.push({ pts: prof.map((q) => [0, q[0], 0]), radii: prof.map((q) => R * q[1]),
+    sides: 10, midSides: 6, bark: 0, rgb, mid: true });
+  const arms = 2 + (rnd() < 0.5 ? 1 : 0);
+  const phase = rnd() * 6.28;
+  for (let k = 0; k < arms; k++) {
+    const h = 1.8 + k * 0.7 + rnd() * 0.4;
+    const a = phase + k * 2.3 + (rnd() - 0.5) * 0.5;
+    const dx = Math.cos(a), dz = Math.sin(a);
+    const up = 1.2 + rnd() * 1.0;
+    const out = [[0.15, 0], [0.5, 0.04], [0.78, 0.22], [0.9, 0.55], [0.92, up * 0.6], [0.92, up], [0.92, up + 0.13], [0.92, up + 0.19]];
+    const r = [0.2, 0.2, 0.2, 0.2, 0.19, 0.18, 0.11, 0.02];
+    D.tubes.push({ pts: out.map((q) => [dx * q[0], h + q[1], dz * q[0]]), radii: r,
+      sides: 8, midSides: 5, bark: 0, rgb, mid: true });
+  }
+  D.height = 5.2;
+  D.spread = 1.2;
+  return D;
+}
+
 // ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
@@ -632,6 +772,7 @@ export function createProps(world, ground, opts = {}) {
 
   const half = world.half;
   const seed = opts.seed === undefined ? world.seed : opts.seed;
+  const groundY0 = (x, z) => ground.heightAt(x, z);
   const range = opts.range === undefined ? 1 : opts.range;
   const wantShade = opts.contactShadows !== false;
 
@@ -898,6 +1039,7 @@ export function createProps(world, ground, opts = {}) {
   const treeIdx = Array.from({ length: TREES }, () => []);
   const bushIdx = Array.from({ length: BUSHES }, () => []);
   const rockIdx = [[], [], []];
+  const palmIdx = [], cactusIdx = [];
   const stoneIdx = [];
   const streetIdx = [];
   const poleIdx = [];
@@ -909,6 +1051,8 @@ export function createProps(world, ground, opts = {}) {
     else if (p.type === 'bush') bushIdx[clamp(p.variant | 0, 0, BUSHES - 1)].push(i);
     else if (p.type === 'rock') rockIdx[clamp(p.variant | 0, 0, 2)].push(i);
     else if (p.type === 'stone') stoneIdx.push(i);
+    else if (p.type === 'palm') palmIdx.push(i);
+    else if (p.type === 'cactus') cactusIdx.push(i);
     else if (p.type === 'streetlight') { streetIdx.push(i); lightIdx.push(i); }
     else if (p.type === 'polelight') { poleIdx.push(i); lightIdx.push(i); }
   }
@@ -924,8 +1068,19 @@ export function createProps(world, ground, opts = {}) {
 
   t0 = clock.now();
   const descs = buildSpecies(seed | 0);
+  // The palm and the cactus ride on the end of the species list, after the
+  // bushes, so every index foliage.js hands out is unchanged.
+  const PALM = descs.length, CACTUS = descs.length + 1;
+  {
+    const pr = mulberry((seed | 0) + 8807);
+    const palm = palmDesc(pr); palm.name = 'palm';
+    const cactus = cactusDesc(pr); cactus.name = 'cactus';
+    descs.push(palm, cactus);
+  }
   const nearGeo = descs.map((d) => meshFrom(d, 'near'));
   const midGeo = descs.map((d) => meshFrom(d, 'mid'));
+  // A cactus does not sway.
+  for (const g2 of [nearGeo[CACTUS], midGeo[CACTUS]]) g2.getAttribute('wind').array.fill(0);
   stats.buildMs.species = Math.round(clock.now() - t0);
 
   t0 = clock.now();
@@ -954,21 +1109,45 @@ export function createProps(world, ground, opts = {}) {
     rockNear: lodU(-2, -1, 1e6, 2e6), rockFar: lodU(-2, -1, 1e6, 2e6), stone: lodU(-2, -1, 1e6, 2e6),
   };
 
-  const canopyMat = (lod) => inject(new THREE.MeshLambertMaterial({
+  // The biome field over the map, for the canopy, impostor and rock shaders
+  // (BIO_VERT above). 256 texels over 4 km is 16 m a texel, finer than any
+  // biome border by an order of magnitude. A world with no biome field gets
+  // a single empty texel, and every plant stays as it was.
+  const bioTex = (() => {
+    const b = world.biomes;
+    const k = b && b.bake ? b.bake(256, groundY0) : { px: new Uint8Array(4), size: 1 };
+    const t = new THREE.DataTexture(k.px, k.size, k.size, THREE.RGBAFormat);
+    t.colorSpace = THREE.NoColorSpace;
+    t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
+    t.magFilter = THREE.LinearFilter;
+    t.minFilter = THREE.LinearFilter;
+    t.generateMipmaps = false;
+    t.needsUpdate = true;
+    return t;
+  })();
+  disposables.push(bioTex);
+  const bioU = { value: bioTex };
+  const bioOn = { value: new THREE.Vector2(1 / (2 * half), 1) };
+  const bioOff = { value: new THREE.Vector2(1 / (2 * half), 0) };
+
+  const canopyMat = (lod, bk = bioOn) => inject(new THREE.MeshLambertMaterial({
     vertexColors: true, map: atlas, alphaTest: 0.5, side: THREE.DoubleSide,
-  }), 'canopy', { orLod: lod, orWind: windU, orFocus: focusU });
-  const impostorMat = (lod) => inject(new THREE.MeshLambertMaterial({
+  }), 'canopy', { orLod: lod, orWind: windU, orFocus: focusU, orBiome: bioU, orBiomeK: bk });
+  const impostorMat = (lod, bk = bioOn) => inject(new THREE.MeshLambertMaterial({
     map: impAlbedo, alphaTest: 0.5, side: THREE.DoubleSide,
-  }), 'impostor', { orLod: lod, orNormalMap: { value: impNormal }, orFocus: focusU });
+  }), 'impostor', { orLod: lod, orNormalMap: { value: impNormal }, orFocus: focusU, orBiome: bioU, orBiomeK: bk });
   const rockTex = rockTexture((seed | 0) + 77);
   disposables.push(rockTex);
   const rockMat = (lod) => inject(new THREE.MeshLambertMaterial({ vertexColors: true }), 'rock',
-    { orLod: lod, orFocus: focusU, orRockTex: { value: rockTex } });
+    { orLod: lod, orFocus: focusU, orRockTex: { value: rockTex }, orBiome: bioU, orBiomeK: bioOn });
 
   const mats = {
     near: canopyMat(U.near), mid: canopyMat(U.mid), far: impostorMat(U.far),
     bushNear: canopyMat(U.bushNear), bushMid: canopyMat(U.bushMid), bushFar: impostorMat(U.bushFar),
     rockNear: rockMat(U.rockNear), rockFar: rockMat(U.rockFar), stone: rockMat(U.stone),
+    // Palms and cacti share the trees' distances but not their recolouring:
+    // a cactus is green BECAUSE it is in the desert.
+    exNear: canopyMat(U.near, bioOff), exMid: canopyMat(U.mid, bioOff), exFar: impostorMat(U.far, bioOff),
   };
   // The depth pass sees the mid level's own LOD uniform only to satisfy the
   // shader's declarations; OR_SHADOW switches the collapse off, because the
@@ -1057,6 +1236,28 @@ export function createProps(world, ground, opts = {}) {
     const far = makeField(st, { name: name + '.far', geometry: impGeo[v], material: mats.far, maxRadius: MAX.far });
     treeFields.push({ near, mid, far });
   }
+  // Palms and cacti: fields like the trees', so they cast shadows and hand
+  // over between levels exactly as trees do.
+  for (const [ex, idx, lean] of [[PALM, palmIdx, 0.05], [CACTUS, cactusIdx, 0.02]]) {
+    const r = mulberry((seed | 0) + 131 + ex * 977);
+    const st = makeStore(idx, (p, o) => {
+      const s2 = p.scale || 1;
+      o.x = p.x; o.z = p.z;
+      o.y = propY(p) - 0.05 * s2;
+      o.rot = p.rot || 0;
+      o.sy = s2 * (0.92 + r() * 0.16);
+      o.sx = o.sz = s2 * (0.92 + r() * 0.16);
+      o.lx = (r() * 2 - 1) * lean; o.lz = (r() * 2 - 1) * lean;
+      tintFrom(r, p.x, p.z, 0.07, 1, o);
+    }, true);
+    const name = descs[ex].name;
+    treeFields.push({
+      near: makeField(st, { name: name + '.near', geometry: nearGeo[ex], material: mats.exNear, maxRadius: MAX.near }),
+      mid: makeField(st, { name: name + '.mid', geometry: midGeo[ex], material: mats.exMid, maxRadius: MAX.mid, depthMaterial: depthMat }),
+      far: makeField(st, { name: name + '.far', geometry: impGeo[ex], material: mats.exFar, maxRadius: MAX.far }),
+    });
+  }
+
   const bushFields = [];
   for (let v = 0; v < BUSHES; v++) {
     const st = bushStores[v];

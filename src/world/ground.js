@@ -43,6 +43,19 @@ export const SURFACES = {
   grass:    { grip: 0.52, roughness: 0.30, rolling: 0.075, dust: 0.35, colour: 0x46592c },
   sand:     { grip: 0.44, roughness: 0.38, rolling: 0.115, dust: 1.0,  colour: 0x9a8a63 },
   rock:     { grip: 0.70, roughness: 0.62, rolling: 0.055, dust: 0.5,  colour: 0x5c5a55 },
+  // The biomes' own ground (world/biomes.js), never stamped by a road.
+  //
+  // Snow grips about like grass — 0.55 against 0.52 — because the players
+  // are kids on a keyboard and a snowfield should be somewhere to play, not a
+  // skating rink; what makes it read as snow is the white rooster tail (`dust`
+  // in `colour`, which main.js throws behind the wheels).
+  //
+  // Water is the sea's shallows. A car that drives in wades on a floor 45 cm
+  // under the surface, and a rolling resistance of 0.45 g — six times sand's —
+  // hauls it down to a paddle in a couple of seconds while the white spray
+  // says why. Nothing about the sea can strand a car or swallow it.
+  snow:     { grip: 0.55, roughness: 0.22, rolling: 0.070, dust: 0.9,  colour: 0xe9eef3 },
+  water:    { grip: 0.45, roughness: 0.20, rolling: 0.450, dust: 0.8,  colour: 0xd6e6ee },
 };
 const MAT_NAMES = ['asphalt', 'concrete', 'sidewalk', 'dirt', 'gravel', 'grass', 'sand', 'rock'];
 const MAT_ASPHALT = 0, MAT_SIDEWALK = 2, MAT_DIRT = 3, MAT_GRAVEL = 4;

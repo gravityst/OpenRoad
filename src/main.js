@@ -1697,6 +1697,9 @@ async function boot() {
   function districtAt(x, z) {
     let best = '', bd = Infinity;
     for (const d of world.districts) {
+      // Biomes are listed as districts so the maps label them, but they are
+      // regions, not places: world.biomes answers for them below.
+      if (d.biome !== undefined) continue;
       const dist = Math.hypot(d.cx - x, d.cz - z);
       if (dist < d.r + 120 && dist < bd) { bd = dist; best = d.name; }
     }
@@ -1704,6 +1707,15 @@ async function boot() {
     for (const v of world.villages) {
       const dist = Math.hypot(v.x - x, v.z - z);
       if (dist < 320 && dist < bd) { bd = dist; best = v.name; }
+    }
+    // Which biome, with hysteresis (world/biomes.js track()): the name only
+    // changes once the new country holds 62% of the ground, and crossing into
+    // it says so once, in the middle of the screen, where a kid will see it.
+    const bio = world.biomes;
+    if (bio && bio.track) {
+      const t = bio.track(x, z);
+      if (t.entered) hud.toast(`Entering ${t.name}`, 2.6);
+      return best || t.name;
     }
     return best || 'Open country';
   }

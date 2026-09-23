@@ -143,17 +143,27 @@ const bushes = w.props.filter((p) => p.type === 'bush');
     names.map((n, i) => `${n} ${(sp[i] / trees.length * 100).toFixed(0)}%`).join(' '));
   check('conifers and broadleaves both hold ground', conifer > 0.15 && conifer < 0.6, `${(conifer * 100).toFixed(0)}% conifer`);
 
+  // Measured in the FARMLAND only. When this was written the whole map was
+  // farmland, so any sand was the river valley gone wrong; since the biomes
+  // (world/biomes.js) the desert, the beach, the snow and the sea cover most
+  // of the rest on purpose, and tools/biomecheck.mjs measures those. The
+  // valley still runs through the heartland under the same rules, so the
+  // question this asks — is the valley a valley or a beach — is unchanged.
   const mats = {};
   const o = {};
   const rnd = mulberry(4242);
-  const N = 60000;
-  for (let i = 0; i < N; i++) {
-    const r = g.sample((rnd() * 2 - 1) * w.half, (rnd() * 2 - 1) * w.half, o);
+  const wq = new Float64Array(5);
+  let N = 0;
+  for (let i = 0; i < 60000; i++) {
+    const x = (rnd() * 2 - 1) * w.half, z = (rnd() * 2 - 1) * w.half;
+    if (w.biomes && w.biomes.weightsAt(x, z, wq)[0] < 0.9) continue;
+    const r = g.sample(x, z, o);
     mats[r.surface] = (mats[r.surface] || 0) + 1;
+    N++;
   }
   const sand = (mats.sand || 0) / N, grass = (mats.grass || 0) / N;
-  check('the valley is a valley, not a beach', sand < 0.03 && grass > 0.8,
-    `sand ${(sand * 100).toFixed(1)}% (was 20.1%), grass ${(grass * 100).toFixed(1)}% (was 72.7%)`);
+  check('the valley is a valley, not a beach', N > 5000 && sand < 0.03 && grass > 0.8,
+    `in the farmland (${N} samples): sand ${(sand * 100).toFixed(1)}% (was 20.1%), grass ${(grass * 100).toFixed(1)}% (was 72.7%)`);
 }
 
 // ---- Layers ---------------------------------------------------------------

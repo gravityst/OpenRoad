@@ -212,10 +212,25 @@ function brakeTest(fromKmh) {
   const starts = [];
   for (let i = 0; i < 24; i++) starts.push(w.edges[(i * 37) % w.edges.length]);
 
+  // The world has cliffs now (world/biomes.js: mesa walls, the coast, the
+  // peaks), and this driver is careless enough to drive off one — which it
+  // does, twice in 24 runs, from a mesa top 40 m up. Falling is gravity, not
+  // a fault, so the two checks a fall would trip are measured against the
+  // ground the car LEFT and the ground it is ON, rather than against level:
+  //   air   how high the car rises above the higher of the ground below it
+  //         and the ground it took off from. Being thrown UP is what a
+  //         physics fault looks like, and that is still held to 4 m.
+  //   tilt  pitch or roll beyond the slope of the ground under the car. A
+  //         car tipped on its side on the flat still reads 90 degrees; one
+  //         climbing a 40-degree bank reads what it is tipped past the bank.
+  // The longest fall is reported alongside, so a reader sees what the world
+  // threw at it.
+  let worstFall = 0;
   for (const e of starts) {
     const car = newCar();
     spawnOn(e, car);
     let air = 0;
+    let takeoffY = -Infinity, wasAir = false;
     for (let i = 0; i < 120 * 40; i++) {
       // A driver who is not paying much attention: mostly throttle, random
       // steering, occasional brake. Deliberately not a good line.
@@ -229,20 +244,26 @@ function brakeTest(fromKmh) {
       if (!Number.isFinite(car.x) || !Number.isFinite(car.y) || !Number.isFinite(car.z) ||
           !Number.isFinite(car.yaw) || !Number.isFinite(car.speed)) { nan++; break; }
       const above = car.y - car.groundY;
-      worstAir = Math.max(worstAir, above);
+      if (car.airborne && !wasAir) takeoffY = car.groundY;
+      if (!car.airborne) takeoffY = -Infinity;
+      wasAir = car.airborne;
+      worstAir = Math.max(worstAir, car.y - Math.max(car.groundY, takeoffY));
+      worstFall = Math.max(worstFall, above);
       if (above < -0.15) underground++;
       if (car.airborne) { air += dt; totalAir += dt; }
-      worstTilt = Math.max(worstTilt, Math.abs(car.pitch), Math.abs(car.roll));
+      const bank = Math.acos(Math.max(-1, Math.min(1, car.groundNy)));
+      worstTilt = Math.max(worstTilt, Math.abs(car.pitch) - bank, Math.abs(car.roll) - bank);
       if (car.speed < 0.3 && t > 5) stuck++;
     }
   }
   check('no NaN over 24 x 40 s of abuse', nan === 0, `${nan} runs diverged, ${samples} steps`);
   check('the car never leaves the ground absurdly', worstAir < 4.0,
-    `highest ${worstAir.toFixed(2)} m above the surface, ${totalAir.toFixed(1)} s airborne total`);
+    `highest ${worstAir.toFixed(2)} m above the ground it left, ${totalAir.toFixed(1)} s airborne total ` +
+    `(longest fall off a cliff ${worstFall.toFixed(1)} m)`);
   check('the car never sinks through the ground', underground / samples < 0.001,
     `${underground}/${samples} steps below the surface`);
   check('the car never tips over', worstTilt < 0.85,
-    `worst tilt ${(worstTilt * 57.3).toFixed(0)} deg (a car on its side is 90)`);
+    `worst tilt ${(worstTilt * 57.3).toFixed(0)} deg past the ground's own slope (a car on its side is 90)`);
   check('the car does not get stuck', stuck / samples < 0.08,
     `${(stuck / samples * 100).toFixed(1)}% of steps below walking pace`);
 }

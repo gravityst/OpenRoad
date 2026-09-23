@@ -1475,7 +1475,10 @@ function buildProps(world, rnd, ground) {
   // How much more (or less) wood each biome grows, as an offset on the
   // woodland mask, whose planting threshold is 0.08: the desert grows none,
   // the coast much less (so its palms are seen), the autumn woods more.
-  const WOOD_BIAS = [0, -1.2, 0.03, -0.15, 0.08];
+  // The pass is dark with spruce below the tree line (0.10): at 0.03 its
+  // valleys were a white plain with a tree every hundred metres, and nothing
+  // gave the mountains their scale.
+  const WOOD_BIAS = [0, -1.2, 0.10, -0.15, 0.08];
   const woodBias = (w) => w[0] * WOOD_BIAS[0] + w[1] * WOOD_BIAS[1] + w[2] * WOOD_BIAS[2] +
                           w[3] * WOOD_BIAS[3] + w[4] * WOOD_BIAS[4];
   // Above this in the mountains there is only rock and snow. The northern
@@ -1494,13 +1497,17 @@ function buildProps(world, rnd, ground) {
 
   function pickTree(x, z, h, edge, r, w) {
     const base = coniferShare(x, z, h);
-    // The mountains are conifer forest, the autumn woods broadleaf, the
-    // coast a pinewood; farmland keeps the old mix.
-    const c = base * (w[0] + w[1]) + 0.93 * w[2] + (0.35 + base * 0.5) * w[3] + base * 0.25 * w[4];
+    // The mountains are conifer forest, all of it — one summer-green oak in
+    // a snowy spruce wood was the first thing that looked wrong from the
+    // road — the autumn woods broadleaf, the coast a pinewood; farmland
+    // keeps the old mix.
+    const c = base * (w[0] + w[1]) + w[2] + (0.35 + base * 0.5) * w[3] + base * 0.25 * w[4];
     if (r() < c) {
       const q = r();
-      // Pine takes the dry crests and the forest margins, and the coast.
-      if (q < 0.14 + edge * 0.25 + w[3] * 0.6) return TREE.pine;
+      // Pine takes the dry crests and the forest margins, and the coast —
+      // but not the mountains, where its bare trunk and flat crown under
+      // snow read as a lollipop, not a tree: spruce and fir hold the pass.
+      if (q < (0.14 + edge * 0.25 + w[3] * 0.6) * (1 - w[2])) return TREE.pine;
       return q < 0.72 ? TREE.spruce : TREE.fir;
     }
     const q = r();
@@ -1536,7 +1543,9 @@ function buildProps(world, rnd, ground) {
       const roll = rnd();
       if (roll > smoothstep(0.08, 0.20, F) * 0.92) {
         // An empty slot at the margin is where the scrub goes.
-        if (edge > 0.3 && roll < 0.97 && inBounds(x, z)) {
+        // Not on the pass, where the scrub is under the snow: a green blob
+        // on a white slope reads as a bush that fell out of summer.
+        if (edge > 0.3 && roll < 0.97 - wb[2] * 0.8 && inBounds(x, z)) {
           if (clearance(x, z) < 2.4 || inLot(x, z)) continue;
           ground.sample(x, z, g);
           if (g.surface === 'sand' || g.surface === 'rock' || g.ny < 0.8) continue;
@@ -1547,7 +1556,10 @@ function buildProps(world, rnd, ground) {
       if (!inBounds(x, z)) continue;
       if (clearance(x, z) < 4.5 || inLot(x, z)) continue;
       ground.sample(x, z, g);
-      if (g.surface === 'sand' || g.surface === 'rock' || g.surface === 'water' || g.ny < 0.83) continue;
+      // Conifers hold a mountainside to about 40 degrees (normal y 0.76);
+      // anywhere else a wood stops at 34 (0.83).
+      if (g.surface === 'sand' || g.surface === 'water' || g.ny < 0.83 - 0.07 * wb[2]) continue;
+      if (g.surface === 'rock' && wb[2] < 0.5) continue;
       if (wb[2] > 0.3 && g.y > treeline(x, z)) continue;
       const v = pickTree(x, z, g.y, edge, rnd, wb);
       // Forest trees are drawn up tall by their neighbours; margin trees are
@@ -1665,7 +1677,7 @@ function buildProps(world, rnd, ground) {
           if (g.surface === 'sand' && !grove) continue;
           if (alpine && g.y > treeline(x, z)) continue;
           if (grove) { plant('palm', 0, x, z, g.y, 0.7 + rnd() * 0.5); continue; }
-          const v = conifer ? (rnd() < 0.6 ? TREE.spruce : TREE.pine) : (rnd() < 0.4 ? TREE.birch : rnd() < 0.5 ? TREE.oak : TREE.beech);
+          const v = conifer ? (rnd() < 0.6 ? TREE.spruce : alpine ? TREE.fir : TREE.pine) : (rnd() < 0.4 ? TREE.birch : rnd() < 0.5 ? TREE.oak : TREE.beech);
           plant('tree', v, x, z, g.y, 0.7 + rnd() * 0.45);
           if (rnd() < 0.6) {
             // Its own height, not the tree's: six metres away on a slope is
@@ -1674,8 +1686,8 @@ function buildProps(world, rnd, ground) {
             if (clearance(bx, bz) > 2.4 && !inLot(bx, bz)) plant('bush', alpine ? BUSH.juniper : BUSH.shrub, bx, bz, ground.heightAt(bx, bz), 0.7 + rnd() * 0.5);
           }
         }
-      } else if (roll < 0.36) {
-        // Scrub in the grass.
+      } else if (roll < 0.36 - (alpine ? 0.2 : 0)) {
+        // Scrub in the grass; little of it pokes through the snow.
         if (clearance(cx, cz) < 2.6 || inLot(cx, cz)) continue;
         ground.sample(cx, cz, g);
         if (g.surface === 'sand' || g.surface === 'rock' || g.surface === 'water' || g.ny < 0.8) continue;

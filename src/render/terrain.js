@@ -189,7 +189,7 @@ const LITTER = [0.55, 0.29, 0.11];
 // `rockTint`, doubled so a byte holds 0..0.5 at 0.002 steps.
 const ROCK_L = [0.18, 0.165, 0.145];
 const RED_ROCK_L = [0.27, 0.068, 0.030];
-const GRANITE_L = [0.14, 0.145, 0.155];
+const GRANITE_L = [0.105, 0.105, 0.11];
 
 // How much of each packed detail mask a surface shows, in the attribute's own
 // order: (gravel chips, sand ripple, grass blades, soil clods). These do NOT
@@ -204,8 +204,9 @@ const DETAIL = {
   grass:    [0.05, 0.00, 0.95, 0.20],
   sand:     [0.14, 0.95, 0.00, 0.10],
   rock:     [0.90, 0.00, 0.04, 0.16],
-  // Snow takes the sand ripple at low strength: wind-drift, not grain.
-  snow:     [0.04, 0.40, 0.00, 0.04],
+  // Snow takes the sand ripple at low strength: wind-drift, not grain. At
+  // 0.40 it streaked every snowfield like brushed metal out to the fade.
+  snow:     [0.04, 0.18, 0.00, 0.04],
   water:    [0.10, 0.80, 0.00, 0.10],
 };
 
@@ -519,18 +520,30 @@ const F_MAIN = `
   // the map: how desert the ground is (0..0.5) and how snowy (0.5..1). Snow
   // is carried explicitly because reading it off the colour flipped with
   // each LOD ring's shading and drew a staircase seam across a snowfield.
-  // Snow holds on steeper ground than turf does before the rock shows
-  // through (from ~32 degrees rather than ~29), which leaves a mountainside
-  // white with dark crags rather than grey with white flecks. Per pixel, off
-  // the interpolated slope: an earlier per-VERTEX rock class for the crags
-  // drew its edge as a staircase at the vertex spacing.
+  // Under snow the rock comes through on steep ribs and holds its snow in
+  // the gullies between them, because snow slides off a convex face and the
+  // wind strips a crest, while a couloir fills: rock from about 29 degrees
+  // on a rib, from about 38 in a gully (the vertex's own crest measure,
+  // carried in rockTint.a — see fillRows), jittered by the macro noise so
+  // the line between them is ragged. That contrast — dark rock, white
+  // couloirs, white snowfields below — is what says "mountains" from the
+  // road; held to 43 degrees everywhere (the first version) the range was a
+  // heap of mashed potato with a few grey flecks.
+  // Per pixel, off the interpolated slope: an earlier per-VERTEX rock class
+  // for the crags drew its edge as a staircase at the vertex spacing. (Snow
+  // on ledges, as bands along the contours, was tried and taken out: regular
+  // it striped the range like a zebra, and broken up by noise it drew grey
+  // worms across the snowfields.)
   float orSnowy = smoothstep( 0.55, 0.8, vOrRock.a );
   float orDes = clamp( vOrRock.a * 2.0, 0.0, 1.0 ) * ( 1.0 - smoothstep( 0.45, 0.55, vOrRock.a ) );
   float orBare = smoothstep( 0.075, 0.125, orSl ) * orG;
   // In the canyon country rock shows on gentler ground (from ~23 degrees),
   // because a mesa's flank IS rock; elsewhere turf holds to ~30.
-  float orRock = smoothstep( mix( mix( 0.125, 0.075, orDes ), 0.15, orSnowy ),
-                             mix( mix( 0.19, 0.13, orDes ), 0.27, orSnowy ), orSl );
+  float orRet = clamp( ( vOrRock.a - 0.8 ) * 5.0, 0.0, 1.0 );
+  float orSnowLo = 0.125 + orRet * 0.085 + ( orMa.g - 0.5 ) * 0.06 + ( orMb.r - 0.5 ) * 0.10;
+  float orRock = mix( smoothstep( mix( 0.125, 0.075, orDes ), mix( 0.19, 0.13, orDes ), orSl ),
+                      smoothstep( orSnowLo, orSnowLo + 0.075, orSl ),
+                      orSnowy );
   // Red rock is banded coarsely and boldly, the way sandstone beds are: the
   // stripes are most of what says "canyon" from the road.
   // The fine bedding fades with distance: at 2.3 m a stripe it aliases into
@@ -539,6 +552,11 @@ const F_MAIN = `
   float orStrata = 0.84 + 0.16 * sin( vOrPos.y * 2.7 + orMa.r * 9.0 ) * ( 1.0 - smoothstep( 60.0, 220.0, length( vOrPos.xyz - cameraPosition ) ) )
                  * ( 1.0 - smoothstep( 0.0, 0.004, vOrRock.b - vOrRock.r ) );
   orStrata = mix( orStrata, 0.74 + 0.26 * sin( vOrPos.y * 0.85 + orMa.r * 4.0 ) * sin( vOrPos.y * 0.31 + 1.3 ), orDes );
+  // Granite is not bedded; it weathers in patches, lighter where a face
+  // has freshly spalled and darker where lichen and meltwater have been.
+  // (Jointing drawn as a sine across the face, the first try, striped every
+  // mountain like a tiger.)
+  orStrata *= mix( 1.0, 0.72 + 0.42 * orMb.g + ( orMa.r - 0.5 ) * 0.3, orSnowy );
   vec3 orBareCol = mix( vec3( 0.095, 0.055, 0.024 ), vec3( 0.24, 0.085, 0.034 ), orDes );
   diffuseColor.rgb = mix( diffuseColor.rgb, orBareCol * ( 0.85 + orMb.b * 0.3 ), orBare );
   // rockTint is stored doubled (0..0.5 across a byte), so it is halved here.
@@ -1168,7 +1186,12 @@ export function createTerrain(world, ground, opts = {}) {
           rkt[o4] = (ROCK_L[0] * wR + RED_ROCK_L[0] * wD + GRANITE_L[0] * wA) * 510;
           rkt[o4 + 1] = (ROCK_L[1] * wR + RED_ROCK_L[1] * wD + GRANITE_L[1] * wA) * 510;
           rkt[o4 + 2] = (ROCK_L[2] * wR + RED_ROCK_L[2] * wD + GRANITE_L[2] * wA) * 510;
-          rkt[o4 + 3] = (palSnow > 0.05 ? 0.5 + 0.5 * palSnow : Math.min(0.5, wD * 0.5)) * 255;
+          // Snow country also carries how well the ground holds its snow:
+          // a gully fills and a rib is stripped (the shader reads it as the
+          // steepness the rock shows through at). 0.8..1 in the heart of the
+          // snow, so the snow flag itself is unchanged there.
+          const ret = crest < -0.55 ? 1 : crest > 0.55 ? 0 : 0.5 - crest * 0.9;
+          rkt[o4 + 3] = (palSnow > 0.05 ? 0.5 + 0.5 * palSnow * (0.6 + 0.4 * ret) : Math.min(0.5, wD * 0.5)) * 255;
         }
         // Verge wear. The strip of grass just past a road's shoulder is where
         // wheels drop off, walkers walk and the mower scalps, so it is shorter,
@@ -1717,13 +1740,14 @@ normal = normalize( ( viewMatrix * vec4( orNW, 0.0 ) ).xyz );
     group.add(mesh);
 
     let time = 0;
-    const coast = bio.seaBounds.zMin + 380;   // no sea north of here
     function update(cameraPos, dt) {
       time += dt > 0 && dt < 0.25 ? dt : 0;
       if (time > 3600) time -= 3600;
       uniforms.orWTime.value = time;
       const R = stats.viewDistance + 300;
-      mesh.visible = cameraPos.z + R > coast;
+      // Drawn only with open water within a view distance: the plane itself
+      // is cheap, but a call and a screen of discarded fragments are not free.
+      mesh.visible = bio.seaDistAt(cameraPos.x, cameraPos.z) < stats.viewDistance + 100;
       if (!mesh.visible) return;
       // Snapped, so the plane's own vertices never swim; everything drawn on
       // it is in world coordinates anyway.

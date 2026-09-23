@@ -51,7 +51,7 @@
 // Pure data and arithmetic: no three.js, no DOM. Headless harnesses build the
 // same field the browser does.
 
-import { fbm, ridged, valueNoise, hash2, smoothstep, clamp, lerp } from './noise.js';
+import { fbm, ridged, ridgedMF, gradNoise, valueNoise, hash2, smoothstep, clamp, lerp } from './noise.js';
 
 export const BIOME = { farm: 0, desert: 1, alpine: 2, coast: 3, autumn: 4 };
 export const BIOME_COUNT = 5;
@@ -77,11 +77,13 @@ export const BIOMES = [
 // (0, -260) and the first race sit well inside it.
 const R_FARM = 1750;
 // Metres of score difference over which one biome hands over to the next. The
-// farm-to-outer score changes 2 per metre, so that border is 190 m deep; two
+// farm-to-outer score changes 2 per metre, so that border is 280 m deep; two
 // outer biomes meet at a diagonal where the gap opens at about 1.4 per metre,
-// so those borders are about 270 m deep. Deep enough to read as a change in
+// so those borders are about 400 m deep. Where the warp below folds a border
+// it can squeeze to about a third of that: tools/biomecheck.mjs holds the
+// narrowest anywhere on the map to 100 m. Deep enough to read as a change in
 // the country rather than a line; shallow enough that each biome is a place.
-const BLEND = 190;
+const BLEND = 280;
 
 function sig(t) {
   const u = 0.5 + t * 0.5;
@@ -100,11 +102,12 @@ const _score = new Float64Array(BIOME_COUNT);
  */
 export function biomeWeights(x, z, seed, out) {
   const s = seed | 0;
-  // The borders wander by up to ~350 m: a slow warp for the big bays and
-  // promontories of one biome into the next, and a faster one so no border
-  // is a smooth arc.
-  const wx = x + fbm(x / 1700, z / 1700, s + 301, 2) * 280 + fbm(x / 430, z / 430, s + 303, 2) * 70;
-  const wz = z + fbm(x / 1700, z / 1700, s + 302, 2) * 280 + fbm(x / 430, z / 430, s + 304, 2) * 70;
+  // The borders wander by up to ~320 m: a slow warp for the big bays and
+  // promontories of one biome into the next, and a faster, gentler one so no
+  // border is a smooth arc. (At 70 m the fast one folded borders down to a
+  // 75 m handover; at 40 m the narrowest is over 100.)
+  const wx = x + fbm(x / 1700, z / 1700, s + 301, 2) * 280 + fbm(x / 430, z / 430, s + 303, 2) * 40;
+  const wz = z + fbm(x / 1700, z / 1700, s + 302, 2) * 280 + fbm(x / 430, z / 430, s + 304, 2) * 40;
   const r = Math.sqrt(wx * wx + wz * wz);
   _score[BIOME.farm] = R_FARM - r;
   _score[BIOME.desert] = -wx;
@@ -168,20 +171,27 @@ const FN = Math.round((2 * EXT) / FC) + 1;
 // How far the relief stays off a road, measured from the carriageway EDGE.
 // tools/groundcheck.mjs samples the verge out to 40 m from the centreline and
 // ground.js blends the carriageway into the terrain over 3 + 26 m beyond the
-// shoulder, so nothing inside 38 m of an edge may move. Past that the ramps
-// differ by feature. A mountain flank is faded in over 210 m (a 290 m peak
-// over less would be an overhang). A canyon wall is not faded at all but
-// CAPPED: the rock may rise at most WALL metres per metre of distance from
-// the road, so where a mesa meets a road it stands as a straight wall at
-// that slope — 62 degrees — instead of the mesa's own cliff and a fade
-// adding up to something steeper than the ground can hold (a fade over 34 m
-// did exactly that: normal y 0.248 against the 0.25 floor).
+// shoulder, so nothing inside 38 m of an edge may move. Past that each
+// feature is not faded in but CAPPED: it may rise at most so many metres per
+// metre of distance from the road. Where the land wants to be higher than the
+// cap allows, what stands beside the road is a slope at exactly that grade —
+// a canyon wall, a mountainside — and where it does not, the land is simply
+// itself. A fade (the first version) multiplies the feature instead, and
+// its slope then adds the feature's own to the fade's: over 34 m that put
+// a mesa's flank at normal y 0.248 against the 0.25 floor, and over the 210
+// m it took to hold a mountain under it, it pushed every peak a quarter of a
+// kilometre back from the pass and left the road on a white plain.
+// KEEP_AT is KEEP plus 3 m of margin for the distance grid: read bilinearly
+// at 16 m, it can put a cell a metre or two further from a road than it is,
+// and without the margin that leaked 2 cm of relief onto a verge.
 const KEEP = 38;
-const WALL = 1.9;
+const KEEP_AT = KEEP + 3;
+const WALL = 1.9;           // canyon walls: 62 degrees
 const RAMP_COAST = 100;
-const RAMP_PEAK = 210;
-const REACH = KEEP + RAMP_PEAK + 8;
-const RAMP_CANYON = 0;   // (capped, see WALL)
+// The distance grid is exact out to REACH and saturates there. A mountain
+// wall rising at its gentlest grade must clear the highest peak before
+// then, or the cap would shave the summits of a range no road goes near.
+const REACH = 640;
 
 // Mesas and buttes: one candidate per 300 m cell. Tablelands, the big flat
 // tops a canyon is cut through: one candidate per 650 m cell.
@@ -354,25 +364,69 @@ export function buildBiomes(world, terrain) {
     return 36 * smoothstep(-850, -1750, wz);
   }
 
-  /** Peaks and foothills, masked off the roads. */
-  function alpinePeaks(x, z) {
+  // The mountains. A ridged multifractal of gradient noise (noise.js) on a
+  // warped domain, a kilometre to a wavelength: ranges that branch and
+  // wander, knife-edged at the crest and smooth in the valleys between, on a
+  // massif that rises toward the north edge of the map and carries on past
+  // it, so the world ends in a wall of peaks rather than a drop. Up to 280 m
+  // of range on up to 150 m of massif; at those numbers the steepest 1% of
+  // the ground is 1.2:1 (50 degrees) and the very steepest 1.9:1 — inside
+  // the 0.3 normal floor tools/biomecheck.mjs holds (measured over 100,000
+  // points of the noise: gradient p99 4.2, max 6.8 per wavelength).
+  //
+  // Crags ride on the high ground only: a second, 210 m ridged field that
+  // breaks every summit and skyline into buttresses and notches, so no peak
+  // is a smooth dome — the smooth dome under snow was exactly what the first
+  // version of this pass looked like from the road.
+  function alpineMountains(x, z) {
     const wz = z + warpN(x, z);
-    let h = 0;
-    // Peaks begin just north of the pass and reach full height by the map's
-    // edge, and they go on past it: the north edge of the world is a wall of
-    // mountains, not a drop.
-    // A massif under the ridges, so every peak stands on high ground and the
-    // range reads as a range: 90 m of shoulder, and up to 200 m of ridge on
-    // top of it.
-    const north = smoothstep(-950, -1800, wz);
-    if (north > 0) {
-      const r = ridged(x / 820, z / 820, s + 421, 3);
-      const k = clamp((r + 0.3) / 1.3, 0, 1);
-      h += (90 + k * Math.sqrt(k) * 200) * north;
-    }
-    const hills = smoothstep(-600, -1250, wz);
-    if (hills > 0) h += (fbm(x / 420, z / 420, s + 431, 3) * 0.5 + 0.5) * 30 * hills;
-    return h;
+    const north = smoothstep(-700, -1350, wz);
+    if (north <= 0) return 0;
+    const qx = x + fbm(x / 900, z / 900, s + 433, 2) * 170;
+    const qz = z + fbm(x / 900, z / 900, s + 434, 2) * 170;
+    const r = ridgedMF(qx / 1000, qz / 1000, s + 421, 4);
+    let h = 35 + 115 * smoothstep(-1250, -2250, wz) + r * 280;
+    const high = smoothstep(90, 240, h);
+    if (high > 0) h += ridgedMF(qx / 210, qz / 210, s + 441, 2) * 18 * high;
+    return h * north;
+  }
+
+  // How the mountains meet a road: they may rise at most `grade` metres per
+  // metre from `foot` metres off the carriageway edge. Both wander along the
+  // valley (a 300 m noise), between 29 and 45 degrees and 41 to 71 m out, so
+  // no two stretches of the pass are walled alike and no wall is a ruled
+  // line parallel to the road. The foot is eased over 24 m (C1), so where
+  // the valley floor meets the wall is a curve, not a crease in the shading.
+  //
+  // A cap that was only a grade would make every valley wall a plane. So it
+  // carries its own relief, growing with height up the wall to 30 m either
+  // way at a 110 m wavelength: spurs and hollows across the face that the
+  // snow, the rock and the trees can pick out. It can never pull the cap
+  // below zero (at most 0.4 of the ramp against a grade of at least 0.56),
+  // and it adds at most 0.7 to the grade at its steepest.
+  function alpineCap(x, z, dRoad) {
+    const n1 = fbm(x / 300, z / 300, s + 445, 2), n2 = fbm(x / 300, z / 300, s + 446, 2);
+    const foot = KEEP_AT + 15 + n1 * 15;
+    const grade = 0.78 + n2 * 0.22;
+    const u = dRoad - foot;
+    if (u <= 0) return 0;
+    const ramp = u < 24 ? (u * u) / 48 : u - 12;
+    const lump = ramp * 0.4 < 30 ? ramp * 0.4 : 30;
+    return grade * ramp + lump * gradNoise(x / 110, z / 110, s + 447);
+  }
+
+  /**
+   * The soft minimum of a feature's height and its cap: m.c / (m^4 + c^4)^1/4.
+   * Exactly 0 where the cap is 0; within 2% of m once the cap is twice m, and
+   * of c once m is twice c; and its slope never exceeds the steeper of the
+   * two, so the knee where a mountainside turns into its own ridgeline is a
+   * curve rather than a fold. Square roots only, which IEEE rounds exactly —
+   * the same in every browser, like everything else that shapes the world.
+   */
+  function softCap(m, c) {
+    if (m <= 0 || c <= 0) return 0;
+    const m2 = m * m, c2 = c * c;
+    return (m * c) / Math.sqrt(Math.sqrt(m2 * m2 + c2 * c2));
   }
 
   /**
@@ -528,16 +582,23 @@ export function buildBiomes(world, terrain) {
     let F = 0;
     const wa = w[BIOME.alpine], wd = w[BIOME.desert], wc = w[BIOME.coast];
     if (wa > 1e-3) {
-      const m = smoothstep(KEEP, KEEP + RAMP_PEAK, dRoad) * clearK;
-      F += wa * (alpineUplift(x, z) + (m > 0 ? m * alpinePeaks(x, z) : 0));
+      // The uplift is the one relief a road stands on (the solver grades it
+      // like any hill), so it is gone where the alpine weight is under 5%
+      // rather than trailing a few micrometres across every neighbouring
+      // biome's verges (faded out at 0.3% it still left 2e-7 m on four road
+      // samples, read back through the bicubic's 32 m support); the
+      // mountains are capped off every road and every circuit's infield.
+      const up = alpineUplift(x, z) * smoothstep(0.05, 0.15, wa);
+      const c = clearK > 0 ? alpineCap(x, z, dRoad) * clearK : 0;
+      F += wa * (up + (c > 0 ? softCap(alpineMountains(x, z), c) : 0));
     }
-    if (wd > 1e-3 && dRoad > KEEP && clearK > 0) {
-      const cap = (dRoad - KEEP) * WALL;
+    if (wd > 1e-3 && dRoad > KEEP_AT && clearK > 0) {
+      const cap = (dRoad - KEEP_AT) * WALL;
       const d = desertRelief(x, z);
       F += wd * clearK * (d < cap ? d : cap);
     }
     if (wc > 1e-3) {
-      const m = smoothstep(KEEP, KEEP + RAMP_COAST, dRoad) * clearK;
+      const m = smoothstep(KEEP_AT, KEEP_AT + RAMP_COAST, dRoad) * clearK;
       if (m > 0) {
         const base = baseKnown === undefined ? baseH(x, z) : baseKnown;
         F += wc * m * (coastTarget(x, z, base, line, cliffK) - base);
@@ -707,19 +768,42 @@ export function buildBiomes(world, terrain) {
   }
 
   // ---- which biome am I in, with hysteresis --------------------------------
-  // The HUD asks every frame. The answer only changes when another biome
-  // holds 62% of the ground, so driving along a border never flickers the
-  // name, and entering reports once.
+  // The HUD asks every frame. It is answered from the weights AVERAGED OVER
+  // THE LAST ~150 m DRIVEN, not from the weights under the wheels, and the
+  // name changes only when that average gives another biome 60%. A road that
+  // wanders along a border keeps its average near 50/50 however it weaves, so
+  // it never flickers the name — on the raw weights, with a 62% threshold, a
+  // road wandering 40 m either side of the farm/canyon border flipped it 13
+  // times in 1.2 km, and with a 250 m lockout added on top still 5 times.
+  // Crossing a border outright reports once, about 150 m after the halfway
+  // line. The averaging is per metre moved, not per frame, so it behaves the
+  // same at 30 fps as at 144, and parked on a border nothing changes at all.
+  // A jump of more than 400 m (the map, a respawn, Go to a friend) starts
+  // the average again where the car landed, and says so if that is a
+  // different country.
   const tr = { index: -1, name: '', entered: false };
   const wt = new Float64Array(BIOME_COUNT);
+  const wAvg = new Float64Array(BIOME_COUNT);
+  const TRACK_M = 150;
+  let prevX = 0, prevZ = 0;
   function track(x, z) {
     weightsAt(x, z, wt);
-    let best = 0;
-    for (let b = 1; b < BIOME_COUNT; b++) if (wt[b] > wt[best]) best = b;
     tr.entered = false;
+    const jx = x - prevX, jz = z - prevZ;
+    const moved = Math.sqrt(jx * jx + jz * jz);
+    prevX = x; prevZ = z;
+    if (tr.index < 0 || moved > 400) {
+      for (let b = 0; b < BIOME_COUNT; b++) wAvg[b] = wt[b];
+    } else if (moved > 0) {
+      // 1 - exp(-moved / TRACK_M), to within 0.2% at any step a frame takes.
+      const k = moved / (TRACK_M + moved * 0.5);
+      for (let b = 0; b < BIOME_COUNT; b++) wAvg[b] += (wt[b] - wAvg[b]) * k;
+    }
+    let best = 0;
+    for (let b = 1; b < BIOME_COUNT; b++) if (wAvg[b] > wAvg[best]) best = b;
     if (tr.index < 0) {
       tr.index = best;
-    } else if (best !== tr.index && wt[best] > 0.62) {
+    } else if (best !== tr.index && (wAvg[best] > 0.6 || moved > 400)) {
       tr.index = best;
       tr.entered = true;
     }
@@ -779,11 +863,49 @@ export function buildBiomes(world, terrain) {
 
   let seaCells = 0;
   for (let c = 0; c < seaMask.length; c++) seaCells += seaMask[c];
+
+  // Distance to the nearest open water, on a 64 m chamfer grid over the whole
+  // relief extent: the water mesh draws only when there is sea within a view
+  // distance, not merely somewhere south.
+  const SC = 64, SN = Math.round((2 * EXT) / SC) + 1;
+  const seaDist = new Float32Array(SN * SN).fill(1e9);
+  for (let r = 0; r < SR; r += 4) {
+    for (let i = 0; i < FN; i += 4) {
+      if (!seaMask[r * FN + i]) continue;
+      const x = -EXT + i * FC, z = -EXT + (sj0 + r) * FC;
+      const gi = Math.min(SN - 1, Math.round((x + EXT) / SC)), gj = Math.min(SN - 1, Math.round((z + EXT) / SC));
+      seaDist[gj * SN + gi] = 0;
+    }
+  }
+  for (let pass = 0; pass < 2; pass++) {
+    const f = pass === 0;
+    for (let jj = 0; jj < SN; jj++) {
+      const j = f ? jj : SN - 1 - jj;
+      for (let ii = 0; ii < SN; ii++) {
+        const i = f ? ii : SN - 1 - ii, c = j * SN + i;
+        let d = seaDist[c];
+        const di = f ? -1 : 1, dj = f ? -1 : 1;
+        if (i + di >= 0 && i + di < SN) d = Math.min(d, seaDist[c + di] + SC);
+        if (j + dj >= 0 && j + dj < SN) {
+          d = Math.min(d, seaDist[c + dj * SN] + SC);
+          if (i + di >= 0 && i + di < SN) d = Math.min(d, seaDist[c + dj * SN + di] + SC * Math.SQRT2);
+          if (i - di >= 0 && i - di < SN) d = Math.min(d, seaDist[c + dj * SN - di] + SC * Math.SQRT2);
+        }
+        seaDist[c] = d;
+      }
+    }
+  }
+  /** Metres to the nearest open water (to within a 64 m cell); past the grid, 0 in the south. */
+  function seaDistAt(x, z) {
+    const i = Math.round((x + EXT) / SC), j = Math.round((z + EXT) / SC);
+    if (i < 0 || j < 0 || i >= SN || j >= SN) return z > SEA_Z0 ? 0 : 1e9;
+    return Math.max(0, seaDist[j * SN + i] - SC);
+  }
   const t1 = typeof performance !== 'undefined' ? performance.now() : Date.now();
 
   return {
     seed, seaLevel, floorY,
-    weightsAt, dominant, relief, seaAt, seaDepthAt, surfaceAt, track, bake, seaTexture,
+    weightsAt, dominant, relief, seaAt, seaDepthAt, seaDistAt, surfaceAt, track, bake, seaTexture,
     snowAt: (x, z, h, wAlpine) => snowAmount(wAlpine, x, z, h, s),
     roadDist,
     /** The sea's rough extent, so the water mesh knows when it can be seen. */

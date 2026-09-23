@@ -210,10 +210,26 @@ vec3 orBiomeLeaf( vec3 c ) {
   c = mix( c, vec3( lum * 1.3, lum * 1.18, lum * 0.78 ), vOrBio.r * leaf * 0.8 );
   return c;
 }
-vec3 orBiomeSnow( vec3 c, float up ) {
-  // Only what faces well up holds snow, and never all of it: a conifer's
-  // crown normals all lean upward, and from 0.1 up the whole tree went white.
-  return mix( c, vec3( 0.50, 0.55, 0.63 ), vOrBio.g * smoothstep( 0.45, 0.85, up ) * 0.8 );
+// The card's UV, for the snow clumps. A macro, because this block is
+// injected ahead of three's own declaration of vMapUv and only expands where
+// it is used, which is after it.
+#ifdef USE_MAP
+#define OR_UV vMapUv
+#else
+#define OR_UV vec2( 0.5 )
+#endif
+vec3 orBiomeSnow( vec3 c, float up, vec2 uv ) {
+  // Snow lies along the tops of the branches, in clumps, and the needles
+  // under it stay dark — a winter spruce is darker and bluer than a summer
+  // one, which is what makes the white on it read as snow. A crown's normals
+  // all lean upward, so facing up alone is not enough to decide: whitening
+  // everything above 0.45 turned whole forests into white combs from the
+  // road. The clumps are a pattern in the leaf card's own UVs, so they stay
+  // put on the branch as the tree sways; trunks (red over green) take none.
+  float leaf = smoothstep( 0.0, 0.03, c.g - c.r );
+  float clump = smoothstep( -0.1, 0.6, sin( uv.x * 41.0 + vOrHue * 6.28 ) * sin( uv.y * 33.0 + vOrHue * 3.1 ) + ( up - 0.75 ) * 1.5 );
+  c = mix( c, c * vec3( 0.70, 0.78, 0.82 ), vOrBio.g * leaf );
+  return mix( c, vec3( 0.50, 0.55, 0.63 ), vOrBio.g * leaf * smoothstep( 0.5, 0.9, up ) * ( 0.15 + 0.85 * clump ) * 0.85 );
 }
 `;
 
@@ -395,7 +411,7 @@ function inject(material, kind, uniforms) {
         .replace('#include <worldpos_vertex>', WORLDPOS_WIND);
       f = f.replace('#include <common>', `#include <common>\n${LOD_FRAG_PARS}\n${BIO_FRAG_PARS}`)
         .replace('#include <map_fragment>', `#include <map_fragment>\n${LOD_FRAG}\n${ALPHA_MIP}`)
-        .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.rgb = orBiomeSnow( orBiomeLeaf( diffuseColor.rgb ), vOrUp );')
+        .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.rgb = orBiomeSnow( orBiomeLeaf( diffuseColor.rgb ), vOrUp, OR_UV );')
         // The canopy normal is the normal of the crown, not of the card, so it
         // must not flip with the side of the card that happens to face us.
         .replace('#include <normal_fragment_begin>', '#include <normal_fragment_begin>\n#ifdef DOUBLE_SIDED\nnormal *= faceDirection;\n#endif')
@@ -430,7 +446,7 @@ ${LOD_COLLAPSE}`);
   vec3 orNT = texture2D( orNormalMap, vMapUv ).xyz * 2.0 - 1.0;
   vec3 orNW = orNT.x * vOrRight + vec3( 0.0, orNT.y, 0.0 ) + orNT.z * vOrFwd;
   normal = normalize( ( viewMatrix * vec4( orNW, 0.0 ) ).xyz );
-  diffuseColor.rgb = orBiomeSnow( diffuseColor.rgb, normalize( orNW ).y );
+  diffuseColor.rgb = orBiomeSnow( diffuseColor.rgb, normalize( orNW ).y, OR_UV );
 }`)
         .replace('#include <lights_lambert_pars_fragment>', canopyLambert());
     } else {

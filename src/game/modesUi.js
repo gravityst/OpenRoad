@@ -138,7 +138,7 @@ export function createModesUi(opts) {
   pAgain.addEventListener('click', () => again());
   pClose.addEventListener('click', () => { podiumClosed = view.gid; podium.hidden = true; });
   root.appendChild(podium);
-  let podiumFor = -1, podiumClosed = -1;
+  let podiumFor = -1, podiumClosed = -1, podiumBar = -1;
 
   // ---- say, on a touch screen ----------------------------------------------------
   const say = el('div', 'mpg-say');
@@ -251,22 +251,40 @@ export function createModesUi(opts) {
     const stat = el('span', 'mpg-row__stat');
     li.append(pos, col, name, tag, stat);
     tRows.appendChild(li);
-    r = { li, pos, col, name, tag, stat, p: '', n: '', c: '', t: null, s: '', y: -1, me: null, seen: 0 };
+    r = { li, pos, col, name, tag, stat, p: -1, n: '', c: '', t: null, s: '', sk: NaN, y: -1, me: null, seen: 0 };
     rowEls.set(id, r);
     return r;
   }
 
-  function gapText(row, leader) {
-    if (row.fin) return fmtRaceTime(row.fin);
-    if (row === leader || !row.g) return '';
+  /**
+   * What a race row's figure shows, as one number, so its text is rebuilt
+   * only when that changes: a finishing time (> 0), a gap to the leader at
+   * the last checkpoint both have passed (-1 - tenths), or nothing (0).
+   */
+  function gapKey(row, leader) {
+    if (row.fin) return row.fin;
+    if (row === leader || !row.g) return 0;
     const lt = gateTimes.get(leader.id);
     const at = lt ? lt[row.g] : NaN;
-    if (!(at >= 0)) return '';
-    const gap = (row.ms - at) / 1000;
-    return gap >= 0 ? `+${gap.toFixed(1)}` : '';
+    if (!(at >= 0) || row.ms < at) return 0;
+    return -1 - Math.round((row.ms - at) / 100);
+  }
+  function gapText(k) {
+    return k > 0 ? fmtRaceTime(k) : k < 0 ? `+${((-1 - k) / 10).toFixed(1)}` : '';
   }
 
-  let footSig = '', headSig = '', rowsN = -1, gatesSig = '';
+  // What the head, clock and foot were last drawn from. Each is rebuilt only
+  // when one of its inputs changes — a string a frame per line, sixty times a
+  // second, for text that changes a few times a second at most, is exactly
+  // the per-frame garbage the rest of the game is written to avoid.
+  const was = {
+    kind: '', name: '', it: -2, itName: '', coins: -1,                        // head
+    ck: NaN,                                                                   // clock
+    phase: '', inGame: null, watching: null, finished: null, place: -1,       // foot
+    next: -1, n: -1, counting: null, iAmIt: null, entrants: -1,
+    fKind: '', fIt: -2, fItName: '', fCoins: -1, fMe: -1,
+  };
+  let rowsN = -1, gatesN = -1, gatesDone = -1;
   function renderTower() {
     const rows = view.rows;
     const t = view.kind;
@@ -284,15 +302,16 @@ export function createModesUi(opts) {
       const row = rows[i];
       const o = rowEl(row.id);
       o.seen = 1;
-      const p = String(row.pos);
-      if (o.p !== p) { o.pos.textContent = p; o.li.dataset.pos = p; o.p = p; }
+      if (o.p !== row.pos) { const p = String(row.pos); o.pos.textContent = p; o.li.dataset.pos = p; o.p = row.pos; }
       if (o.n !== row.name) { o.name.textContent = row.name; o.n = row.name; }
       if (o.c !== row.css) { o.col.style.color = row.css; o.c = row.css; }
       const isIt = t === 'tag' && view.it === row.id;
       const tag = isIt ? 'IT' : '';
       if (o.t !== tag) { o.tag.textContent = tag; o.tag.hidden = !tag; o.t = tag; }
-      const s = t === 'race' ? gapText(row, leader) : row.stat;
-      if (o.s !== s) { o.stat.textContent = s; o.s = s; }
+      if (t === 'race') {
+        const k = gapKey(row, leader);
+        if (o.sk !== k) { o.sk = k; o.s = gapText(k); o.stat.textContent = o.s; }
+      } else if (o.s !== row.stat) { o.sk = NaN; o.stat.textContent = row.stat; o.s = row.stat; }
       if (o.me !== row.me) { o.li.classList.toggle('is-me', row.me); o.me = row.me; }
       if (o.y !== i) { o.li.style.transform = `translateY(calc(var(--row) * ${i}))`; o.y = i; }
     }
@@ -300,18 +319,36 @@ export function createModesUi(opts) {
     if (rowsN !== rows.length) { tRows.style.height = `calc(var(--row) * ${rows.length})`; rowsN = rows.length; leftTop = -2; }
 
     // Head: the game, what it is, and the clock that matters.
-    const game = t === 'race' ? 'Race' : GAME_NAME[t];
-    const name = t === 'race' ? view.name : t === 'tag' ? (view.it >= 0 ? `${view.itName} is IT` : 'Get ready') : `${view.coinsLeft} coins left`;
-    const clk = view.phase === 'lobby' ? fmtClock(view.lobbyLeft)
-      : t === 'race' ? (view.finished ? fmtRaceTime(view.myFin)
-        : view.phase === 'run' ? fmtRaceTime(view.inGame ? view.myTime : Math.max(0, -view.goIn))
-          : view.phase === 'done' ? '' : '0:00.0')
-        : view.phase === 'done' ? '' : fmtClock(view.clockLeft);
-    const hs = game + '|' + name;
-    if (headSig !== hs) { tGame.textContent = game; tName.textContent = name; headSig = hs; }
-    if (tClock.textContent !== clk) tClock.textContent = clk;
+    if (was.kind !== t || was.name !== view.name || was.it !== view.it || was.itName !== view.itName || was.coins !== view.coinsLeft) {
+      was.kind = t; was.name = view.name; was.it = view.it; was.itName = view.itName; was.coins = view.coinsLeft;
+      tGame.textContent = t === 'race' ? 'Race' : GAME_NAME[t];
+      tName.textContent = t === 'race' ? view.name : t === 'tag' ? (view.it >= 0 ? `${view.itName} is IT` : 'Get ready') : `${view.coinsLeft} coins left`;
+      was.ck = NaN;
+    }
+    // The clock as one number: whole seconds (a round or lobby clock, +), tenths
+    // of a race (-1 - tenths), or blank (0). Its text is built when that moves.
+    const race = t === 'race' && view.phase !== 'lobby';
+    const cms = view.phase === 'lobby' ? view.lobbyLeft
+      : race ? (view.finished ? view.myFin : view.phase === 'run' ? (view.inGame ? view.myTime : Math.max(0, -view.goIn)) : view.phase === 'done' ? -1 : 0)
+        : view.phase === 'done' ? -1 : view.clockLeft;
+    const ck = cms < 0 ? 0 : race ? -1 - Math.floor(cms / 100) : 1 + Math.max(0, Math.ceil(cms / 1000));
+    if (was.ck !== ck) { was.ck = ck; tClock.textContent = ck === 0 ? '' : race ? fmtRaceTime(cms) : fmtClock(cms); }
 
     // Foot: what to do now.
+    const counting = view.readyIn > 0 && clock < tagCountUntil;
+    let mePos = -1;
+    for (let i = 0; i < rows.length; i++) if (rows[i].me) mePos = rows[i].pos;
+    if (was.phase === view.phase && was.inGame === view.inGame && was.watching === view.watching && was.finished === view.finished &&
+      was.place === view.myPlace && was.next === view.next && was.n === view.n && was.counting === counting &&
+      was.iAmIt === view.iAmIt && was.entrants === view.entrants && was.fKind === t && was.fIt === view.it &&
+      was.fItName === view.itName && was.fCoins === view.coinsLeft && was.fMe === mePos) {
+      renderGates();
+      return;
+    }
+    was.phase = view.phase; was.inGame = view.inGame; was.watching = view.watching; was.finished = view.finished;
+    was.place = view.myPlace; was.next = view.next; was.n = view.n; was.counting = counting;
+    was.iAmIt = view.iAmIt; was.entrants = view.entrants;
+    was.fKind = t; was.fIt = view.it; was.fItName = view.itName; was.fCoins = view.coinsLeft; was.fMe = mePos;
     let foot = '', hot = false;
     if (view.phase === 'lobby') foot = view.inGame ? `Waiting for players · ${view.entrants} in` : '';
     else if (t === 'race') {
@@ -320,78 +357,71 @@ export function createModesUi(opts) {
       else if (view.finished) foot = `Finished · P${view.myPlace}`;
       else foot = `Checkpoint ${Math.min(view.next + 1, view.n)} / ${view.n}`;
     } else if (t === 'tag') {
-      if (view.readyIn > 0 && clock < tagCountUntil) foot = view.iAmIt ? 'You are IT · count to three' : `Run! ${view.itName} is counting`;
+      if (counting) foot = view.iAmIt ? 'You are IT · count to three' : `Run! ${view.itName} is counting`;
       else if (view.iAmIt) { foot = "You're IT · tag someone"; hot = true; }
       else foot = `Keep away from ${view.itName}`;
     } else if (t === 'coins') foot = `${view.coinsLeft} coin${view.coinsLeft === 1 ? '' : 's'} left · race for them`;
     if (view.phase === 'done') {
-      let me = null;
-      for (let i = 0; i < rows.length; i++) if (rows[i].me) me = rows[i];
       foot = t === 'race' ? (view.finished ? `Finished · P${view.myPlace}` : view.inGame ? 'Out of time' : 'Race over')
-        : me ? `Final · P${me.pos}` : 'Final';
+        : mePos > 0 ? `Final · P${mePos}` : 'Final';
     }
-    const fs = foot + (hot ? '!' : '');
-    if (footSig !== fs) { tFootText.textContent = foot; tFoot.classList.toggle('is-hot', hot); tFoot.hidden = !foot; footSig = fs; }
-    // Checkpoint pips.
-    const gs = t === 'race' && view.inGame && view.phase === 'run' ? `${view.next}/${view.n}` : '';
-    if (gs !== gatesSig) {
-      gatesSig = gs;
-      tGates.textContent = '';
-      if (gs) for (let k = 0; k < view.n; k++) { const i = el('i'); if (k < view.next) i.className = 'is-done'; tGates.appendChild(i); }
-    }
+    if (tFootText.textContent !== foot) tFootText.textContent = foot;
+    tFoot.classList.toggle('is-hot', hot);
+    tFoot.hidden = !foot;
+    renderGates();
+  }
+
+  /** Checkpoint pips: rebuilt when the race or the count changes, not per frame. */
+  function renderGates() {
+    const on = view.kind === 'race' && view.inGame && view.phase === 'run';
+    const n = on ? view.n : 0, done = on ? view.next : 0;
+    if (n === gatesN && done === gatesDone) return;
+    gatesN = n; gatesDone = done;
+    tGates.textContent = '';
+    for (let k = 0; k < n; k++) { const i = el('i'); if (k < done) i.className = 'is-done'; tGates.appendChild(i); }
   }
 
   // ---- the card ---------------------------------------------------------------------
-  let cardSig = '', whoSig = '';
+  // What the card was last built from (see `was` above: the same idea).
+  const cw = { kind: '', phase: '', inGame: null, host: -2, hostName: '', name: '', entrants: -1, late: null, clk: -1, secs: -1, frac: -1, ids: new Int32Array(16), nIds: -1 };
+  let cardShow = false;
   function renderCard() {
     const v = view;
-    let show = false, kind = '', title = '', sub = '', act = '', label = '', secs = '', frac = -1;
+    // Whether it shows, and whether anything it says has changed. Everything
+    // below that builds a string runs only when this says so.
+    let show = false, late = false;
     if (v.kind && v.phase !== 'done' && !v.unknown) {
-      const verb = v.kind === 'race' ? 'wants to race' : v.kind === 'tag' ? 'wants to play Tag' : 'started a Coin Rush';
-      if (v.phase === 'lobby') {
-        show = true;
-        kind = v.kind === 'race' ? 'Race invite' : v.kind === 'tag' ? 'Tag' : 'Coin Rush';
-        secs = String(Math.ceil(v.lobbyLeft / 1000));
-        frac = Math.min(1, v.lobbyLeft / 15000);
-        if (v.inGame) {
-          title = v.host === myId() ? 'Waiting for friends' : "You're in";
-          sub = v.kind === 'race' ? `${v.name} · starting when the invite runs out` : 'Starting when the invite runs out';
-          act = 'leave'; label = 'Backspace leaves';
-        } else {
-          title = `${v.hostName} ${verb}`;
-          sub = v.kind === 'race' ? `${v.name} · ${(v.race.length / 1000).toFixed(1)} km · ${v.n} checkpoints` : v.kind === 'tag' ? "One car is IT. Don't be IT when time runs out" : '12 coins on the roads nearby';
-          act = 'join'; label = 'Join';
-        }
-      } else if (!v.inGame && !v.watching) {
+      if (v.phase === 'lobby') show = true;
+      else if (!v.inGame && !v.watching) {
         // A game under way: a short nudge, once per game, then it folds away.
         if (cardSeen !== v.gid) { cardSeen = v.gid; cardFirst = clock; }
-        if (clock - cardFirst < CARD_LATE_S) {
-          show = true;
-          kind = GAME_NAME[v.kind];
-          title = v.kind === 'race' ? 'Race under way' : `${GAME_NAME[v.kind]} is on`;
-          sub = `${v.entrants} playing${v.kind === 'race' ? ` · ${v.name}` : ` · ${fmtClock(v.clockLeft)} left`}`;
-          act = 'join'; label = v.kind === 'race' ? 'Watch' : 'Join';
-        }
+        late = show = clock - cardFirst < CARD_LATE_S;
       }
     }
     if (card.hidden === show) card.hidden = !show;
-    cardAct = show ? act : '';
-    if (!show) return;
-    if (cardMark !== v.kind) { cMark.innerHTML = GAME_MARK[v.kind] || ''; cardMark = v.kind; }   // static markup
-    const sig = kind + '|' + title + '|' + sub + '|' + label + '|' + act;
-    if (cardSig !== sig) {
-      cKind.textContent = kind; cTitle.textContent = title; cSub.textContent = sub; cLabel.textContent = label;
-      cKey.hidden = act !== 'join';
-      card.classList.toggle('is-mine', act !== 'join');
-      cardSig = sig;
+    if (!show) { cardAct = ''; cardShow = false; return; }
+    const clk = late && v.kind !== 'race' ? Math.ceil(v.clockLeft / 1000) : -1;
+    if (!cardShow || cw.kind !== v.kind || cw.phase !== v.phase || cw.inGame !== v.inGame || cw.host !== v.host || cw.hostName !== v.hostName ||
+      cw.name !== v.name || cw.entrants !== v.entrants || cw.late !== late || cw.clk !== clk) {
+      cw.kind = v.kind; cw.phase = v.phase; cw.inGame = v.inGame; cw.host = v.host; cw.hostName = v.hostName;
+      cw.name = v.name; cw.entrants = v.entrants; cw.late = late; cw.clk = clk;
+      buildCard(v);
     }
-    if (cSecs.textContent !== secs) cSecs.textContent = secs;
-    cTime.hidden = frac < 0;
-    if (frac >= 0) cTime.style.transform = `scaleX(${frac.toFixed(3)})`;
-    // Who is in so far.
-    const ws = v.rows.map((r) => r.id).join(',');
-    if (ws !== whoSig) {
-      whoSig = ws;
+    cardShow = true;
+    const secs = v.phase === 'lobby' ? Math.ceil(v.lobbyLeft / 1000) : -1;
+    if (cw.secs !== secs) { cw.secs = secs; cSecs.textContent = secs >= 0 ? String(secs) : ''; }
+    const frac = v.phase === 'lobby' ? Math.round(Math.min(1, v.lobbyLeft / 15000) * 400) : -1;   // 400 steps: under a pixel
+    if (cw.frac !== frac) {
+      cw.frac = frac;
+      cTime.hidden = frac < 0;
+      if (frac >= 0) cTime.style.transform = `scaleX(${(frac / 400).toFixed(4)})`;
+    }
+    // Who is in so far: rebuilt when the ids in it change.
+    let same = cw.nIds === v.rows.length;
+    for (let i = 0; same && i < v.rows.length && i < cw.ids.length; i++) same = cw.ids[i] === v.rows[i].id;
+    if (!same) {
+      cw.nIds = v.rows.length;
+      for (let i = 0; i < v.rows.length && i < cw.ids.length; i++) cw.ids[i] = v.rows[i].id;
       cWho.textContent = '';
       for (const r of v.rows) {
         const s = el('span');
@@ -400,6 +430,34 @@ export function createModesUi(opts) {
         cWho.appendChild(s);
       }
     }
+  }
+
+  /** The card's words: only when renderCard() says something changed. */
+  function buildCard(v) {
+    let kind, title, sub, act, label;
+    if (v.phase === 'lobby') {
+      kind = v.kind === 'race' ? 'Race invite' : v.kind === 'tag' ? 'Tag' : 'Coin Rush';
+      if (v.inGame) {
+        title = v.host === myId() ? 'Waiting for friends' : "You're in";
+        sub = v.kind === 'race' ? `${v.name} · starting when the invite runs out` : 'Starting when the invite runs out';
+        act = 'leave'; label = 'Backspace leaves';
+      } else {
+        const verb = v.kind === 'race' ? 'wants to race' : v.kind === 'tag' ? 'wants to play Tag' : 'started a Coin Rush';
+        title = `${v.hostName} ${verb}`;
+        sub = v.kind === 'race' ? `${v.name} · ${(v.race.length / 1000).toFixed(1)} km · ${v.n} checkpoints` : v.kind === 'tag' ? "One car is IT. Don't be IT when time runs out" : '12 coins on the roads nearby';
+        act = 'join'; label = 'Join';
+      }
+    } else {
+      kind = GAME_NAME[v.kind];
+      title = v.kind === 'race' ? 'Race under way' : `${GAME_NAME[v.kind]} is on`;
+      sub = `${v.entrants} playing${v.kind === 'race' ? ` · ${v.name}` : ` · ${fmtClock(v.clockLeft)} left`}`;
+      act = 'join'; label = v.kind === 'race' ? 'Watch' : 'Join';
+    }
+    cardAct = act;
+    if (cardMark !== v.kind) { cMark.innerHTML = GAME_MARK[v.kind] || ''; cardMark = v.kind; }   // static markup
+    cKind.textContent = kind; cTitle.textContent = title; cSub.textContent = sub; cLabel.textContent = label;
+    cKey.hidden = act !== 'join';
+    card.classList.toggle('is-mine', act !== 'join');
   }
 
   // ---- the countdown -------------------------------------------------------------------
@@ -458,7 +516,10 @@ export function createModesUi(opts) {
       pAgain.hidden = !(v.inGame || v.watching);
     }
     if (podium.hidden === show) podium.hidden = !show;
-    if (show) pBarFill.style.transform = `scaleX(${Math.max(0, Math.min(1, v.clockLeft / PODIUM_BAR_MS)).toFixed(3)})`;
+    if (show) {
+      const q = Math.round(Math.max(0, Math.min(1, v.clockLeft / PODIUM_BAR_MS)) * 400);   // 400 steps: under a pixel
+      if (q !== podiumBar) { podiumBar = q; pBarFill.style.transform = `scaleX(${(q / 400).toFixed(4)})`; }
+    }
   }
 
   // ---- keys ---------------------------------------------------------------------------

@@ -641,7 +641,11 @@ export function createEffects(renderer, scene, camera, opts = {}) {
       try { timerExt = renderer.getContext().getExtension('EXT_disjoint_timer_query_webgl2'); }
       catch { timerExt = null; }
     }
-    if (!timing) gpuMs = NaN;
+    if (!timing) {
+      gpuMs = NaN;
+      // A query still in flight would otherwise never be read or deleted.
+      if (query) { try { renderer.getContext().deleteQuery(query); } catch { /* context gone */ } query = null; }
+    }
     return !!(timing && timerExt);
   }
 

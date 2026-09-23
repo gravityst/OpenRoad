@@ -454,6 +454,36 @@ function effectsOn(dpr, quality, log = []) {
     `worst step keeps ${(worst * 100).toFixed(0)}%; ${rows.join('; ')}`);
 }
 
+{
+  // The loading screen compiles every shader so no frame has to. It is only
+  // worth anything if it compiles the variant the frame will draw: bound to
+  // no render target, three compiles the canvas variant (tone-mapped, sRGB),
+  // which the post chain never uses — 47 of 89 programs after loading were
+  // those, and everything hidden at load compiled again mid-drive. Likewise
+  // the shadow type is in every lit program's key, and three r185 swaps a
+  // PCFSoft shadow map to PCF at the first shadow render.
+  const seen = [];
+  const log = [];
+  globalThis.window = { devicePixelRatio: 1 };
+  const r = recordingRenderer(log);
+  let bound = null;
+  r.setRenderTarget = (t) => { bound = t; };
+  r.getRenderTarget = () => bound;
+  r.compileAsync = () => { seen.push(bound); return Promise.resolve(); };
+  const fx = createEffects(r, new THREE.Scene(), new THREE.PerspectiveCamera(), { quality: 'medium', width: 1440, height: 900 });
+  fx.compile();
+  fx.setQuality('off');
+  fx.compile();
+  const src = readFileSync(join(ROOT, 'src/main.js'), 'utf8');
+  const warm = src.slice(src.indexOf("'warming up the paint shop'"));
+  const ok = seen.length === 2 && seen[0] && seen[0].isWebGLRenderTarget && seen[1] === null && bound === null &&
+    /renderer\.shadowMap\.type = THREE\.PCFShadowMap;/.test(src) && !/PCFSoftShadowMap;/.test(src) &&
+    /effects\.compile\(scene\)/.test(warm.slice(0, 1500));
+  check('the loading screen compiles the shaders the frame will actually use', ok,
+    `post chain: compiled into ${seen[0] && seen[0].isWebGLRenderTarget ? 'its own buffer' : 'the canvas'}; ` +
+    `'off': into ${seen[1] === null ? 'the canvas' : 'a buffer'}; PCF shadows set up front; warm-up goes through effects`);
+}
+
 // ---------------------------------------------------------------------------
 // 7. Automatic quality, against simulated machines.
 // ---------------------------------------------------------------------------

@@ -703,6 +703,33 @@ export function createEffects(renderer, scene, camera, opts = {}) {
   }
 
   /**
+   * Compile every material under `root` (the whole scene by default), hidden
+   * objects included, in the variant this pipeline will actually draw it in,
+   * and resolve when the programs are ready. Call it from a loading screen.
+   *
+   * WHY NOT renderer.compileAsync(scene, camera) ON ITS OWN. A program's
+   * variant depends on where it draws: to the canvas it tone-maps and encodes
+   * sRGB itself, into the composer's buffer it does neither. Compiled with no
+   * render target bound, every material got the canvas variant, which the
+   * composer never uses. Measured on round3/base: 47 of the 89 programs alive
+   * after loading were those strays. Whatever was on screen at the one
+   * warm-up frame got recompiled there; everything hidden at load — the wheel
+   * blur discs, the sea — compiled again on first sight, mid-drive: 130, 95,
+   * 33 and 110 ms stalls in the first 11 s of a flat-out drive.
+   */
+  function compile(root = scene) {
+    const prev = renderer.getRenderTarget();
+    renderer.setRenderTarget(composer ? composer.readBuffer : null);
+    try {
+      if (renderer.compileAsync) return renderer.compileAsync(root, camera, scene);
+      renderer.compile(root, camera, scene);
+      return Promise.resolve(root);
+    } finally {
+      renderer.setRenderTarget(prev);
+    }
+  }
+
+  /**
    * Compile every post pass now, including the ones this tier has switched
    * off, by drawing one frame with all of them on. Call it from a loading
    * screen: a pass switched on later (the automatic quality stepping back up to
@@ -728,7 +755,7 @@ export function createEffects(renderer, scene, camera, opts = {}) {
 
   return {
     render, setSize, setQuality, setSpeedBlur, dispose,
-    setResolutionScale, setGpuTiming, prewarm,
+    setResolutionScale, setGpuTiming, prewarm, compile,
     // Exposed so a harness can measure the effect rather than guess at it.
     get bloom() { return bloomPass; },
     get composer() { return composer; },

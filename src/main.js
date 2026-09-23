@@ -133,7 +133,14 @@ async function boot() {
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.05;
   renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  // PCF, not PCFSoft. three r185 has dropped PCFSoft: it swaps the type to
+  // PCF at the first shadow render, and the shadow type is part of every lit
+  // program's key — so every shader the loading screen compiled before that
+  // render was the wrong one. The ones on screen were compiled a second time
+  // on the first frames; everything hidden at load (the wheel blur discs, the
+  // sea) compiled on first sight, mid-drive: 356 and 227 ms stalls. The
+  // shadows look exactly as they did, because they already were PCF.
+  renderer.shadowMap.type = THREE.PCFShadowMap;
 
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.35, 6000);
@@ -2016,8 +2023,13 @@ async function boot() {
   //  * the traffic pool's cars are built now rather than on the first frame
   //    (they are hidden until they spawn, but a hidden car's materials still
   //    compile — that is the point);
-  //  * compileAsync() compiles every material in the scene, hidden or not, in
-  //    parallel where the browser can, and waits until they are ready;
+  //  * effects.compile() compiles every material in the scene, hidden or not,
+  //    in parallel where the browser can, and waits until they are ready. It
+  //    goes through effects so each is compiled in the variant the post chain
+  //    draws it in: straight through renderer.compileAsync, 47 of the 89
+  //    programs alive after loading were a variant nothing ever drew, and
+  //    everything hidden at load (wheel blur, the sea) compiled again on first
+  //    sight — 130, 95, 33 and 110 ms stalls in the first 11 s of a drive;
   //  * one frame through every post pass compiles those, and the shadow pass.
   // Capped at 8 s, so a driver that never reports ready cannot hold the game
   // on the loading screen.
@@ -2027,12 +2039,11 @@ async function boot() {
   await stage(0.985, 'warming up the paint shop', async () => {
     try { syncTrafficModels(0, 0); } catch (err) { console.warn('[open road] traffic warm-up:', err); }
     try {
-      if (renderer.compileAsync) {
-        await Promise.race([
-          renderer.compileAsync(scene, camera),
-          new Promise((resolve) => setTimeout(resolve, 8000)),
-        ]);
-      }
+      // The stub a failed effects layer leaves draws to the canvas directly,
+      // which is the variant compileAsync makes on its own.
+      const compiling = effects.compile ? effects.compile(scene)
+        : renderer.compileAsync ? renderer.compileAsync(scene, camera) : null;
+      if (compiling) await Promise.race([compiling, new Promise((resolve) => setTimeout(resolve, 8000))]);
     } catch (err) { console.warn('[open road] shader warm-up:', err); }
     try { if (effects.prewarm) effects.prewarm(); } catch (err) { console.warn('[open road] post warm-up:', err); }
     // The remembered automatic-quality level goes on AFTER the warm-up, so the

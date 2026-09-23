@@ -425,6 +425,22 @@ export function buildBiomes(world, terrain) {
     return grade * ramp + lump * gradNoise(x / 110, z / 110, s + 447);
   }
 
+  // Amberleaf's hills: the rounded, wooded knolls and hollows of old
+  // hardwood country, up to 58 m (half that typically), crest to crest a few hundred metres apart,
+  // on the same kind of cap as the mountains but gentle — 24 degrees at
+  // most beside a road — so every lane winds along a wooded hollow with the
+  // trees climbing away on either side. Without them the woods were the
+  // farmland's rolling ground in orange.
+  function autumnHills(x, z) {
+    const n = fbm(x / 420, z / 420, s + 501, 3) * 0.5 + 0.5;
+    return n * 58;
+  }
+  function autumnCap(dRoad) {
+    const u = dRoad - (KEEP_AT + 8);
+    if (u <= 0) return 0;
+    return 0.45 * (u < 30 ? (u * u) / 60 : u - 15);
+  }
+
   /**
    * The soft minimum of a feature's height and its cap: m.c / (m^4 + c^4)^1/4.
    * Exactly 0 where the cap is 0; within 2% of m once the cap is twice m, and
@@ -590,7 +606,11 @@ export function buildBiomes(world, terrain) {
    */
   function reliefRaw(x, z, w, dRoad, clearK, line, cliffK, baseKnown) {
     let F = 0;
-    const wa = w[BIOME.alpine], wd = w[BIOME.desert], wc = w[BIOME.coast];
+    const wa = w[BIOME.alpine], wd = w[BIOME.desert], wc = w[BIOME.coast], wu = w[BIOME.autumn];
+    if (wu > 1e-3 && clearK > 0) {
+      const c = autumnCap(dRoad) * clearK;
+      if (c > 0) F += wu * softCap(autumnHills(x, z), c);
+    }
     if (wa > 1e-3) {
       // The uplift is the one relief a road stands on (the solver grades it
       // like any hill), so it is gone where the alpine weight is under 5%
@@ -643,7 +663,7 @@ export function buildBiomes(world, terrain) {
       let base;
       if (band) { base = baseH(x, z); baseBand[(j - sj0) * FN + i] = base; }
       weightsAt(x, z, wq);
-      if (wq[BIOME.farm] + wq[BIOME.autumn] > 0.999) continue;
+      if (wq[BIOME.farm] > 0.999) continue;
       F[j * FN + i] = reliefRaw(x, z, wq, roadDist(x, z), circuitClear(x, z), lineCol[i], cliffCol[i], base);
     }
   }

@@ -1610,7 +1610,7 @@
   .or-career .or-daily { display: none; }
   .or-title-foot { display: none; }
   .or-nextup { margin-bottom: 10px; padding: 10px 14px; }
-  .or-pause .or-card { grid-template-columns: minmax(230px, 300px) minmax(0, 300px); grid-template-areas: "head head" "menu side"; margin-left: 0; }
+  .or-pause .or-card { grid-template-columns: minmax(230px, 300px) minmax(0, 300px); grid-template-areas: "head head" "menu side"; margin-left: 0; align-self: flex-start; }
   .or-pause-side { padding-left: 20px; padding-top: 0; border-left: 1px solid var(--or-rule); border-top: 0; }
   .or-card-title { font-size: 2rem; }
   .or-menu-list .or-navrow { min-height: 38px; }
@@ -1627,6 +1627,33 @@
   .or-garage-foot .or-hint { display: none; }
   .or-navrow > svg:last-child { opacity: 0.6; transform: none; }
 }
+
+/* ---- the title's entrance -------------------------------------------------
+   Once per showing, the way a broadcast brings its graphics on: the logotype
+   wipes in from the left, then the panels and rows follow 40 ms apart. 520 ms
+   end to end, all of it transform, opacity and one clip — nothing that makes
+   the world behind it relayout — and PLAY is live from the first frame. */
+@keyframes or-wipe { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0 0 0 0); } }
+@keyframes or-in { from { opacity: 0; transform: translateX(-14px); } to { opacity: 1; transform: none; } }
+@keyframes or-in-r { from { opacity: 0; transform: translateX(14px); } to { opacity: 1; transform: none; } }
+.or-title.is-on .or-logo { animation: or-wipe 420ms var(--or-ease) both; }
+.or-title.is-on .or-strap { animation: or-in 300ms var(--or-ease) 160ms both; }
+.or-title.is-on .or-nextup { animation: or-in 300ms var(--or-ease) 120ms both; }
+.or-title.is-on .or-play { animation: or-in 300ms var(--or-ease) 160ms both; }
+.or-title.is-on .or-navrow { animation: or-in 280ms var(--or-ease) both; }
+.or-title.is-on .or-navrow:nth-child(1) { animation-delay: 200ms; }
+.or-title.is-on .or-navrow:nth-child(2) { animation-delay: 240ms; }
+.or-title.is-on .or-navrow:nth-child(3) { animation-delay: 280ms; }
+.or-title.is-on .or-navrow:nth-child(4) { animation-delay: 320ms; }
+.or-title.is-on .or-career,
+.or-title.is-on .ormp-badge { animation: or-in-r 320ms var(--or-ease) 180ms both; }
+
+/* The XP meter fills to its value when it appears, instead of just being
+   there: registering --v lets the gradient stop animate. A browser without
+   @property shows it full-grown at once, which is all it did before. */
+@property --v { syntax: "<number>"; inherits: true; initial-value: 0; }
+@keyframes or-fill { from { --v: 0; } }
+.or-title.is-on .or-meter { animation: or-fill 700ms var(--or-ease) 300ms both; }
 
 /* ---- reduced motion ---------------------------------------------------- */
 

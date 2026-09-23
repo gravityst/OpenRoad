@@ -1433,17 +1433,58 @@ export function createProps(world, ground, opts = {}) {
     lantern.updateMatrix();
     group.add(lantern);
     const bg = beamGeometry();
+    // Fogged like everything else, which for an additive beam means only
+    // ever dimmed: the scene's fog is run once on black, to find the light
+    // the air adds, and once on the beam, and the first taken from the
+    // second leaves the beam times the air's transmittance, by the very
+    // formula the rest of the scene uses. Unfogged, both 260 m cones shone at
+    // full strength from anywhere on the map, 960 m out in air that had
+    // swallowed the lighthouse itself.
+    // Uniforms: three's four for fog, which the renderer fills from
+    // scene.fog, and the haze's three that sky.js hangs on every built-in
+    // material when it swaps in its fog chunks — the same shared objects,
+    // read from THREE.ShaderLib so this layer need not import that one.
+    // Without a sky they are absent, and so is the haze in the chunks.
+    const uniforms = THREE.UniformsUtils.clone(THREE.UniformsLib.fog);
+    const lib = THREE.ShaderLib.basic.uniforms;
+    for (const k of ['orHaze', 'orHazeSun', 'orHazeGlow']) if (lib[k]) uniforms[k] = lib[k];
+    uniforms.uOpacity = { value: 0 };
     beamMat = new THREE.ShaderMaterial({
-      uniforms: { uOpacity: { value: 0 } },
-      vertexShader: 'attribute float fade; varying float vF; void main() { vF = fade; gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 ); }',
-      fragmentShader: 'uniform float uOpacity; varying float vF; void main() { gl_FragColor = vec4( vec3( 1.0, 0.93, 0.78 ) * vF * vF * uOpacity, 1.0 ); }',
+      uniforms, fog: true,
+      vertexShader: `
+#include <fog_pars_vertex>
+attribute float fade;
+varying float vF;
+void main() {
+  vF = fade;
+  vec4 mvPosition = modelViewMatrix * vec4( position, 1.0 );
+  gl_Position = projectionMatrix * mvPosition;
+  #include <fog_vertex>
+}`,
+      fragmentShader: `
+#include <fog_pars_fragment>
+uniform float uOpacity;
+varying float vF;
+void main() {
+  gl_FragColor = vec4( 0.0, 0.0, 0.0, 1.0 );
+  {
+  #include <fog_fragment>
+  }
+  vec3 orAirLight = gl_FragColor.rgb;
+  gl_FragColor.rgb = vec3( 1.0, 0.93, 0.78 ) * vF * vF * uOpacity;
+  {
+  #include <fog_fragment>
+  }
+  gl_FragColor.rgb = max( gl_FragColor.rgb - orAirLight, 0.0 );
+}`,
       transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
     });
     disposables.push(bg, beamMat);
     beam = new THREE.Mesh(bg, beamMat);
     beam.name = 'lighthouse.beam';
     beam.position.set(L0.x, L0.y, L0.z);
-    beam.frustumCulled = false;
+    // Culled like any mesh: its bounding sphere is centred on the axis it
+    // turns about, so the turn never carries the beam outside it.
     beam.renderOrder = 7;
     beam.visible = false;
     group.add(beam);

@@ -101,8 +101,8 @@ import { activeBiomes, BIOME } from '../world/biomes.js';
 //
 // Every biome gets its own air, read from where the camera is (the biome
 // field in world/biomes.js, through its registry, since this module is built
-// before the world is handed to anyone) and eased over a second and a half so
-// a teleport never snaps. Turbidity and visibility are scaled rather than the
+// before the world is handed to anyone) and eased over a second and a half as
+// the car drives, but cut when the camera jumps. Turbidity and visibility are scaled rather than the
 // fog colour repainted, because both feed the sky shader AND the haze, so the
 // horizon cannot come out two colours: the canyon's air is dusty and warm,
 // the pass's is thin, blue and clear enough to see the peaks, the coast's
@@ -1239,7 +1239,7 @@ export function createSky(scene, renderer, opts = {}) {
   // object, rewritten in place every frame.
   const published = {
     zenith: new THREE.Color(), horizon: new THREE.Color(),
-    sunDir: state.sunDir, rain: 0, wetness: 0, night: 0,
+    sunDir: state.sunDir, rain: 0, wetness: 0, night: 0, heat: 0,
   };
   scene.userData.sky = published;
 
@@ -1248,16 +1248,19 @@ export function createSky(scene, renderer, opts = {}) {
   const air = { turb: 1, vis: 1, sun: [1, 1, 1], fog: [1, 1, 1], bounce: [1, 1, 1], snow: 0, leaves: 0, heat: 0,
     gulls: 0, raptors: 0, geese: 0, primed: false };
   state.biome = air;
+  // This frame's targets, reused: three fresh arrays a frame was garbage.
+  const tSun = [0, 0, 0], tFog = [0, 0, 0], tBounce = [0, 0, 0];
+  let airX = 0, airZ = 0;
   function biomeAir(cameraPos, step) {
     const field = activeBiomes();
     if (!field || !cameraPos) return;
     field.weightsAt(cameraPos.x, cameraPos.z, bioW);
     let turb = 0, vis = 0;
-    const sun = [0, 0, 0], fog = [0, 0, 0], bounce = [0, 0, 0];
+    tSun[0] = tSun[1] = tSun[2] = 0; tFog[0] = tFog[1] = tFog[2] = 0; tBounce[0] = tBounce[1] = tBounce[2] = 0;
     for (let b = 0; b < 5; b++) {
       const A = BIO_AIR[b], w = bioW[b];
       turb += A.turb * w; vis += A.vis * w;
-      for (let c = 0; c < 3; c++) { sun[c] += A.sun[c] * w; fog[c] += A.fog[c] * w; bounce[c] += A.bounce[c] * w; }
+      for (let c = 0; c < 3; c++) { tSun[c] += A.sun[c] * w; tFog[c] += A.fog[c] * w; tBounce[c] += A.bounce[c] * w; }
     }
     const snow = smoothstep(0.35, 0.8, bioW[BIOME.alpine]);
     const leaves = smoothstep(0.35, 0.8, bioW[BIOME.autumn]);
@@ -1265,7 +1268,14 @@ export function createSky(scene, renderer, opts = {}) {
     const raptors = smoothstep(0.3, 0.8, bioW[BIOME.desert] + bioW[BIOME.alpine]);
     const geese = smoothstep(0.3, 0.8, bioW[BIOME.autumn] + bioW[BIOME.farm] * 0.6);
     const heat = smoothstep(0.35, 0.8, bioW[BIOME.desert]);
-    const k = air.primed ? 1 - Math.exp(-step / 1.5) : 1;
+    // Eased over 1.5 s while driving, so a border is a change in the air
+    // rather than a switch. A jump of more than 400 m in a frame (the map,
+    // a respawn, Go to a friend: the same test world/biomes.js track() uses)
+    // is a cut, and the air cuts with it: eased, orange leaves went on
+    // falling among the snowy spruce for 5 s after travel to the pass.
+    const jx = cameraPos.x - airX, jz = cameraPos.z - airZ;
+    airX = cameraPos.x; airZ = cameraPos.z;
+    const k = air.primed && jx * jx + jz * jz < 400 * 400 ? 1 - Math.exp(-step / 1.5) : 1;
     air.primed = true;
     air.turb += (turb - air.turb) * k;
     air.vis += (vis - air.vis) * k;
@@ -1276,9 +1286,9 @@ export function createSky(scene, renderer, opts = {}) {
     air.geese += (geese - air.geese) * k;
     air.heat += (heat - air.heat) * k;
     for (let c = 0; c < 3; c++) {
-      air.sun[c] += (sun[c] - air.sun[c]) * k;
-      air.fog[c] += (fog[c] - air.fog[c]) * k;
-      air.bounce[c] += (bounce[c] - air.bounce[c]) * k;
+      air.sun[c] += (tSun[c] - air.sun[c]) * k;
+      air.fog[c] += (tFog[c] - air.fog[c]) * k;
+      air.bounce[c] += (tBounce[c] - air.bounce[c]) * k;
     }
   }
 
@@ -1729,21 +1739,26 @@ export function createSky(scene, renderer, opts = {}) {
         U.uBirdCam.value.copy(cameraPos);
       }
     }
-    // How much heat shimmer the air should have: the canyon, in daylight,
-    // and less the more cloud. For a post pass to read (state.biome.heat);
-    // nothing here draws it.
-    state.heatHaze = air.heat * daylight * smoothstep(0.1, 0.5, sy) * (1 - now.rain);
-
     // ---- publish ------------------------------------------------------------
     // Rain wets the world in about half a minute and it takes minutes to dry;
     // this is the number roads darken and flood by.
     wetness += (now.rain - wetness) * (1 - Math.exp(-step / (now.rain > wetness ? 25 : 150)));
     state.wetness = wetness;
+    // How hard the sun is heating bare ground, 0-1, wherever that ground is:
+    // it needs a high sun (building from 6 to 30 degrees up: none at 06:00,
+    // 0.6 at 07:00, all of it by 08:00), direct light (0.74 of it under broken
+    // cloud, none under overcast, fog or rain) and dry ground (coming back
+    // only as the ground dries, over minutes). The terrain draws the canyon's
+    // mirage by it. heatHaze is the same at the camera, times how much canyon
+    // is round it, for a post pass to read.
+    const heat = smoothstep(0.1, 0.5, sy) * daylight * smoothstep(0.3, 1, now.light) * (1 - Math.max(now.rain, wetness));
+    state.heatHaze = air.heat * heat;
     published.zenith.setRGB(_zenith.r, _zenith.g, _zenith.b);
     published.horizon.copy(state.fogColour);
     published.rain = now.rain;
     published.wetness = wetness;
     published.night = night;
+    published.heat = heat;
   }
 
   function dispose() {

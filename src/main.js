@@ -1760,6 +1760,15 @@ async function boot() {
   }
 
   function districtAt(x, z) {
+    // Which biome, with hysteresis (world/biomes.js track()): the name only
+    // changes once the new country holds 60% of the last 150 m driven, and
+    // crossing into it says so once, in the middle of the screen, where a kid
+    // will see it. Tracked on every call, before a place can answer: skipped
+    // near a landmark, the average then caught up 380 m in one step. Toasted
+    // first, so a landmark found on the same frame has the last word.
+    const bio = world.biomes;
+    const t = bio ? bio.track(x, z) : null;
+    if (t && t.entered) hud.toast(`Entering ${t.name}`, 2.6);
     let best = '', bd = Infinity;
     for (const d of world.districts) {
       // Biomes are listed as districts so the maps label them, but they are
@@ -1776,16 +1785,7 @@ async function boot() {
       const dist = Math.hypot(v.x - x, v.z - z);
       if (dist < 320 && dist < bd) { bd = dist; best = v.name; }
     }
-    // Which biome, with hysteresis (world/biomes.js track()): the name only
-    // changes once the new country holds 62% of the ground, and crossing into
-    // it says so once, in the middle of the screen, where a kid will see it.
-    const bio = world.biomes;
-    if (bio && bio.track) {
-      const t = bio.track(x, z);
-      if (t.entered) hud.toast(`Entering ${t.name}`, 2.6);
-      return best || t.name;
-    }
-    return best || 'Open country';
+    return best || (t ? t.name : 'Open country');
   }
 
   // ---- the camera ---------------------------------------------------------

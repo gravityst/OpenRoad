@@ -514,8 +514,10 @@ uniform float orSeaY;       // sea level, for the tide line on the cliffs
 // the sand bends the sky down into it — so the far flats take the horizon's
 // colour in shimmering pools that crawl as you drive. After lighting and
 // before fog, because what it shows is the sky, not a lit surface; the fog
-// colour IS the horizon's colour (sky.js keeps the two identical). Only in
-// daylight: sky.js publishes how dark it is and update() hands it in.
+// colour IS the horizon's colour (sky.js keeps the two identical). Only under
+// a high sun on dry sand: sky.js publishes how hard the sun is heating the
+// ground (none at night, in rain or below about 6 degrees) and update() hands
+// it in.
 const MIRAGE = `
 #ifdef USE_FOG
 {
@@ -1993,8 +1995,10 @@ normal = normalize( ( viewMatrix * vec4( orNW, 0.0 ) ).xyz );
     if (detail) {
       const u = detail.uniforms;
       u.orTime.value = (u.orTime.value + (step > 0 && step < 0.25 ? step : 0)) % 3600;
+      // The sun's heat on the ground (sky.js): a high sun on dry ground,
+      // so no pools in rain, under a low morning sun, or at night.
       const sky = group.parent && group.parent.userData ? group.parent.userData.sky : null;
-      u.orHeat.value = sky ? 1 - sky.night : 1;
+      u.orHeat.value = sky ? sky.heat : 1;
     }
     const k = step > 0.026 ? 0.4 : step < 0.015 ? 1.5 : 1;
     const spent = drain(budgetMs * k);

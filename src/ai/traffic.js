@@ -694,16 +694,27 @@ export function createTraffic(world, ground, opts = {}) {
   // =========================================================================
 
   /**
-   * The interaction term of an intelligent-driver model. Returns the (negative)
-   * acceleration this obstacle demands; the caller keeps the harshest one.
+   * The intelligent-driver model's acceleration with this obstacle ahead: the
+   * free-road term (freeAcc, set per car before any obstacle is looked at)
+   * plus the interaction term. The caller keeps the harshest one.
+   *
+   * It used to return the interaction term alone, and the caller kept the
+   * lower of that and the free-road term. For anything far away the
+   * interaction term is a hair below zero, so a car at a standstill with a
+   * stop line 100 m ahead was handed -0.00006 m/s^2 instead of its full
+   * pull-away, every frame, for ever: struck by the player and stopped, it
+   * never moved again (a car at a give-way only bids for the junction inside
+   * 25 m). Added, as the model has it, a distant obstacle costs nothing and a
+   * near one everything.
    */
+  let freeAcc = 0;
   function follow(car, gap, vLead, s0, T) {
     const v = car.speed;
     const dv = v - vLead;
     const star = s0 + Math.max(0, v * T + (v * dv) / (2 * Math.sqrt(car.accel * B_COMF)));
     const g = gap > 0.4 ? gap : 0.4;
     const q = star / g;
-    return -car.accel * q * q;
+    return freeAcc - car.accel * q * q;
   }
 
   /**
@@ -953,6 +964,7 @@ export function createTraffic(world, ground, opts = {}) {
         const vr = car.speed / v0;
         a = car.accel * (1 - vr * vr * vr * vr);
       }
+      freeAcc = a;
       a = obstacles(car, a, playerX, playerZ, playerSpeed, phx, phz);
 
       const node = nodes[slot.endNode];

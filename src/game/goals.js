@@ -663,34 +663,38 @@ export function createGoals(opts) {
 
   // ---- the on-screen words -------------------------------------------------------------
 
+  // What the banner said last time, so its strings are only rebuilt when what
+  // it says changes — never once a frame.
+  const objWas = { c: null, mode: '', near: false, medal: -1, first: false };
+
   function objectiveText() {
     const o = ui.objective;
-    if (race.c) {
-      o.kind = 'race'; o.title = race.c.name;
-      o.detail = race.phase === 'countdown' ? 'Get ready…' : race.c.lap ? 'One lap — follow the gates' : 'Follow the gates to the finish';
-      o.dist = -1;
-      return;
-    }
-    if (zone.c) {
-      o.kind = 'drift'; o.title = zone.c.name; o.detail = 'Slide it! Score counts until the end banner'; o.dist = -1;
-      return;
-    }
-    const c = target;
-    if (!c) { o.kind = ''; o.title = ''; o.detail = ''; o.dist = -1; return; }
-    const first = c === rookie && !progress.flag('rookieDone');
-    const near = nav.route && nav.dist < 120;
+    const c = race.c || zone.c || target;
+    const mode = race.c ? race.phase : zone.c ? 'zone' : 'target';
+    const first = !race.c && !zone.c && c === rookie && !progress.flag('rookieDone');
+    const near = !race.c && !zone.c && !!nav.route && nav.dist < 120;
+    const medal = c ? progress.medalOf(c.id) : -1;
+    o.dist = !c || race.c || zone.c ? -1 : nav.route ? nav.dist : Math.hypot(c.start.x - car.x, c.start.z - car.z);
+    if (c === objWas.c && mode === objWas.mode && near === objWas.near && medal === objWas.medal && first === objWas.first) return;
+    objWas.c = c; objWas.mode = mode; objWas.near = near; objWas.medal = medal; objWas.first = first;
+
+    if (!c) { o.kind = ''; o.title = ''; o.detail = ''; return; }
     o.kind = c.kind;
+    if (race.c) {
+      o.title = c.name;
+      o.detail = race.phase === 'countdown' ? 'Get ready…' : c.lap ? 'One lap — follow the gates' : 'Follow the gates to the finish';
+      return;
+    }
+    if (zone.c) { o.title = c.name; o.detail = 'Slide it! Score counts until the end banner'; return; }
     if (first) {
       o.title = near ? 'Drive into the glowing ring!' : 'Follow the arrow to your first race';
       o.detail = c.name;
-    } else {
-      o.title = near ? KIND_VERB[c.kind] : `${KIND_LABEL[c.kind]}: ${c.name}`;
-      const m = progress.medalOf(c.id);
-      const nm = Math.min(MEDAL_GOLD, m + 1);
-      const tgt = c.kind === 'race' ? formatTime(c.targets[nm]) : `${c.targets[nm]} ${c.unit}`;
-      o.detail = m >= MEDAL_GOLD ? 'Gold already — beat your best' : `${MEDAL_NAMES[nm][0].toUpperCase()}${MEDAL_NAMES[nm].slice(1)}: ${tgt}`;
+      return;
     }
-    o.dist = nav.route ? nav.dist : Math.hypot(c.start.x - car.x, c.start.z - car.z);
+    o.title = near ? KIND_VERB[c.kind] : `${KIND_LABEL[c.kind]}: ${c.name}`;
+    const nm = Math.min(MEDAL_GOLD, medal + 1);
+    const tgt = c.kind === 'race' ? formatTime(c.targets[nm]) : `${c.targets[nm]} ${c.unit}`;
+    o.detail = medal >= MEDAL_GOLD ? 'Gold already — beat your best' : `${MEDAL_NAMES[nm][0].toUpperCase()}${MEDAL_NAMES[nm].slice(1)}: ${tgt}`;
   }
 
   function raceUi() {
@@ -750,7 +754,7 @@ export function createGoals(opts) {
           if (disarmed.has(c.id)) { if (d2 > (r + 8) * (r + 8)) disarmed.delete(c.id); continue; }
           if (d2 >= r * r) continue;
           if (c === target || car.speed < 4) { beginRace(c); break; }
-          ringHint = `Stop in the ring to race ${c.name}`;
+          ringHint = c.ringHint || (c.ringHint = `Stop in the ring to race ${c.name}`);
         }
       }
       if (!race.c) {

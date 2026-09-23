@@ -271,6 +271,7 @@ export function createGoalGates(scene, opts = {}) {
   // ---- per-challenge statics --------------------------------------------------
   const statics = [];       // { obj, x, z, r }
   const byId = new Map();   // id -> { ring, beam, ringMat, beamMat, kind, c }
+  const recs = [];          // the same records, for the frame loop to walk by index
   const ringGeo = keep(new THREE.TorusGeometry(1, 0.045, 8, 64));
   const beamGeo = keep(new THREE.PlaneGeometry(1, 1));
   beamGeo.translate(0, 0.5, 0);
@@ -305,8 +306,9 @@ export function createGoalGates(scene, opts = {}) {
     }
     beam.position.set(s.x, y, s.z);
     group.add(beam);
-    const rec = { ring, beam, ringMat, beamMat, kind, c, r, medal: 0, x: s.x, z: s.z };
+    const rec = { ring, beam, ringMat, beamMat, kind, c, r, medal: 0, x: s.x, z: s.z, isTarget: false };
     byId.set(c.id, rec);
+    recs.push(rec);
     return rec;
   }
 
@@ -321,6 +323,7 @@ export function createGoalGates(scene, opts = {}) {
   // Trap: a camera gantry on the right-hand verge, the lens looking back down
   // the run-up, and a line across the road where it measures.
   const trapFlash = new Map();
+  const flashes = [];
   function trapStatics(c) {
     const g = new THREE.Group();
     const half = c.hw;
@@ -358,7 +361,9 @@ export function createGoalGates(scene, opts = {}) {
     placeAcross(g, c.x, baseHeight(c.x, c.z), c.z, c.tx, c.tz);
     group.add(g);
     statics.push({ obj: g, x: c.x, z: c.z, r: SHOW_R });
-    trapFlash.set(c.id, { mat: flashMat, t: 0 });
+    const fl = { mat: flashMat, t: 0 };
+    trapFlash.set(c.id, fl);
+    flashes.push(fl);
   }
 
   // Jump: the ramp itself, built from the same profile the physics drives on,
@@ -639,8 +644,16 @@ export function createGoalGates(scene, opts = {}) {
     // Beacons: the target's is tall, bright and cuts through the fog; the rest
     // are shown near enough to be worth a detour. During a race, only the race.
     const pulse = 0.5 + 0.5 * Math.sin(time * 3.2);
-    for (const rec of byId.values()) {
+    for (let i = 0; i < recs.length; i++) {
+      const rec = recs[i];
       const isTarget = vs.target === rec.c;
+      // Fog is compiled into the shader, so it is switched only when the
+      // target changes, with a recompile — never flipped every frame.
+      if (isTarget !== rec.isTarget) {
+        rec.isTarget = isTarget;
+        rec.beamMat.fog = !isTarget;
+        rec.beamMat.needsUpdate = true;
+      }
       const dx = rec.x - cx, dz = rec.z - cz;
       const d2 = dx * dx + dz * dz;
       const racing = !!vs.race;
@@ -651,7 +664,6 @@ export function createGoalGates(scene, opts = {}) {
       rec.ring.visible = !racing && (isTarget || d2 < 600 * 600);
       if (rec.beam.visible) {
         rec.beamMat.opacity = isTarget ? 0.75 + 0.2 * pulse : 0.32;
-        rec.beamMat.fog = !isTarget;
         rec.beam.scale.set(isTarget ? 1.6 : 1, isTarget ? 1 : 0.55, isTarget ? 1.6 : 1);
         rec.beam.rotation.y = time * 0.2;
       }
@@ -676,7 +688,6 @@ export function createGoalGates(scene, opts = {}) {
         placeAcross(p.g, gate.x, gate.y, gate.z, gate.tx, gate.tz);
         p.g.visible = true;
         p.curtain.visible = k === 0;
-        p.g.scale.setScalar(k === 0 ? 1 : 0.999);
       }
       curtainMat.opacity = 0.55 + 0.35 * pulse;
     }
@@ -686,7 +697,8 @@ export function createGoalGates(scene, opts = {}) {
     }
 
     // Trap flashes.
-    for (const f of trapFlash.values()) {
+    for (let i = 0; i < flashes.length; i++) {
+      const f = flashes[i];
       if (f.t > 0) { f.t -= dt; f.mat.opacity = Math.max(0, f.t / 0.25); }
     }
 

@@ -11,10 +11,12 @@
 //
 // NOTHING HERE BUILDS A STRING UNLESS WHAT IT SHOWS HAS CHANGED. The race clock
 // changes ten times a second and is rebuilt ten times a second; every other
-// line is compared against what is already on screen first. The layer is
-// pointer-events: none except the two buttons on the medal card, and those
-// never take focus — a focused button turns the handbrake (Space) into
-// "Race again".
+// line compares the NUMBERS behind it with the ones on screen, and only
+// formats when they differ — nor is any class toggled without a change.
+//
+// The layer is pointer-events: none except the two buttons on the medal card,
+// and those never take focus — a focused button turns the handbrake (Space)
+// into "Race again".
 
 const ICONS = {
   race: '<svg viewBox="0 0 24 24"><path d="M5 3v18" stroke="currentColor" stroke-width="2" fill="none"/><path d="M6 4h13l-3 4 3 4H6z" fill="currentColor"/><path d="M9 4h3v4H9zM12 8h3v4h-3z" fill="#0b0e13" opacity=".55"/></svg>',
@@ -34,10 +36,18 @@ function fmtTime(t) {
   const m = Math.floor(tenths / 600), s = Math.floor((tenths % 600) / 10), d = tenths % 10;
   return `${m}:${s < 10 ? '0' : ''}${s}.${d}`;
 }
-function fmtDist(m) {
-  if (!(m >= 0)) return '';
-  if (m < 995) return `${Math.max(10, Math.round(m / 10) * 10)} m`;
-  return `${(m / 1000).toFixed(1)} km`;
+// Distances are compared as the number that is SHOWN, before any string is
+// made: metres to the nearest 10 under a kilometre, then tenths of a km
+// (stored as 100 m steps plus an offset so the two ranges cannot collide).
+function distKey(m) {
+  if (!(m >= 0)) return -1;
+  if (m < 995) return Math.max(10, Math.round(m / 10) * 10);
+  return 1e6 + Math.round(m / 100);
+}
+function fmtDistKey(k) {
+  if (k < 0) return '';
+  if (k < 1e6) return `${k} m`;
+  return `${((k - 1e6) / 10).toFixed(1)} km`;
 }
 const fmtCash = (v) => `$${Math.round(v).toLocaleString('en')}`;
 
@@ -122,8 +132,9 @@ export function createObjectives(root, opts = {}) {
 
   // ---- what is on screen now, to compare against -----------------------------
   const last = {
-    kind: null, title: null, detail: null, dist: null, raceOn: null, zoneOn: null,
-    tenths: -1, cp: null, delta: null, tMedal: -1, tText: null, zScore: -1, zMedal: -1, zText: null,
+    kind: null, title: null, detail: null, dist: -2, showObj: null, raceOn: null, zoneOn: null,
+    tenths: -1, cp: -1, cpTotal: -1, delta: 0, tMedal: -1, tTextMedal: -1, tTextTime: NaN,
+    zScore: -1, zMedal: -1, zTextMedal: -1, zTextScore: NaN,
     hint: null, cash: -1, lv: -1, xp: -1,
   };
   let visible = false;
@@ -141,7 +152,7 @@ export function createObjectives(root, opts = {}) {
 
     const o = ui.objective;
     const showObj = !!o.title && !ui.race.active && !ui.zone.active;
-    E.obj.classList.toggle('is-on', showObj);
+    if (showObj !== last.showObj) { last.showObj = showObj; E.obj.classList.toggle('is-on', showObj); }
     if (o.kind !== last.kind) {
       last.kind = o.kind;
       E.icon.innerHTML = ICONS[o.kind] || ICONS.nav;
@@ -158,8 +169,8 @@ export function createObjectives(root, opts = {}) {
       freshT = 1.6;
     }
     if (o.detail !== last.detail) { last.detail = o.detail; E.detail.textContent = o.detail; }
-    const dist = o.dist >= 0 ? fmtDist(o.dist) : '';
-    if (dist !== last.dist) { last.dist = dist; E.dist.textContent = dist; }
+    const dk = distKey(o.dist);
+    if (dk !== last.dist) { last.dist = dk; E.dist.textContent = fmtDistKey(dk); }
 
     const r = ui.race;
     const raceOn = r.active && r.phase === 'running';
@@ -167,19 +178,27 @@ export function createObjectives(root, opts = {}) {
     if (raceOn) {
       const tenths = Math.floor(r.time * 10);
       if (tenths !== last.tenths) { last.tenths = tenths; E.timer.textContent = fmtTime(r.time); }
-      const cp = r.cp >= r.cpTotal - 1 ? 'FINAL GATE' : `GATE ${r.cp + 1} / ${r.cpTotal}`;
-      if (cp !== last.cp) { last.cp = cp; E.cp.textContent = cp; }
-      if (r.deltaAge < 3 && Number.isFinite(r.delta)) {
-        const txt = `${r.delta <= 0 ? '−' : '+'}${Math.abs(r.delta).toFixed(1)}`;
-        if (txt !== last.delta) {
-          last.delta = txt; E.delta.textContent = txt;
-          E.delta.dataset.sign = r.delta <= 0 ? 'ahead' : 'behind';
+      if (r.cp !== last.cp || r.cpTotal !== last.cpTotal) {
+        last.cp = r.cp; last.cpTotal = r.cpTotal;
+        E.cp.textContent = r.cp >= r.cpTotal - 1 ? 'FINAL GATE' : `GATE ${r.cp + 1} / ${r.cpTotal}`;
+      }
+      // The split, as signed tenths: 0 means hidden, and the +1 keeps "−0.0"
+      // and "+0.0" apart.
+      const dKey = r.deltaAge < 3 && Number.isFinite(r.delta)
+        ? (r.delta <= 0 ? -1 : 1) * (Math.round(Math.abs(r.delta) * 10) + 1) : 0;
+      if (dKey !== last.delta) {
+        last.delta = dKey;
+        if (dKey) {
+          E.delta.textContent = `${dKey < 0 ? '−' : '+'}${((Math.abs(dKey) - 1) / 10).toFixed(1)}`;
+          E.delta.dataset.sign = dKey < 0 ? 'ahead' : 'behind';
           E.delta.classList.add('is-on');
-        }
-      } else if (last.delta !== '') { last.delta = ''; E.delta.classList.remove('is-on'); }
+        } else E.delta.classList.remove('is-on');
+      }
       if (r.targetMedal !== last.tMedal) { last.tMedal = r.targetMedal; E.tMedal.dataset.medal = r.targetMedal; }
-      const tt = r.targetMedal ? `${MEDAL_WORD[r.targetMedal]} ${fmtTime(r.targetTime)}` : 'NO MEDAL — FINISH IT!';
-      if (tt !== last.tText) { last.tText = tt; E.tText.textContent = tt; }
+      if (r.targetMedal !== last.tTextMedal || r.targetTime !== last.tTextTime) {
+        last.tTextMedal = r.targetMedal; last.tTextTime = r.targetTime;
+        E.tText.textContent = r.targetMedal ? `${MEDAL_WORD[r.targetMedal]} ${fmtTime(r.targetTime)}` : 'NO MEDAL — FINISH IT!';
+      }
     }
 
     const z = ui.zone;
@@ -188,8 +207,10 @@ export function createObjectives(root, opts = {}) {
       const sc = Math.round(z.score);
       if (sc !== last.zScore) { last.zScore = sc; E.zScore.textContent = sc.toLocaleString('en'); }
       if (z.targetMedal !== last.zMedal) { last.zMedal = z.targetMedal; E.zMedal.dataset.medal = z.targetMedal; }
-      const zt = `${MEDAL_WORD[z.targetMedal]} ${z.targetScore.toLocaleString('en')}`;
-      if (zt !== last.zText) { last.zText = zt; E.zText.textContent = zt; }
+      if (z.targetMedal !== last.zTextMedal || z.targetScore !== last.zTextScore) {
+        last.zTextMedal = z.targetMedal; last.zTextScore = z.targetScore;
+        E.zText.textContent = `${MEDAL_WORD[z.targetMedal]} ${z.targetScore.toLocaleString('en')}`;
+      }
     }
 
     if (ui.hint !== last.hint) {

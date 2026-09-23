@@ -561,6 +561,8 @@ async function boot() {
   // the car read at boot — so keep it in step, or the next save puts the old
   // car back on disk and the next visit starts in it.
   menus.on('drive', (p) => { if (p && p.id) { settings.car = p.id; settings.colour = p.colour | 0; } });
+  // Handed to goals.update() every frame; one object, not one per frame.
+  const goalsFrame = { driving: false };
 
   // ---- state --------------------------------------------------------------
   const MODES = ['chase', 'chaseFar', 'bonnet', 'bumper', 'orbit'];
@@ -930,7 +932,7 @@ async function boot() {
     pumpHints(dt);
 
     driftState = drift.update(dt, car) || drift.state;
-    if (goals) { goals.update(dt, { driving }); hudState.nav = goals.nav; }
+    if (goals) { goalsFrame.driving = driving; goals.update(dt, goalsFrame); hudState.nav = goals.nav; }
 
     // ---- car visuals ----
     carRoot.position.set(car.x, car.y, car.z);

@@ -722,9 +722,15 @@ export function createMenus(root, opts = {}) {
   const shopEl = ui.querySelector('.or-paintshop');
   const shopSwatches = ui.querySelector('.or-swatches--shop');
   const paintNameEl = ui.querySelector('.or-paint-name');
-  // The special paint on show per car while browsing; null is its factory colour.
+  // The special paint on show per car while browsing; null is its factory
+  // colour. Filled lazily from the save, so a car given a paint last week is
+  // shown in it the first time it is browsed to.
   const paintByCar = new Map();
-  function paintOf(car) { return car ? paintByCar.get(car.id) || null : null; }
+  function paintOf(car) {
+    if (!car) return null;
+    if (!paintByCar.has(car.id)) paintByCar.set(car.id, goals ? goals.progress.livery(car.id) : null);
+    return paintByCar.get(car.id) || null;
+  }
 
   function renderShop(car) {
     const show = !!goals && owns(car.id);
@@ -774,9 +780,7 @@ export function createMenus(root, opts = {}) {
   }
 
   /** Every car back in the paint it actually wears — leaving the garage without driving. */
-  function restoreLiveries() {
-    for (const id of paintByCar.keys()) paintByCar.set(id, goals ? goals.progress.livery(id) : null);
-  }
+  function restoreLiveries() { paintByCar.clear(); }
 
   function setCars(list) {
     // main.js calls this after the menu has already been built, so hold on to
@@ -1571,7 +1575,7 @@ export function createMenus(root, opts = {}) {
     // The car boots in its factory colour (main.js built it before any of
     // this existed); its special paint, if it has one, goes on from here.
     if (goals) {
-      paintByCar.set(drivingId, goals.progress.livery(drivingId));
+      paintByCar.clear();
       if (goals.previewPaint) goals.previewPaint(goals.progress.paintHex(drivingId));
     }
     refreshGoals();
@@ -1724,6 +1728,8 @@ export function createMenus(root, opts = {}) {
       if (!ok) return;
       goals.progress.reset();
       if (goals.resync) goals.resync();
+      // The paints went with everything else: nothing may still be wearing one.
+      paintByCar.clear();
       backToStarter();
       refreshGoals();
     },

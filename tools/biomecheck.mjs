@@ -345,7 +345,8 @@ const area = new Array(BIOME_COUNT).fill(0);
     for (let i = 0; i < 400; i++) sky.update(1 / 60, cam);
     const st = sky.state;
     const snowing = scene.children.some((c) => c.name === 'snowfall' && c.visible);
-    air.push({ b, turb: st.turbidity, vis: st.visibility, snowing });
+    const leaves = scene.children.some((c) => c.name === 'leaffall' && c.visible);
+    air.push({ b, turb: st.turbidity, vis: st.visibility, snowing, leaves, heat: st.heatHaze || 0 });
     for (const v of [st.turbidity, st.visibility, st.fogColour.r, st.fogColour.g, st.fogColour.b, sky.sun.intensity]) {
       if (!Number.isFinite(v) || v < 0) bad++;
     }
@@ -353,9 +354,13 @@ const area = new Array(BIOME_COUNT).fill(0);
   const dusty = air[BIOME.desert].vis < air[BIOME.farm].vis * 0.7;
   const clear = air[BIOME.alpine].vis > air[BIOME.farm].vis * 1.2;
   const snowOnly = air.every((a) => a.snowing === (a.b === BIOME.alpine));
+  const leavesOnly = air.every((a) => a.leaves === (a.b === BIOME.autumn));
+  const heatOnly = air.every((a) => (a.heat > 0.5) === (a.b === BIOME.desert));
   check('each biome has its own air, and snow falls only on the pass', dusty && clear && snowOnly && bad === 0,
     air.map((a) => `${BIOMES[a.b].key} vis ${(a.vis / 1000).toFixed(0)} km${a.snowing ? ' +snow' : ''}`).join(', ') +
     `; ${bad} non-finite`);
+  check('leaves fall only in the woods, heat shimmers only in the canyon', leavesOnly && heatOnly,
+    air.map((a) => `${BIOMES[a.b].key}${a.leaves ? ' +leaves' : ''} heat ${a.heat.toFixed(2)}`).join(', '));
   check('the sky reads the world it was built with', activeBiomes() !== null, activeBiomes() ? 'registry set' : 'no field registered');
   sky.dispose();
 }

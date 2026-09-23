@@ -162,6 +162,64 @@ void main() {
 }
 `;
 
+// Leaves in the air in the autumn woods: the same wrapping box as the snow,
+// but a leaf falls slower than a flake, swings side to side as it goes, and
+// tumbles — its outline is an ellipse that spins in the view and narrows and
+// widens as it turns edge-on and back. Each carries its own colour from the
+// canopy's own range (gold, orange, red, and one in six already brown), in
+// LINEAR light like the snow. One draw call, only while the camera is in the
+// woods.
+const LEAF_VERT = `
+uniform float uT;
+uniform vec3 uCam;
+uniform float uBox;
+uniform float uAmt;
+uniform float uScale;
+attribute vec4 leaf;      // colour pick, phase, spin, size
+varying float vA;
+varying vec3 vC;
+varying float vRot;
+void main() {
+  vec3 p = position;
+  float ph = leaf.y * 6.2832;
+  p.y -= uT * ( 0.75 + leaf.w * 0.5 );
+  p.x += uT * 0.9 + sin( uT * 1.3 + ph ) * 1.4;
+  p.z += uT * 0.4 + cos( uT * 0.9 + ph * 1.7 ) * 1.0;
+  // The box rides a third of its height above the camera: leaves come
+  // down out of the canopy, and half a box below the road is half the
+  // leaves spent where nobody can see them.
+  vec3 orC = uCam + vec3( 0.0, uBox * 0.3, 0.0 );
+  p = mod( p - orC + uBox * 0.5, uBox ) + orC - uBox * 0.5;
+  vec4 mv = modelViewMatrix * vec4( p, 1.0 );
+  gl_Position = projectionMatrix * mv;
+  float d = max( -mv.z, 0.5 );
+  gl_PointSize = clamp( ( 0.17 + leaf.w * 0.11 ) * uScale / d, 1.0, 56.0 );
+  vec3 q = abs( p - orC ) / ( uBox * 0.5 );
+  vA = ( 1.0 - smoothstep( 0.6, 1.0, max( q.x, max( q.y, q.z ) ) ) ) * smoothstep( 0.8, 2.5, d );
+  if ( fract( leaf.x * 13.1 ) > uAmt ) vA = 0.0;
+  vRot = uT * ( 1.2 + leaf.z * 3.5 ) + ph;
+  vC = leaf.x < 0.30 ? vec3( 0.89, 0.34, 0.012 )
+     : leaf.x < 0.62 ? vec3( 0.85, 0.11, 0.006 )
+     : leaf.x < 0.84 ? vec3( 0.45, 0.014, 0.004 )
+     : vec3( 0.17, 0.052, 0.010 );
+}
+`;
+const LEAF_FRAG = `
+uniform vec3 uLight;
+varying float vA;
+varying vec3 vC;
+varying float vRot;
+void main() {
+  vec2 c = gl_PointCoord - 0.5;
+  float cs = cos( vRot ), sn = sin( vRot );
+  vec2 r = vec2( c.x * cs - c.y * sn, c.x * sn + c.y * cs );
+  float w = 0.08 + 0.16 * abs( sin( vRot * 0.7 ) );
+  float e = ( r.x * r.x ) / 0.2025 + ( r.y * r.y ) / ( w * w );
+  if ( e > 1.0 || vA <= 0.0 ) discard;
+  gl_FragColor = vec4( vC * uLight * ( 0.85 + 0.3 * abs( r.y ) / w ), vA );
+}
+`;
+
 const TAU = Math.PI * 2;
 const DEG = Math.PI / 180;
 
@@ -1128,7 +1186,7 @@ export function createSky(scene, renderer, opts = {}) {
 
   // ---- biome air -----------------------------------------------------------
   const bioW = new Float64Array(5);
-  const air = { turb: 1, vis: 1, sun: [1, 1, 1], fog: [1, 1, 1], bounce: [1, 1, 1], snow: 0, primed: false };
+  const air = { turb: 1, vis: 1, sun: [1, 1, 1], fog: [1, 1, 1], bounce: [1, 1, 1], snow: 0, leaves: 0, heat: 0, primed: false };
   state.biome = air;
   function biomeAir(cameraPos, step) {
     const field = activeBiomes();
@@ -1142,11 +1200,15 @@ export function createSky(scene, renderer, opts = {}) {
       for (let c = 0; c < 3; c++) { sun[c] += A.sun[c] * w; fog[c] += A.fog[c] * w; bounce[c] += A.bounce[c] * w; }
     }
     const snow = smoothstep(0.35, 0.8, bioW[BIOME.alpine]);
+    const leaves = smoothstep(0.35, 0.8, bioW[BIOME.autumn]);
+    const heat = smoothstep(0.35, 0.8, bioW[BIOME.desert]);
     const k = air.primed ? 1 - Math.exp(-step / 1.5) : 1;
     air.primed = true;
     air.turb += (turb - air.turb) * k;
     air.vis += (vis - air.vis) * k;
     air.snow += (snow - air.snow) * k;
+    air.leaves += (leaves - air.leaves) * k;
+    air.heat += (heat - air.heat) * k;
     for (let c = 0; c < 3; c++) {
       air.sun[c] += (sun[c] - air.sun[c]) * k;
       air.fog[c] += (fog[c] - air.fog[c]) * k;
@@ -1179,6 +1241,34 @@ export function createSky(scene, renderer, opts = {}) {
   snowPts.visible = false;
   scene.add(snowPts);
   let snowT = 0;
+
+  // ---- falling leaves ---------------------------------------------------------
+  const LEAF_N = 1600, LEAF_BOX = 40;
+  const leafPos = new Float32Array(LEAF_N * 3), leafA = new Float32Array(LEAF_N * 4);
+  {
+    let a = 0x7f4a7c15;
+    const r = () => { a = (a + 0x6D2B79F5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), 1 | t); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+    for (let i = 0; i < LEAF_N * 3; i++) leafPos[i] = r() * LEAF_BOX;
+    for (let i = 0; i < LEAF_N * 4; i++) leafA[i] = r();
+  }
+  const leafGeo = new THREE.BufferGeometry();
+  leafGeo.setAttribute('position', new THREE.BufferAttribute(leafPos, 3));
+  leafGeo.setAttribute('leaf', new THREE.BufferAttribute(leafA, 4));
+  const leafU = {
+    uT: { value: 0 }, uCam: { value: new THREE.Vector3() }, uBox: { value: LEAF_BOX },
+    uAmt: { value: 0 }, uScale: { value: 900 }, uLight: { value: new THREE.Color(1, 1, 1) },
+  };
+  const leafMat = new THREE.ShaderMaterial({
+    uniforms: leafU, vertexShader: LEAF_VERT, fragmentShader: LEAF_FRAG,
+    transparent: true, depthWrite: false, fog: false,
+  });
+  const leafPts = new THREE.Points(leafGeo, leafMat);
+  leafPts.name = 'leaffall';
+  leafPts.frustumCulled = false;
+  leafPts.renderOrder = 6;
+  leafPts.visible = false;
+  scene.add(leafPts);
+  let leafT = 0;
 
   function setTime(h) {
     hours = ((h % 24) + 24) % 24;
@@ -1480,6 +1570,25 @@ export function createSky(scene, renderer, opts = {}) {
       snowU.uLight.value.setRGB(lum * 0.95, lum * 0.97, lum);
     }
 
+    // Leaves come down in the autumn woods whatever the weather, fewer in
+    // rain (a wet leaf stays on the ground). Lit a little brighter than the
+    // snow, because a leaf is lit through as well as on.
+    const lamt = air.leaves * (1 - now.rain * 0.6) * 0.8;
+    leafPts.visible = lamt > 0.02 && !!cameraPos;
+    if (leafPts.visible) {
+      leafT = (leafT + step) % 3600;
+      leafU.uT.value = leafT;
+      leafU.uCam.value.copy(cameraPos);
+      leafU.uAmt.value = lamt;
+      if (renderer && renderer.domElement) leafU.uScale.value = renderer.domElement.height * 1.0;
+      const ll = 0.12 + 1.35 * daylight * now.light;
+      leafU.uLight.value.setRGB(ll, ll, ll);
+    }
+    // How much heat shimmer the air should have: the canyon, in daylight,
+    // and less the more cloud. For a post pass to read (state.biome.heat);
+    // nothing here draws it.
+    state.heatHaze = air.heat * daylight * smoothstep(0.1, 0.5, sy) * (1 - now.rain);
+
     // ---- publish ------------------------------------------------------------
     // Rain wets the world in about half a minute and it takes minutes to dry;
     // this is the number roads darken and flood by.
@@ -1496,6 +1605,9 @@ export function createSky(scene, renderer, opts = {}) {
     scene.remove(snowPts);
     snowGeo.dispose();
     snowMat.dispose();
+    scene.remove(leafPts);
+    leafGeo.dispose();
+    leafMat.dispose();
     scene.remove(mesh);
     scene.remove(sun);
     scene.remove(sun.target);

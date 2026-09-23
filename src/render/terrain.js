@@ -190,6 +190,10 @@ const MARRAM = [0.62, 0.58, 0.35];
 const AUT_GRASS = [0.54, 0.46, 0.20];
 const AUT_RUSSET = [0.58, 0.35, 0.15];
 const LITTER = [0.55, 0.29, 0.11];
+// ...which is never one colour: drifts of fresh gold, and older leaves gone
+// dark brown in the damp between them.
+const LITTER_GOLD = [0.68, 0.46, 0.16];
+const LITTER_DARK = [0.34, 0.19, 0.09];
 
 // The per-pixel rock the shader draws on steep ground, as LINEAR colour (the
 // shader's own default, F_MAIN, is the farmland one). Carried per vertex in
@@ -495,6 +499,32 @@ varying vec4 vOrPos;
 varying vec4 vOrWeight;
 varying vec3 vOrNormal;
 varying vec4 vOrRock;
+uniform float orTime;
+uniform float orHeat;
+`;
+
+// The canyon's heat haze, as the one part of it a ground shader can draw: a
+// mirage. On the flat canyon floor, a few hundred metres out, where the eye
+// meets the ground within about three degrees of the horizon, hot air over
+// the sand bends the sky down into it — so the far flats take the horizon's
+// colour in shimmering pools that crawl as you drive. After lighting and
+// before fog, because what it shows is the sky, not a lit surface; the fog
+// colour IS the horizon's colour (sky.js keeps the two identical). Only in
+// daylight: sky.js publishes how dark it is and update() hands it in.
+const MIRAGE = `
+#ifdef USE_FOG
+{
+  vec3 orV = vOrPos.xyz - cameraPosition;
+  float orD = length( orV );
+  float orDesM = clamp( vOrRock.a * 2.0, 0.0, 1.0 ) * ( 1.0 - smoothstep( 0.45, 0.55, vOrRock.a ) );
+  float orMir = orDesM * orHeat
+              * ( 1.0 - smoothstep( 0.01, 0.045, -orV.y / max( orD, 1.0 ) ) )
+              * smoothstep( 150.0, 420.0, orD ) * smoothstep( 0.965, 0.99, normalize( vOrNormal ).y );
+  orMir *= smoothstep( -0.3, 0.9, sin( vOrPos.x * 0.043 + vOrPos.z * 0.031 + orTime * 0.9 ) * sin( vOrPos.x * 0.017 - vOrPos.z * 0.029 - orTime * 0.6 ) + 0.35 )
+         * ( 0.8 + 0.2 * sin( vOrPos.x * 0.35 + vOrPos.z * 0.29 + orTime * 7.0 ) );
+  gl_FragColor.rgb = mix( gl_FragColor.rgb, fogColor * 1.06, clamp( orMir, 0.0, 0.8 ) );
+}
+#endif
 `;
 
 const F_MAIN = `
@@ -757,6 +787,10 @@ export function createTerrain(world, ground, opts = {}) {
       orWarmth: { value: opts.warmth ?? 0.10 },
       orMacro: { value: detail.macro },
       orMacroTile: { value: new THREE.Vector2(1 / 310, 1 / 53) },
+      // The mirage (MIRAGE below): seconds, and how much sun there is to
+      // make one, 0 at night.
+      orTime: { value: 0 },
+      orHeat: { value: 1 },
     };
 
     const prevCompile = material.onBeforeCompile;
@@ -773,7 +807,8 @@ export function createTerrain(world, ground, opts = {}) {
         .replace('#include <project_vertex>', `#include <project_vertex>\n${V_MAIN}`);
       shader.fragmentShader = f
         .replace('#include <common>', `#include <common>\n${F_PARS}`)
-        .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>\n${F_MAIN}`);
+        .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>\n${F_MAIN}`)
+        .replace('#include <fog_fragment>', `${MIRAGE}\n#include <fog_fragment>`);
     };
     // Every parameter three hashes into a program key is identical between this
     // material and any other vertex-coloured Lambert in the scene, so without a
@@ -907,7 +942,15 @@ export function createTerrain(world, ground, opts = {}) {
       palWood = smoothstep(0.15, 0.3, woodland(x, z, terrain.seed ?? 0));
       if (palWood > 0) {
         const k = palWood * 0.72;
-        const fr = lerp(FLOOR[0], LITTER[0], wU), fg = lerp(FLOOR[1], LITTER[1], wU), fb = lerp(FLOOR[2], LITTER[2], wU);
+        let lr = LITTER[0], lg = LITTER[1], lb = LITTER[2];
+        if (wU > 0.02) {
+          const n = valueNoise(x / 7.5, z / 7.5, tintSeed + 161) + valueNoise(x / 31, z / 31, tintSeed + 162) * 0.7;
+          const gold = smoothstep(0.25, 0.9, n) * 0.7, dark = smoothstep(-0.25, -0.9, n) * 0.6;
+          lr = lerp(lerp(lr, LITTER_GOLD[0], gold), LITTER_DARK[0], dark);
+          lg = lerp(lerp(lg, LITTER_GOLD[1], gold), LITTER_DARK[1], dark);
+          lb = lerp(lerp(lb, LITTER_GOLD[2], gold), LITTER_DARK[2], dark);
+        }
+        const fr = lerp(FLOOR[0], lr, wU), fg = lerp(FLOOR[1], lg, wU), fb = lerp(FLOOR[2], lb, wU);
         out[0] = lerp(out[0], fr, k); out[1] = lerp(out[1], fg, k); out[2] = lerp(out[2], fb, k);
       }
       out[0] = lerp(out[0], SOIL[0], bare); out[1] = lerp(out[1], SOIL[1], bare); out[2] = lerp(out[2], SOIL[2], bare);
@@ -1915,6 +1958,12 @@ normal = normalize( ( viewMatrix * vec4( orNW, 0.0 ) ).xyz );
     // Streaming stutter is exactly what you notice from a moving car, so frames
     // that are already late get less of the budget, not the same amount.
     const step = dt === undefined ? 1 / 60 : dt;
+    if (detail) {
+      const u = detail.uniforms;
+      u.orTime.value = (u.orTime.value + (step > 0 && step < 0.25 ? step : 0)) % 3600;
+      const sky = group.parent && group.parent.userData ? group.parent.userData.sky : null;
+      u.orHeat.value = sky ? 1 - sky.night : 1;
+    }
     const k = step > 0.026 ? 0.4 : step < 0.015 ? 1.5 : 1;
     const spent = drain(budgetMs * k);
     if (water) water.update(cameraPos, step);

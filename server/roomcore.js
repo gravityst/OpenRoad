@@ -17,6 +17,7 @@ import {
   encodeSnapshot, decodeState, cleanName, safeName, cleanCarId, cleanColour,
   PROTO_V2, AGE_STALE, MAX_BURST,
 } from '../src/net/protocol.js';
+import { createModes } from './modes.js';
 
 export const TICK_MS = 50;             // 20 Hz downstream
 export const MAX_PLAYERS = 16;
@@ -45,8 +46,21 @@ const CREEP_SPAN = 250;
 // 'at the', 'barn' would take a minute to spell out. Generation 2 only.
 const RENAME_MS = 20000;
 
+/** Who is IT first needs a coin toss, not cryptography. Seeded from the
+ *  room's own clock, so a harness on a simulated clock is repeatable. */
+function seeded(seed) {
+  let a = (seed >>> 0) ^ 0x9e3779b9;
+  return () => {
+    a = (a + 0x6D2B79F5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
 /**
- * opts: { proto, now: () => wall ms, maxPlayers }
+ * opts: { proto, now: () => wall ms, maxPlayers, rng }
  * Returns { open, message, close, tick, restore, has, size, rate, proto }.
  */
 export function createRoomCore(opts = {}) {
@@ -61,6 +75,21 @@ export function createRoomCore(opts = {}) {
   const out = [];                           // snapshot scratch, reused every tick
 
   const ms = () => (now() - epoch) | 0;
+
+  // Party games (server/modes.js): generation 2 only, so a protocol-1 room
+  // never sends a byte of them.
+  const modes = v2 ? createModes({
+    ms,
+    players: () => peers.values(),
+    broadcast: (obj, exceptId) => {
+      const s = JSON.stringify(obj);
+      for (const [sock, q] of peers) {
+        if (q.id === exceptId || !q.joined) continue;
+        try { sock.send(s); } catch { /* closing */ }
+      }
+    },
+    rng: opts.rng || seeded(epoch),
+  }) : null;
 
   /**
    * Ids are one byte and go round. The original took `nextId++ & 0xff`, which
@@ -159,7 +188,7 @@ export function createRoomCore(opts = {}) {
     // The id on the wire is ignored. A client does not get to say who it is —
     // otherwise anyone can drive someone else's car by editing one byte.
     st.car.id = p.id;
-    if (v2) stamp(p, st, t);
+    if (v2) { stamp(p, st, t); p.recMs = ms(); }
     p.rec = st.car;
   }
 
@@ -211,7 +240,8 @@ export function createRoomCore(opts = {}) {
       const players = [];
       for (const q of peers.values()) players.push(info(q));
       const welcome = { t: 'welcome', id: p.id, sendHz: rate(), serverMs: ms(), players };
-      if (v2) { welcome.proto = PROTO_V2; welcome.tickMs = TICK_MS; }
+      // A game already on is part of the room a late arrival walks into.
+      if (v2) { welcome.proto = PROTO_V2; welcome.tickMs = TICK_MS; welcome.mode = modes.wire(); }
       send(sock, welcome);
       broadcast({ t: 'joined', ...info(p) }, sock);
     } else if (m.t === 'name') {
@@ -226,6 +256,8 @@ export function createRoomCore(opts = {}) {
       broadcast({ t: 'joined', ...info(p) });
     } else if (m.t === 'ping') {
       send(sock, { t: 'pong', c: m.c, s: ms() });
+    } else if (v2 && (m.t === 'mode' || m.t === 'emote')) {
+      modes.control(p, m);
     }
   }
 
@@ -273,6 +305,7 @@ export function createRoomCore(opts = {}) {
     if (!p) return false;
     peers.delete(sock);
     broadcast({ t: 'left', id: p.id });
+    if (modes) modes.drop(p.id);
     return true;
   }
 
@@ -304,6 +337,7 @@ export function createRoomCore(opts = {}) {
         out.push(p.rec);
       }
     }
+    if (modes) modes.tick();
     if (!out.length) return null;
     const frame = encodeSnapshot(out, snapMs);
     for (const sock of list) {
@@ -316,6 +350,8 @@ export function createRoomCore(opts = {}) {
   return {
     proto, open, message, close, tick, restore, rate, ms,
     has: (sock) => peers.has(sock),
+    /** The party games (null in a protocol-1 room). */
+    get modes() { return modes; },
     get size() { return peers.size; },
     /** For the harness. */
     peerOf: (sock) => peers.get(sock) || null,

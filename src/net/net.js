@@ -69,6 +69,12 @@ export function createNet(opts = {}) {
   const people = new Map();
   let onRoster = opts.onRoster || null;
   let onEvent = opts.onEvent || null;
+  // The party game the room is running (server/modes.js), exactly as the room
+  // last described it, or null. Only a generation-2 room sends one.
+  let mode = null;
+  let modeAt = 0;                   // local ms it arrived
+  let onMode = opts.onMode || null;
+  let onEmote = opts.onEmote || null;
 
   function connect() {
     if (!url || state === 'connecting' || state === 'live' || state === 'off') return;
@@ -142,6 +148,7 @@ export function createNet(opts = {}) {
       people.clear();
       if (Array.isArray(m.players)) for (const p of m.players) learn(p, false);
       welcomed = true;
+      setMode(m.mode && typeof m.mode === 'object' ? m.mode : null, { k: 'welcome' });
       pingsSent = 0;
       nextPing = now();
       roster();
@@ -169,7 +176,19 @@ export function createNet(opts = {}) {
       if (typeof m.c === 'number' && typeof m.s === 'number') room.onPong(m.c + epoch, m.s, now());
     } else if (m.t === 'error') {
       lastErr = String(m.msg || 'refused');
+    } else if (m.t === 'mode' && serverProto === PROTO_V2) {
+      setMode(m.kind ? m : null, m.ev && typeof m.ev === 'object' ? m.ev : null);
+    } else if (m.t === 'emote' && serverProto === PROTO_V2) {
+      if (onEmote && typeof m.id === 'number' && Number.isInteger(m.e)) {
+        try { onEmote(m.id, m.e); } catch { /* a UI bug must not kill the socket */ }
+      }
     }
+  }
+
+  function setMode(m, ev) {
+    mode = m;
+    modeAt = now();
+    if (onMode) { try { onMode(mode, ev); } catch (err) { console.error('[open road] party game:', err); } }
   }
 
   function roster() {
@@ -190,6 +209,7 @@ export function createNet(opts = {}) {
     room.reset();
     people.clear();
     if (had) roster();
+    if (mode) setMode(null, { k: 'lost' });
     retryAt = now() + BACKOFF[Math.min(tries, BACKOFF.length - 1)];
     tries++;
   }
@@ -288,6 +308,36 @@ export function createNet(opts = {}) {
       if (serverProto === PROTO_V2) send(JSON.stringify({ t: 'car', car: carId, colour }));
     },
     ping,
+    /** The party game the room is running, as it last said, or null. */
+    get mode() { return mode; },
+    /** performance.now() when that arrived. */
+    get modeAt() { return modeAt; },
+    /** fn(mode, ev): the game changed; ev says what happened ({ k: ... }). */
+    set onMode(fn) { onMode = fn; },
+    /** fn(id, e): player `id` sent emote e (0-3). */
+    set onEmote(fn) { onEmote = fn; },
+    /**
+     * Ask the room for something in a party game. Only the shapes
+     * server/modes.js understands go out, and only numbers and ids — never
+     * anything a player typed. Returns false when there is no room to ask.
+     */
+    sendMode(a, args = {}) {
+      if (serverProto !== PROTO_V2 || !welcomed) return false;
+      const m = { t: 'mode', a };
+      if (a === 'race') { m.race = String(args.race || ''); m.n = args.n | 0; if (args.again) m.again = true; }
+      else if (a === 'coins') {
+        m.pts = (args.pts || []).slice(0, 16).map((q) => [Math.round(q[0] * 10) / 10, Math.round(q[1] * 10) / 10]);
+        if (args.again) m.again = true;
+      } else if (a === 'tag') { if (args.again) m.again = true; }
+      else if (a === 'gate') { m.g = args.g | 0; m.ms = Math.max(0, Math.round(args.ms || 0)); }
+      else if (a !== 'join' && a !== 'leave') return false;
+      return send(JSON.stringify(m));
+    },
+    /** One of the four preset reactions. */
+    emote(e) {
+      if (serverProto !== PROTO_V2 || !welcomed || !(e >= 0 && e < 4)) return false;
+      return send(JSON.stringify({ t: 'emote', e: e | 0 }));
+    },
     enable() { if (state === 'off') { state = 'idle'; tries = 0; } },
     disable() {
       state = 'off';
@@ -295,6 +345,7 @@ export function createNet(opts = {}) {
       const had = people.size;
       people.clear();
       if (had) roster();
+      if (mode) setMode(null, { k: 'lost' });
       if (ws) { try { ws.close(); } catch { /* already gone */ } ws = null; }
     },
     dispose() {

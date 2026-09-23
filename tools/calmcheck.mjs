@@ -305,6 +305,97 @@ function crash(car) {
   }
 }
 
+// ---- 6. Grinding along a wall is a thin trickle ---------------------------
+//
+// main.js calls impactCue() for every 120 Hz substep that reports a hit past
+// severity 0.04, and a car held against a wall can report one on every
+// substep. A fresh knock should get a whole puff you can see; staying in
+// contact should get a trickle, not a puff on a timer plus dust on every
+// substep. Run through main.js's own impactCue() and stepImpactCue(), with an
+// emitDust that keeps particles.js's fractional debt and 24-per-call cap, so
+// the count is the billows the game would spawn.
+{
+  const HZ = Number((/const PHYS_HZ = (\d+)/.exec(MAIN) || [])[1]) || 120;
+  const SUB = 1 / HZ, FRAME = 2 / HZ;              // two substeps a frame at 60 fps
+  const cueFor = (player) => {
+    const dust = { billows: 0, debt: 0 };
+    const fns = fromMain(['const cue = {', 'function impactCue(', 'function stepImpactCue('],
+      ['impactCue', 'stepImpactCue'], {
+        car: player, PHYS_DT: SUB,
+        sky: { state: { nightFactor: 0 } },
+        clampNum: (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v),
+        ground: { heightAt: () => 0 },
+        particles: {
+          emitDust(x, y, z, a) {
+            if (!(a > 0)) return;
+            dust.debt += a;
+            const n = dust.debt | 0;
+            dust.debt -= n;
+            dust.billows += Math.min(24, n);
+          },
+        },
+      });
+    return { ...fns, dust };
+  };
+  const still = { x: 0, z: 0, yaw: 0 };
+
+  // One knock, then clear air.
+  const knock = (sev) => {
+    const c = cueFor(still);
+    if (c.missing) return -1;
+    c.impactCue(0, -2, sev, 0, 1);
+    for (let f = 0; f < 60; f++) c.stepImpactCue(FRAME);
+    return c.dust.billows;
+  };
+  // In contact on every substep for 2 s, after the knock that started it.
+  const held = (sev) => {
+    const c = cueFor(still);
+    if (c.missing) return -1;
+    c.impactCue(0, -2, sev, 0, 1);
+    c.stepImpactCue(FRAME);
+    const b0 = c.dust.billows;
+    for (let f = 1; f < 121; f++) {
+      c.impactCue(0, -2, sev, 0, 1);
+      c.impactCue(0, -2, sev, 0, 1);
+      c.stepImpactCue(FRAME);
+    }
+    return (c.dust.billows - b0) / 2;
+  };
+  // And a real one: the player's car at 18 m/s along a warehouse face, steered
+  // into it, through the real collision.
+  const scrape = (() => {
+    const car = playerCar(CARS[0].id);
+    const c = cueFor(car);
+    if (c.missing) return null;
+    const coll = createCollision(WALL);
+    const yaw0 = 0.3;
+    car.reset(15.6, -40, yaw0);
+    car.vx = -Math.sin(yaw0) * 18; car.vz = -Math.cos(yaw0) * 18;
+    let touching = 0, knocks = 0;
+    for (let f = 0; f < 180; f++) {
+      car.input.throttle = 0.45; car.input.brake = 0; car.input.steer = -1;
+      for (let k = 0; k < 2; k++) {
+        car.step(SUB);
+        const h = coll.resolve(car, SUB);
+        if (h.hit) touching++;
+        if (h.hit && h.severity > 0.04) { knocks++; c.impactCue(h.x, h.z, h.severity, h.nx, h.nz); }
+      }
+      c.stepImpactCue(FRAME);
+    }
+    return { touching: touching * SUB, knocks, billows: c.dust.billows };
+  })();
+
+  const brush = knock(0.1), hard = knock(1);
+  check('a knock gets a puff you can see', brush >= 5 && hard >= 22,
+    brush < 0 ? 'main.js has no impactCue()' :
+      `${brush} billows for a brush (severity 0.1), ${hard} for 18 m/s into a wall`);
+  const soft = held(0.3), firm = held(1);
+  check('grinding along a wall is a thin trickle', soft >= 0 && soft <= 40 && firm <= 40 && !!scrape,
+    `held in contact every substep: ${soft.toFixed(0)}/s at severity 0.3, ${firm.toFixed(0)}/s at 1.0; ` +
+    (scrape ? `a real 18 m/s scrape: ${scrape.touching.toFixed(2)} s touching, ` +
+      `${scrape.knocks} contacts past 0.04, ${scrape.billows} billows` : 'no scrape run'));
+}
+
 // ---- 5. The wiring holds --------------------------------------------------
 //
 // Read main.js for the four places the switch has to reach. If a merge drops

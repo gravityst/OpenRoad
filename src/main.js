@@ -1392,17 +1392,23 @@ async function boot() {
    * (pushX, pushZ) is the way the car was shoved, a unit vector.
    */
   const cue = {
-    cool: 0,        // s until the next full puff
+    touch: 1,       // s since the last contact impactCue() was told about
     last: 0,        // severity of the last full puff
     t: 1,           // s since the camera was knocked
     amp: 0,         // rad, that knock's size
     pitch: 0, roll: 0,
   };
   function impactCue(x, z, sev, pushX, pushZ) {
-    // Collision runs at 120 Hz and grinding along a wall reports a hit on every
-    // substep, so only a fresh knock — or one clearly harder than the last —
-    // gets a whole puff. Held against the wall you get a thin trickle.
-    const fresh = cue.cool <= 0 || sev > cue.last * 1.6;
+    // Collision runs at 120 Hz and a car held against a wall reports a hit on
+    // every substep, so a whole puff is only for a fresh knock: the first
+    // contact after a quarter of a second clear, or one clearly harder than the
+    // last. Staying in contact gets a thin trickle metered in TIME, not per
+    // substep: 6 billows a second for a brush, up to 30 for a full shove. It
+    // was 0.3 + 2*sev per substep plus a whole puff every 0.18 s: in contact on
+    // every substep that came to 153 billows a second at severity 0.3 and 384
+    // at 1.0 (calmcheck), and a billow lives 1.1-2 s, so ~600 on screen.
+    const fresh = cue.touch > 0.25 || sev > cue.last * 1.6;
+    cue.touch = 0;
     // Pale concrete dust, dimmed at night: the billow shader is unlit, and a
     // full-bright puff in the dark reads as a flash of light.
     const night = sky.state ? sky.state.nightFactor || 0 : 0;
@@ -1415,7 +1421,7 @@ async function boot() {
     const ox = x + pushX * 0.9, oz = z + pushZ * 0.9;
     const y = ground.heightAt(ox, oz) + 0.35;
     if (!fresh) {
-      particles.emitDust(ox, y, oz, 0.3 + sev * 2, col);
+      particles.emitDust(ox, y, oz, (6 + 24 * clampNum(sev, 0, 1)) * PHYS_DT, col);
       return;
     }
     // 4 puffs for a brush, 24 for anything past 18 m/s into the surface
@@ -1430,7 +1436,6 @@ async function boot() {
     particles.emitDust(ox, y + 0.3, oz, n * 0.34, col);
     particles.emitDust(cx + tx * 1.6, y, cz + tz * 1.6, n * 0.33, col);
     particles.emitDust(cx - tx * 1.6, y, cz - tz * 1.6, n * 0.33, col);
-    cue.cool = 0.18;
     cue.last = sev;
     // The camera nods the way the car was shoved: forward into a wall, sideways
     // off a door. Amplitude 0.005 rad for a brush and 0.025 for the hardest hit,
@@ -1448,7 +1453,7 @@ async function boot() {
     }
   }
   function stepImpactCue(dt) {
-    if (cue.cool > 0) cue.cool -= dt;
+    if (cue.touch < 1) cue.touch += dt;
     if (cue.t < 1) cue.t += dt;
   }
 

@@ -135,14 +135,16 @@ vOrLod = vec2( smoothstep( orLod.x, orLod.y, orDist ), smoothstep( orLod.z, orLo
 // Collapsing the whole instance to one point outside the clip volume: its
 // triangles become degenerate and are dropped before rasterisation. In the
 // shadow pass `cameraPosition` is the sun's, so the test there is against the
-// real camera (orFocus) and the reach of the shadow map instead: sky.js covers
-// 110 m either side of the car, and a tree further out than that can only
-// shade ground nobody is shown with a shadow.
+// real camera (orFocus) and the reach of the shadow map instead: sky.js
+// centres a box 110 m either side of the camera. 125 m leaves room for a
+// fifteen-metre tree's shadow under a 20-degree sun; at 150 m the shadow pass
+// was drawing as many triangles as the whole mid level for trees whose
+// shadows land outside the map.
 const LOD_COLLAPSE = `
 #ifndef OR_SHADOW
 if ( vOrLod.x <= 0.0 || vOrLod.y >= 1.0 ) gl_Position = vec4( 0.0, 0.0, -2.0, 1.0 );
 #else
-if ( length( orBase.xz - orFocus.xz ) > 150.0 ) gl_Position = vec4( 0.0, 0.0, -2.0, 1.0 );
+if ( length( orBase.xz - orFocus.xz ) > 125.0 ) gl_Position = vec4( 0.0, 0.0, -2.0, 1.0 );
 #endif
 `;
 

@@ -1270,27 +1270,36 @@ export function rasterImpostors(descs, geoms, atlas) {
     }
   }
 
-  // Dilate both maps into their transparent texels, cell by cell.
+  // Dilate both maps into their transparent texels, cell by cell. Written
+  // without a single allocation in the loop: the first version built two small
+  // arrays per texel per pass, four million of them, and spent more time in
+  // the collector than the rasteriser spent drawing.
   const filled = new Uint8Array(W * H);
+  const next = new Uint8Array(W * H);
   for (let i = 0; i < W * H; i++) filled[i] = albedo[i * 4 + 3] > 0 ? 1 : 0;
   for (let pass = 0; pass < 8; pass++) {
-    const next = filled.slice();
+    next.set(filled);
     for (let y = 0; y < H; y++) {
+      const cy = (y / CH) | 0;
       for (let x = 0; x < W; x++) {
         const i = y * W + x;
         if (filled[i]) continue;
-        let n = 0; const acc = [0, 0, 0, 0, 0, 0];
-        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-          const X2 = x + dx, Y2 = y + dy;
+        const cx = (x / CW) | 0;
+        let n = 0, r = 0, gg = 0, bb = 0, vx = 0, vy = 0, vz = 0;
+        for (let k = 0; k < 4; k++) {
+          const X2 = k === 0 ? x + 1 : k === 1 ? x - 1 : x;
+          const Y2 = k === 2 ? y + 1 : k === 3 ? y - 1 : y;
           if (X2 < 0 || Y2 < 0 || X2 >= W || Y2 >= H) continue;
-          if (Math.floor(X2 / CW) !== Math.floor(x / CW) || Math.floor(Y2 / CH) !== Math.floor(y / CH)) continue;
+          if (((X2 / CW) | 0) !== cx || ((Y2 / CH) | 0) !== cy) continue;
           const j = Y2 * W + X2;
           if (!filled[j]) continue;
           n++;
-          for (let k = 0; k < 3; k++) { acc[k] += albedo[j * 4 + k]; acc[k + 3] += normal[j * 4 + k]; }
+          r += albedo[j * 4]; gg += albedo[j * 4 + 1]; bb += albedo[j * 4 + 2];
+          vx += normal[j * 4]; vy += normal[j * 4 + 1]; vz += normal[j * 4 + 2];
         }
         if (!n) continue;
-        for (let k = 0; k < 3; k++) { albedo[i * 4 + k] = acc[k] / n; normal[i * 4 + k] = acc[k + 3] / n; }
+        albedo[i * 4] = r / n; albedo[i * 4 + 1] = gg / n; albedo[i * 4 + 2] = bb / n;
+        normal[i * 4] = vx / n; normal[i * 4 + 1] = vy / n; normal[i * 4 + 2] = vz / n;
         next[i] = 1;
       }
     }

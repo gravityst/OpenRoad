@@ -389,6 +389,17 @@ function makeLoop(car, physics) {
       `level ${m.q.level} after 20 s: ${trace(m)}`);
   }
   {
+    // Remembered at the bottom, and the pixels were never the problem. With no
+    // GPU timer and no baseline, it has to go and look.
+    const m = machine({ cpu: 24, gpu: 6, timing: false, level: 5 });
+    m.run(120);
+    const w = machine({ cpu: 6, gpu: 70, timing: false, level: 5 });
+    w.run(120);
+    check('remembered at the bottom: a CPU-bound machine finds its way back up',
+      m.q.level === 0 && w.belowShare > 0.85,
+      `CPU-bound now level ${m.q.level} (${trace(m)}); a GPU-bound one stays down ${(w.belowShare * 100).toFixed(0)}% of the time`);
+  }
+  {
     const hi = ladderFor('high'), md = ladderFor('medium'), lo = ladderFor('low'), off = ladderFor('off');
     const posts = (l) => [...new Set(l.map((r) => r.post))].join(',');
     check('it never goes above the chosen post tier, or down to "off"',

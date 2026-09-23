@@ -126,6 +126,7 @@ export function createAdaptiveQuality(opts = {}) {
   let probeNeed = cfg.probeWindows;
   let sinceUp = Infinity;          // windows since the last step up (a probe)
   let baselineP50 = NaN;           // median when the stepping down began
+  let blindAtBottom = 0;           // slow windows at the bottom with no baseline
   let holdMs = 0;                  // cpu-bound: no stepping down until this runs out
   let holdNext = cfg.cpuBoundHoldSec * 1000;   // ...and it doubles every time
   let changes = 0;
@@ -203,6 +204,15 @@ export function createAdaptiveQuality(opts = {}) {
           baselineP50 = NaN;
           return setLevel(0, 'slow, but not the pixels');
         }
+        // Started down here (a level remembered from last time) and never
+        // measured the top, so there is nothing to compare with. Without that,
+        // a CPU-bound machine would stay blurred for good — and remember it.
+        // Go and look once: from the top it either comes straight back down
+        // with a baseline, or finds the pixels were never the problem.
+        if (!Number.isFinite(baselineP50) && ++blindAtBottom >= 4) {
+          blindAtBottom = 0;
+          return setLevel(0, 're-checking the top');
+        }
         last.verdict = 'slow at the lowest level';
         return false;
       }
@@ -253,6 +263,7 @@ export function createAdaptiveQuality(opts = {}) {
     slowStreak = 0; goodStreak = 0;
     probeNeed = cfg.probeWindows; sinceUp = Infinity;
     baselineP50 = NaN; holdMs = 0; holdNext = cfg.cpuBoundHoldSec * 1000;
+    blindAtBottom = 0;
     last.verdict = 'warming up';
   }
 

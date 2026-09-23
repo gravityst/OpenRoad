@@ -15,7 +15,9 @@ import { buildWorld } from './world/layout.js';
 import { createGround } from './world/ground.js';
 import { createVehicle } from './physics/vehicle.js';
 import { createCollision, createCarCollision } from './physics/collision.js';
-import { createDamage } from './physics/damage.js';
+// DAMAGE is the one switch for crashes: off, a crash is a harmless bump. See
+// physics/damage.js for everything it turns off.
+import { createDamage, DAMAGE } from './physics/damage.js';
 import { createControls } from './input/controls.js';
 import { CARS, CAR_BY_ID, STARTER, specFor } from './vehicles/catalog.js';
 // Pure, dependency-free and tiny, so it is imported directly rather than through
@@ -169,15 +171,18 @@ async function boot() {
       // Re-enable by restoring this line; src/game/audio.js is untouched.
       Promise.resolve(null),
       layer('./input/touch.js', 'touch controls'),
-      layer('./render/carDamage.js', 'car damage'),
-      layer('./physics/debris.js', 'debris'),
-      layer('./render/damageFx.js', 'damage effects'),
+      // The damage layers load only with DAMAGE on (physics/damage.js). Off,
+      // each is the null its slot was always allowed to be — about 4,000 lines
+      // the browser no longer fetches — and every use below already copes.
+      DAMAGE ? layer('./render/carDamage.js', 'car damage') : Promise.resolve(null),
+      DAMAGE ? layer('./physics/debris.js', 'debris') : Promise.resolve(null),
+      DAMAGE ? layer('./render/damageFx.js', 'damage effects') : Promise.resolve(null),
       layer('./game/drift.js', 'drift scoring'),
       layer('./render/models.js', 'model library'),
       layer('./net/net.js', 'multiplayer'),
       layer('./render/nameTags.js', 'name tags'),
-      layer('./render/explosion.js', 'explosions'),
-      layer('./game/wreck.js', 'wreck sequence'),
+      DAMAGE ? layer('./render/explosion.js', 'explosions') : Promise.resolve(null),
+      DAMAGE ? layer('./game/wreck.js', 'wreck sequence') : Promise.resolve(null),
       layer('./game/goals.js', 'goals'),
       layer('./render/gates.js', 'goal markers'),
       layer('./game/objectives.js', 'objectives'),
@@ -265,7 +270,9 @@ async function boot() {
   let chosenCar = settings.car && CAR_BY_ID[settings.car] ? settings.car : STARTER;
   let chosenColour = settings.colour | 0;
 
-  const car = createVehicle({ ground, spec: specFor(chosenCar, chosenColour), isPlayer: true });
+  // damage: DAMAGE — off, the car carries no damage model at all (car.damage
+  // is null), so no crash can cost it power, grip, brakes or steering.
+  const car = createVehicle({ ground, spec: specFor(chosenCar, chosenColour), isPlayer: true, damage: DAMAGE });
   applyAssists(car, settings);
 
   const carRoot = new THREE.Group();
@@ -415,8 +422,9 @@ async function boot() {
       if (!m) continue;
 
       // A recycled slot is a different car. Without this it drives away wearing
-      // the last one's dents.
-      if (trafficRespawn[i] !== undefined && trafficRespawn[i] !== t.respawnId) {
+      // the last one's dents. (With DAMAGE off there are no dents and nothing
+      // burns: onTrafficHit() never records a slot, and neither block runs.)
+      if (DAMAGE && trafficRespawn[i] !== undefined && trafficRespawn[i] !== t.respawnId) {
         trafficRespawn[i] = t.respawnId;
         // Disposed, not reset. reset() restores the paint but keeps every mesh
         // the split produced and leaves the full-body scuff overlay visible at
@@ -434,7 +442,7 @@ async function boot() {
 
       // A written-off car burns where it stands. Keeps its own fire alive too:
       // traffic damage is never stepped, so nothing else would sustain it.
-      if (t.burning > 0 && t.active) {
+      if (DAMAGE && t.burning > 0 && t.active) {
         t.burning -= dt;
         if (t.damage) {
           t.damage.state.onFire = t.burning > 3 ? 0.85 : Math.max(0, t.burning / 3.5);
@@ -873,7 +881,9 @@ async function boot() {
         const hit = collision.resolve(car, PHYS_DT);
         if (hit.hit && hit.severity > 0.04) {
           audio.playCollision(hit.severity);
-          particles.emitSparks(hit.x, car.y + 0.4, hit.z, hit.severity * 14, hit.nx, hit.nz);
+          // hit.n points out of the wall: the way the car was shoved.
+          if (DAMAGE) particles.emitSparks(hit.x, car.y + 0.4, hit.z, hit.severity * 14, hit.nx, hit.nz);
+          else impactCue(hit.x, hit.z, hit.severity, hit.nx, hit.nz);
         }
         if (hit.recovered) hud.toast('Recovered to the road', 2.5);
         if (hit.severity > 0.05 && drift.onCollision) drift.onCollision(hit.severity);
@@ -887,9 +897,12 @@ async function boot() {
       if (bump.hit) {
         if (drift.onCollision) drift.onCollision(bump.severity);
         if (bump.severity > 0.05) {
-          particles.emitSparks(bump.x, car.y + 0.45, bump.z, bump.severity * 16, bump.nx, bump.nz);
+          // bump.n points from the player TO the other car, so the shove is -n.
+          if (DAMAGE) particles.emitSparks(bump.x, car.y + 0.45, bump.z, bump.severity * 16, bump.nx, bump.nz);
+          else impactCue(bump.x, bump.z, bump.severity, -bump.nx, -bump.nz);
         }
-        // A head-on at speed, or anything hard enough, goes up.
+        // A head-on at speed, or anything hard enough, goes up — with DAMAGE
+        // on. Off, explode() returns at once.
         if (bump.closing > 21 || (bump.headOn && bump.closing > 15)) {
           explode(bump.x, car.y + 0.6, bump.z, Math.min(1, bump.closing / 30));
         }
@@ -909,6 +922,10 @@ async function boot() {
     props.setNight(night);
 
     // ---- damage ----
+    // With DAMAGE off (physics/damage.js) car.damage is null and none of this
+    // block runs: no fire, coolant or tyre toasts, no "press V to see the
+    // damage", no garage prompts.
+    //
     // drainEvents() EMPTIES the queue, so exactly one caller may use it. That
     // caller is here and everything else is handed the array. A second consumer
     // would silently starve the first, and the bug would present as "sometimes
@@ -1008,6 +1025,7 @@ async function boot() {
 
     traffic.update(dt, car.x, car.z, car.speed, car.yaw);
     if (boomCooldown > 0) boomCooldown -= dt;
+    stepImpactCue(dt);
     if (boom) boom.update(dt);
     if (wreck) wreck.update(dt, car, carDamage);
 
@@ -1185,7 +1203,8 @@ async function boot() {
 
   /** What is actually wrong with the car, in words. */
   function damageSummary() {
-    if (!car.damage) return 'Inspecting — drag to orbit, scroll to zoom';
+    // No damage model (DAMAGE off): V is just a good look at your car.
+    if (!car.damage) return 'Looking round your car — drag or arrow keys to turn, scroll to zoom, V to drive';
     const d = car.damage.state;
     const bits = [];
     const lost = [];
@@ -1213,6 +1232,11 @@ async function boot() {
    */
   const npcEvents = [];
   function onTrafficHit(other, severity, lx, lz, closing) {
+    // DAMAGE off: the struck car keeps only the shove and spin collision.js
+    // already gave it, and drives on. No damage model, no speed cap, never
+    // written off, never alight. Measured: a 60 m/s head-on left the car at
+    // speedCap 0 and burning for ~24 s; now it is back up to speed in seconds.
+    if (!DAMAGE) return;
     if (!other.damage) other.damage = createDamage(other.spec || {});
     const hw = (other.spec ? other.spec.track : 1.6) * 0.5;
     const hl = other.halfLen != null ? other.halfLen : 2.2;
@@ -1315,6 +1339,9 @@ async function boot() {
   // is not now that it is a fireball with a light on it.
   let boomCooldown = 0;
   function explode(x, y, z, power) {
+    // DAMAGE off: nothing explodes, ever. The layers this drives were never
+    // loaded, and the crash that called it has already had its impactCue().
+    if (!DAMAGE) return;
     if (boomCooldown > 0) return;
     boomCooldown = 0.35;
     const p = Math.max(0.2, Math.min(1, power));
@@ -1350,6 +1377,62 @@ async function boot() {
     const spent = car.damage ? car.damage.integrity : 1;
     if (wreck && (p > 0.6 || spent < 0.45)) wreck.ignite(car, carDamage, p);
     else hud.toast('Impact', 1.4);
+  }
+
+  /**
+   * What a crash looks like with DAMAGE off: a bump.
+   *
+   * It still has to be FELT — a knock nobody can see reads as driving through a
+   * ghost — but as a bump, not a disaster: a puff of pale dust where the car
+   * touched, and a short nod of the camera, both scaled to the hit. No sparks:
+   * the spark pool ramps white-hot to ember red, which is fire by another name,
+   * and fire is what the kids asked to lose.
+   *
+   * (pushX, pushZ) is the way the car was shoved, a unit vector.
+   */
+  const cue = {
+    cool: 0,        // s until the next full puff
+    last: 0,        // severity of the last full puff
+    t: 1,           // s since the camera was knocked
+    amp: 0,         // rad, that knock's size
+    pitch: 0, roll: 0,
+  };
+  function impactCue(x, z, sev, pushX, pushZ) {
+    // Collision runs at 120 Hz and grinding along a wall reports a hit on every
+    // substep, so only a fresh knock — or one clearly harder than the last —
+    // gets a whole puff. Held against the wall you get a thin trickle.
+    const fresh = cue.cool <= 0 || sev > cue.last * 1.6;
+    // Pale concrete dust, dimmed at night: the billow shader is unlit, and a
+    // full-bright puff in the dark reads as a flash of light.
+    const night = sky.state ? sky.state.nightFactor || 0 : 0;
+    const k = 1 - 0.7 * clampNum(night, 0, 1);
+    const col = (((0xd8 * k) | 0) << 16) | (((0xd2 * k) | 0) << 8) | ((0xc6 * k) | 0);
+    const y = ground.heightAt(x, z) + 0.15;
+    if (!fresh) {
+      particles.emitDust(x, y, z, 0.3 + sev * 2, col);
+      return;
+    }
+    // 3 puffs for a brush, 20 for a 60 m/s head-on (emitDust caps a call at 24).
+    particles.emitDust(x, y, z, 3 + 17 * sev, col);
+    cue.cool = 0.18;
+    cue.last = sev;
+    // The camera nods the way the car was shoved: forward into a wall, sideways
+    // off a door. 0.005 rad for a brush, 0.025 (about a degree and a half) for
+    // the hardest hit — the landing thump is 0.012 — and gone in a third of a
+    // second. A knock already running is only replaced by a harder one.
+    const amp = 0.005 + 0.020 * clampNum(sev, 0, 1);
+    if (amp > cue.amp * Math.exp(-9 * cue.t)) {
+      const along = pushX * -Math.sin(car.yaw) + pushZ * -Math.cos(car.yaw);
+      const across = pushX * Math.cos(car.yaw) - pushZ * Math.sin(car.yaw);
+      cue.t = 0;
+      cue.amp = amp;
+      cue.pitch = amp * along;
+      cue.roll = amp * across * 0.7;
+    }
+  }
+  function stepImpactCue(dt) {
+    if (cue.cool > 0) cue.cool -= dt;
+    if (cue.t < 1) cue.t += dt;
   }
 
   /**
@@ -1450,6 +1533,13 @@ async function boot() {
       camera.rotateX((Math.random() * 2 - 1) * k);
       camera.rotateY((Math.random() * 2 - 1) * k);
       camera.rotateZ((Math.random() * 2 - 1) * k * 1.4);
+    }
+    // The bump from a crash (see impactCue): one damped nod at about 6 Hz, a
+    // sine rather than noise so it reads as a knock and not a broken camera.
+    if (cue.t < 0.5) {
+      const w = Math.exp(-9 * cue.t) * Math.sin(40 * cue.t) * scale;
+      camera.rotateX(cue.pitch * w);
+      camera.rotateZ(cue.roll * w);
     }
   }
 
@@ -1665,8 +1755,12 @@ async function boot() {
     get goals() { return goals; },
     /** The aftermath director. Named to avoid colliding with wreck() below. */
     get aftermath() { return wreck; },
+    /** The crash switch (physics/damage.js), and the bump cue it leaves. */
+    damage: DAMAGE,
+    get impact() { return cue; },
     /** Set off a blast at the car, for looking at one without crashing. */
     detonate: (power = 1) => {
+      if (!DAMAGE) return 'nothing explodes: DAMAGE is off (physics/damage.js)';
       boomCooldown = 0;
       explode(car.x, car.y + 0.4, car.z, power);
       return 'boom';
@@ -1675,6 +1769,7 @@ async function boot() {
               collision, debris, damageFx, drift, models, get carDamage() { return carDamage; } },
     /** Wreck the car on demand, for looking at damage without crashing first. */
     wreck: (n = 6, severity = 0.7) => {
+      if (!car.damage) return null;          // DAMAGE off: there is nothing to wreck
       for (let i = 0; i < n; i++) {
         car.damage.impact(severity * (0.5 + Math.random() * 0.5),
           (Math.random() * 2 - 1) * car.spec.track * 0.5,

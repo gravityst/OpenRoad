@@ -21,6 +21,34 @@
 
 import { clamp, lerp, smoothstep } from '../world/noise.js';
 
+/**
+ * THE SWITCH. Whether the GAME uses any of this. Off.
+ *
+ * The kids who play this hate the burning and the wreckage, and asked for it
+ * gone. So with DAMAGE false a crash is a solid, harmless bump: cars and
+ * buildings are exactly as solid as before and nothing passes through
+ * anything, but nothing dents, burns, explodes, leaks, falls off or breaks,
+ * and no car — the player's or the traffic's — loses any power, grip, brake
+ * or steering to a crash. main.js reads this one constant:
+ *
+ *   - the player's car is built with `damage: DAMAGE`, so car.damage is null
+ *     and vehicle.js and collision.js skip every damage term (both already
+ *     guard on it);
+ *   - the five damage layers — render/carDamage.js, physics/debris.js,
+ *     render/damageFx.js, render/explosion.js, game/wreck.js — are not even
+ *     loaded, so each is the null its layer slot was always allowed to be;
+ *   - explode() and onTrafficHit() return before doing anything, so traffic
+ *     keeps no damage model, is never written off and never set alight;
+ *   - the crash cue is a puff of pale dust and a small nod of the camera,
+ *     instead of sparks, smoke and a fireball.
+ *
+ * This module itself is untouched and fully working — damagecheck, carcrash,
+ * debris and cars still drive every part of it — so setting this true brings
+ * the whole system back as it was. tools/calmcheck.mjs holds the game to the
+ * promise while it is false.
+ */
+export const DAMAGE = false;
+
 /** Where an impact landed, in the car's own frame. */
 export const ZONE = {
   FRONT: 'front', REAR: 'rear', LEFT: 'left', RIGHT: 'right',

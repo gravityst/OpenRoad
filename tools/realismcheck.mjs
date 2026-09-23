@@ -428,16 +428,27 @@ function overlapDepth(a, b) {
   const names = new Set([...(world.garages || []).map((g) => g.name), ...(world.circuits || []).map((c) => c.name),
     ...(world.districts || []).filter((d) => d.biome !== undefined).map((d) => d.name)]);
   let facing = 0, named = 0, distinct = 0;
+  let offRoad = 0;
   for (const sg of plan.signs) {
-    const r = ground.nearestRoad(sg.x, sg.z, 20);
+    // The road it serves, which at a shallow junction is not always the
+    // nearest one (two of today's 127 stand nearer a side road). It has to be
+    // beside that road, on the verge, for the claim to mean anything.
+    const e = world.edges[sg.edge];
+    const r = e ? pointOnEdge(e, sg.s) : null;
+    const lat = r ? (sg.x - r.x) * -r.tz + (sg.z - r.z) * r.tx : Infinity;
+    if (!r || Math.abs(lat) > e.width * 0.5 + 4 || Math.hypot(sg.x - r.x, sg.z - r.z) > e.width * 0.5 + 4) { offRoad++; continue; }
     const fx = Math.sin(sg.yaw), fz = Math.cos(sg.yaw);
-    if (Math.abs(fx * r.tx + fz * r.tz) > 0.9) facing++;
+    // Signed, not abs(): traffic keeps right, so the traffic a sign serves
+    // passes it on the right and comes along +t if the sign stands right of
+    // the road's +t, along -t if left. The face must look back at it — a sign
+    // turned away from its traffic along the same line would pass abs().
+    if ((fx * r.tx + fz * r.tz) * Math.sign(lat) < -0.9) facing++;
     if (sg.lines.every((l) => names.has(l.name) && l.km > 0 && l.km < 6)) named++;
     if (new Set(sg.lines.map((l) => l.name)).size === sg.lines.length) distinct++;
   }
-  check('direction signs face the road and name real places, once each',
-    facing === plan.signs.length && named === plan.signs.length && distinct === plan.signs.length,
-    `${facing} face along the road, ${named} name places on the map, ${distinct} list each once (of ${plan.signs.length})`);
+  check('direction signs face their oncoming traffic and name real places, once each',
+    offRoad === 0 && facing === plan.signs.length && named === plan.signs.length && distinct === plan.signs.length,
+    `${facing} face their traffic, ${offRoad} not beside their road, ${named} name places on the map, ${distinct} list each once (of ${plan.signs.length})`);
   let byStop = 0;
   // Within the stagger, the search along the verge (12 m) and the set-back.
   for (const sh of plan.shelters) if (stops.some((st) => Math.hypot(st.x - sh.x, st.z - sh.z) < STAGGER + 12 + 10)) byStop++;
@@ -448,6 +459,38 @@ function overlapDepth(a, b) {
   const scene = new THREE.Scene();
   const rs = createRoadside(plan, { quality: 'medium' });
   scene.add(rs.group);
+
+  // The sign atlas. Headless there is no canvas to paint, but the layout is
+  // the same code the browser runs, and it is what went wrong: the atlas held
+  // 125 faces for 127 signs, and a one- or two-line face's UVs sampled the
+  // grey under its paint (117 of 127 boards blank). Every sign must own a box
+  // of its own height, inside the canvas, overlapping nothing, and its UVs
+  // must cover that box and nothing else.
+  {
+    const A = rs.atlas, all = [...Object.values(A.fixed), ...A.boxes.filter(Boolean)];
+    let noRect = 0, outside = 0, overlaps = 0, wrongUv = 0, wrongH = 0;
+    for (const b of all) if (b.x < 0 || b.y < 0 || b.x + b.w > A.w || b.y + b.h > A.h) outside++;
+    for (let i = 0; i < all.length; i++) for (let j = i + 1; j < all.length; j++) {
+      const a = all[i], b = all[j];
+      if (a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h) overlaps++;
+    }
+    plan.signs.forEach((sg, i) => {
+      const b = A.boxes[i];
+      if (!sg.rect || !b) { noRect++; return; }
+      // The panel is 0.34 m plus 0.24 m a line, 1.7 m wide: its box keeps that shape.
+      const want = (0.34 + 0.24 * (sg.lines.length - 1)) / 1.7;
+      if (Math.abs(b.h / b.w - want) > 0.03) wrongH++;
+      // flipY: canvas row y is v = 1 - y / h. The rect may lose its 2 px inset, no more.
+      const [u0, v0, du, dv] = sg.rect;
+      const top = (1 - (v0 + dv)) * A.h, bottom = (1 - v0) * A.h, left = u0 * A.w, right = (u0 + du) * A.w;
+      const px = 2.01;
+      if (top < b.y || bottom > b.y + b.h || left < b.x || right > b.x + b.w ||
+        top - b.y > px || b.y + b.h - bottom > px || left - b.x > px || b.x + b.w - right > px) wrongUv++;
+    });
+    check('every sign face has its own place in the atlas, and samples it', noRect === 0 && outside === 0 && overlaps === 0 && wrongUv === 0 && wrongH === 0,
+      `${plan.signs.length - noRect} of ${plan.signs.length} placed in ${A.w}x${A.h}; ${overlaps} overlaps, ${outside} outside, ` +
+      `${wrongUv} sampling outside their box, ${wrongH} the wrong shape`);
+  }
   const post = plan.posts[40];
   const cam = new THREE.Vector3(post.x, post.y + 3, post.z + 8);
   rs.update(cam, 1 / 60, null);

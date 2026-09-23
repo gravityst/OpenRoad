@@ -3112,7 +3112,7 @@ function planSigns(world, ground, at, clearAt, openAt) {
       lines.sort((a, b) => a.turn - b.turn || a.km - b.km);
       const side = dirIn;                           // right of the approach
       // As near 32 m back as the verge allows: a sign in a hedge is no sign.
-      let q = null;
+      let q = null, qs = 0;
       for (const ds of [0, 4, -4, 8, -8, 12, 16, 20]) {
         const t = sSign - dirIn * ds;
         if (t < 15 || t > arm.length - 15) continue;
@@ -3128,13 +3128,15 @@ function planSigns(world, ground, at, clearAt, openAt) {
             const v = at(arm, tb, side, off - 0.9);
             if (!openAt(v.x, v.z)) seen = false;
           }
-          if (seen) { q = c; break; }
+          if (seen) { q = c; qs = t; break; }
         }
         if (q) break;
       }
       if (!q) continue;
       // The face looks back down the approach, at the traffic coming.
-      signs.push({ x: q.x, y: q.y, z: q.z, yaw: Math.atan2(-hx, -hz), lines: lines.slice(0, 3) });
+      // `edge` and `s` say which road it serves and where: at a shallow
+      // junction another road can pass nearer than its own.
+      signs.push({ x: q.x, y: q.y, z: q.z, yaw: Math.atan2(-hx, -hz), lines: lines.slice(0, 3), edge: ai, s: qs });
     }
   }
   return signs;
@@ -3187,6 +3189,20 @@ function kitBuilder() {
 // verge is made of, and brand-new colours read as a toy set.
 const WHITE = 0xe9e8e2, BLACK = 0x17181a, STEEL = 0xa3a8ad, DARKSTEEL = 0x55595e, TIMBER = 0x8a7b69, POLEWOOD = 0x6a5846;
 
+// Night glow, as the linear radiance a face gives back per unit of its own
+// colour when it faces the lamps from close by (the shader scales it down
+// with angle and distance). The bloom pass starts at 2.0-2.2 linear, and what
+// crosses it becomes a soft ball of light, so:
+//   - a sign or chevron face stays under 1.5: bright, and the black lettering
+//     on it still reads. At 5.5 (the old single gain) a direction sign at 15-30
+//     m was a featureless white slab that read as an oncoming headlamp.
+//   - a post's reflector sits just under the threshold, a hard bright point
+//     rather than the lamp-sized orb it bloomed into at 5.5.
+//   - a road stud sits just over it: 14 x 1.5 cm is sub-pixel past 20 m, and
+//     a faint bloom is what lets a line of cat's eyes read at all.
+//   - negative is lit from inside at that level, whatever the angle.
+const GLOW = { face: 1.3, reflector: 1.9, stud: 2.4, timetable: -1.9 };
+
 /** Delineator: a white post, black band, a reflector on each face. */
 function postGeometry() {
   const k = kitBuilder();
@@ -3195,7 +3211,7 @@ function postGeometry() {
   k.box(-0.05, 0.95, -0.06, 0.05, 1.0, 0.06, WHITE);
   for (const s of [-1, 1]) {
     const z = s * 0.0625;
-    k.quad([-0.036 * s, 0.745, z], [0.036 * s, 0.745, z], [0.036 * s, 0.925, z], [-0.036 * s, 0.925, z], [0, 0, s], 0xf4f1e0, 1);
+    k.quad([-0.036 * s, 0.745, z], [0.036 * s, 0.745, z], [0.036 * s, 0.925, z], [-0.036 * s, 0.925, z], [0, 0, s], 0xf4f1e0, GLOW.reflector);
   }
   return k.build();
 }
@@ -3205,7 +3221,7 @@ function studGeometry() {
   k.box(-0.1, 0.0, -0.06, 0.1, 0.022, 0.06, 0x2c2d2f);
   for (const s of [-1, 1]) {
     const z = s * 0.0605;
-    k.quad([-0.07 * s, 0.004, z], [0.07 * s, 0.004, z], [0.07 * s, 0.019, z], [-0.07 * s, 0.019, z], [0, 0, s], 0xf6f3e4, 1.4);
+    k.quad([-0.07 * s, 0.004, z], [0.07 * s, 0.004, z], [0.07 * s, 0.019, z], [-0.07 * s, 0.019, z], [0, 0, s], 0xf6f3e4, GLOW.stud);
   }
   return k.build();
 }
@@ -3220,7 +3236,7 @@ function snowPoleGeometry() {
   }
   for (const s of [-1, 1]) {
     const z = s * 0.032;
-    k.quad([-0.025 * s, H - 0.35, z], [0.025 * s, H - 0.35, z], [0.025 * s, H - 0.2, z], [-0.025 * s, H - 0.2, z], [0, 0, s], 0xf4f1e0, 1);
+    k.quad([-0.025 * s, H - 0.35, z], [0.025 * s, H - 0.35, z], [0.025 * s, H - 0.2, z], [-0.025 * s, H - 0.2, z], [0, 0, s], 0xf4f1e0, GLOW.reflector);
   }
   return k.build();
 }
@@ -3244,7 +3260,7 @@ function railGeometry() {
     k.quad([1, y0 + ya, za - 0.004], [0, y0 + ya, za - 0.004], [0, y0 + yb, zb - 0.004], [1, y0 + yb, zb - 0.004], [0, -ny / l, -nz / l], 0x7f8388);
   }
   // A reflector on each span, where the posts are, facing the road.
-  k.quad([0.49, 0.6, 0.05], [0.51, 0.6, 0.05], [0.51, 0.66, 0.05], [0.49, 0.66, 0.05], [0, 0, 1], 0xf4f1e0, 1);
+  k.quad([0.49, 0.6, 0.05], [0.51, 0.6, 0.05], [0.51, 0.66, 0.05], [0.49, 0.66, 0.05], [0, 0, 1], 0xf4f1e0, GLOW.reflector);
   return k.build();
 }
 function railPostGeometry() {
@@ -3306,7 +3322,7 @@ function shelterGeometry() {
   k.box(-W / 2 + 0.2, 0.42, -D / 2 + 0.08, W / 2 - 0.2, 0.47, -D / 2 + 0.42, 0x6b5640);
   for (const x of [-W / 2 + 0.4, W / 2 - 0.4]) k.box(x - 0.03, 0, -D / 2 + 0.2, x + 0.03, 0.42, -D / 2 + 0.3, F);
   // The timetable case on the end panel, lit at night like the real ones.
-  k.box(W / 2 - 0.05, 0.9, -D / 2 + 0.3, W / 2 + 0.02, 1.8, D / 2 - 0.3, 0xe8e4d6, -0.35);
+  k.box(W / 2 - 0.05, 0.9, -D / 2 + 0.3, W / 2 + 0.02, 1.8, D / 2 - 0.3, 0xe8e4d6, GLOW.timetable);
   return k.build();
 }
 function shelterGlassGeometry() {
@@ -3325,7 +3341,7 @@ function shelterGlassGeometry() {
 function signGeometry(w, h, y0, posts = 2) {
   const k = kitBuilder();
   const x0 = -w / 2, x1 = w / 2, y1 = y0 + h;
-  k.quad([x0, y0, 0.03], [x1, y0, 0.03], [x1, y1, 0.03], [x0, y1, 0.03], [0, 0, 1], 0xffffff, 1, [0, 0, 1, 0, 1, 1, 0, 1]);
+  k.quad([x0, y0, 0.03], [x1, y0, 0.03], [x1, y1, 0.03], [x0, y1, 0.03], [0, 0, 1], 0xffffff, GLOW.face, [0, 0, 1, 0, 1, 1, 0, 1]);
   k.quad([x1, y0, 0.0], [x0, y0, 0.0], [x0, y1, 0.0], [x1, y1, 0.0], [0, 0, -1], 0x8f9398);
   const xs = posts === 2 ? [x0 + w * 0.2, x1 - w * 0.2] : [0];
   for (const x of xs) k.box(x - 0.035, -0.2, -0.05, x + 0.035, y1 - 0.05, -0.0, 0x8f9398);
@@ -3336,54 +3352,102 @@ function signGeometry(w, h, y0, posts = 2) {
 function chevronGeometry() {
   const k = kitBuilder();
   const w = 0.8, h = 0.6, y0 = 0.85, x0 = -w / 2, x1 = w / 2, y1 = y0 + h;
-  k.quad([x0, y0, 0.02], [x1, y0, 0.02], [x1, y1, 0.02], [x0, y1, 0.02], [0, 0, 1], 0xffffff, 1, [0, 0, 1, 0, 1, 1, 0, 1]);
-  k.quad([x1, y0, -0.02], [x0, y0, -0.02], [x0, y1, -0.02], [x1, y1, -0.02], [0, 0, -1], 0xffffff, 1, [0, 0, 1, 0, 1, 1, 0, 1]);
+  k.quad([x0, y0, 0.02], [x1, y0, 0.02], [x1, y1, 0.02], [x0, y1, 0.02], [0, 0, 1], 0xffffff, GLOW.face, [0, 0, 1, 0, 1, 1, 0, 1]);
+  k.quad([x1, y0, -0.02], [x0, y0, -0.02], [x0, y1, -0.02], [x1, y1, -0.02], [0, 0, -1], 0xffffff, GLOW.face, [0, 0, 1, 0, 1, 1, 0, 1]);
   k.box(-0.035, -0.2, -0.018, 0.035, y1 - 0.05, 0.018, 0x8f9398);
   return k.build();
 }
 
 // ---------------------------------------------------------------------------
 // The sign atlas: every direction sign's face, the chevron and the bus stop
-// flag, painted into one canvas. Headless there is no canvas, and the faces
-// are left blank — the geometry, placement and counts are what get measured.
+// flag, painted into one canvas.
+//
+// LAYOUT and PAINT are separate, and the layout runs headless too, so the
+// harness can hold every sign to a box of its own. Both used to be one pass
+// over a fixed 2048 x 2048 grid of 256 x 128 cells, and it went wrong twice:
+//   - A one- or two-line panel is painted in the top 56 or 92 px of its cell,
+//     but its UVs started from the cell's BOTTOM edge, so 117 of the 127
+//     signs sampled the grey below the paint: a blank grey board.
+//   - The grid held 125 faces and the map has 127 signs; the last two were
+//     never painted at all.
+// Now every panel gets a box exactly its own height, packed onto shelves,
+// and the canvas is only as tall as the shelves need (1344 px for today's
+// 127 signs, against 2048 before). Its UVs are computed from that same box.
 // ---------------------------------------------------------------------------
 
-const ATLAS = { w: 2048, h: 2048, cw: 256, ch: 128 };
-const CELL = { chevron: 0, bus: 1, grey: 2, first: 3 };
+const ATLAS_W = 2048;
+const ATLAS_MAX_H = 4096;
+const SIGN_W = 256;                    // px across a direction sign's face
+const SIGN_H3 = 128;                   // px down a three-line face
+const ATLAS_INSET = 2;                 // px kept clear of a box's edge, for filtering
 
-function atlasRect(cell, uw = 1, vh = 1) {
-  const cols = ATLAS.w / ATLAS.cw;
-  const cx = cell % cols, cy = Math.floor(cell / cols);
-  // Half a texel in, so mip filtering never reaches the neighbouring cell.
-  const u0 = (cx * ATLAS.cw + 2) / ATLAS.w, v0 = 1 - ((cy + 1) * ATLAS.ch - 2) / ATLAS.h;
-  const du = (ATLAS.cw - 4) / ATLAS.w * uw, dv = (ATLAS.ch - 4) / ATLAS.h * vh;
-  return [u0, v0, du, dv];
+/** Px down a face with `rows` lines: the panel is 0.34 m, plus 0.24 m a line. */
+function signPanelPx(rows) {
+  return Math.min(SIGN_H3, Math.round(SIGN_H3 * (0.34 + 0.22 * (rows - 1)) / 0.78));
 }
 
-function paintAtlas(signs) {
+/** UV rect [u0, v0, du, dv] of a px box, for a canvas uploaded with flipY. */
+function boxRect(b, H) {
+  const i = ATLAS_INSET;
+  return [(b.x + i) / ATLAS_W, 1 - (b.y + b.h - i) / H, (b.w - 2 * i) / ATLAS_W, (b.h - 2 * i) / H];
+}
+
+/**
+ * Where everything goes. Row one holds the chevron (4:3, like its board),
+ * the bus stop flag (2:1) and a grey swatch; then the signs, tallest first,
+ * on shelves as tall as the first panel on them. Returns the canvas height
+ * and every box, and sets each sign's `rect`. A sign that does not fit under
+ * ATLAS_MAX_H keeps no rect (and draws grey); realismcheck fails on that.
+ */
+function layoutSignAtlas(signs) {
+  const fixed = {
+    chevron: { x: 0, y: 0, w: 170, h: SIGN_H3 },
+    bus: { x: 176, y: 0, w: 256, h: SIGN_H3 },
+    grey: { x: 440, y: 0, w: 32, h: 32 },
+  };
+  const order = signs.map((s, i) => i).sort((a, b) => signs[b].lines.length - signs[a].lines.length || a - b);
+  const boxes = new Array(signs.length).fill(null);
+  let x = 480, y = 0, shelf = SIGN_H3;
+  for (const i of order) {
+    const h = signPanelPx(signs[i].lines.length);
+    if (x + SIGN_W > ATLAS_W) { y += shelf; x = 0; shelf = h; }
+    if (y + h > ATLAS_MAX_H) break;
+    boxes[i] = { x, y, w: SIGN_W, h };
+    x += SIGN_W;
+  }
+  const used = Math.max(SIGN_H3, ...boxes.map((b) => (b ? b.y + b.h : 0)));
+  const H = Math.min(ATLAS_MAX_H, Math.ceil(used / 64) * 64);
+  signs.forEach((s, i) => { s.rect = boxes[i] ? boxRect(boxes[i], H) : null; });
+  return {
+    w: ATLAS_W, h: H, boxes, fixed,
+    rects: { chevron: boxRect(fixed.chevron, H), bus: boxRect(fixed.bus, H), grey: boxRect(fixed.grey, H) },
+  };
+}
+
+function paintAtlas(signs, layout) {
   if (typeof document === 'undefined') return null;
   const c = document.createElement('canvas');
-  c.width = ATLAS.w; c.height = ATLAS.h;
+  c.width = layout.w; c.height = layout.h;
   const g = c.getContext('2d');
-  g.fillStyle = '#8f9398'; g.fillRect(0, 0, ATLAS.w, ATLAS.h);
-  const cellXY = (i) => [(i % (ATLAS.w / ATLAS.cw)) * ATLAS.cw, Math.floor(i / (ATLAS.w / ATLAS.cw)) * ATLAS.ch];
+  g.fillStyle = '#8f9398'; g.fillRect(0, 0, layout.w, layout.h);
   // Chevron board: white arrows on black, pointing right (the instance
-  // mirrors it for a left-hand bend). 4:3 inside the 2:1 cell.
+  // mirrors it for a left-hand bend), centred on the 4:3 board.
   {
-    const [x, y] = cellXY(CELL.chevron);
-    g.fillStyle = '#111214'; g.fillRect(x, y, ATLAS.cw, ATLAS.ch);
+    const { x, y, w, h } = layout.fixed.chevron;
+    g.fillStyle = '#111214'; g.fillRect(x, y, w, h);
     g.fillStyle = '#f4f2ea';
+    const span = 80 + 58;                          // two arrows, 58 px apart
     for (let k = 0; k < 2; k++) {
-      const ox = x + 70 + k * 70, oy = y + 16;
+      const ox = x + (w - span) / 2 + k * 58, oy = y + 16;
       g.beginPath();
-      g.moveTo(ox, oy); g.lineTo(ox + 40, oy); g.lineTo(ox + 80, oy + 48); g.lineTo(ox + 40, oy + 96);
-      g.lineTo(ox, oy + 96); g.lineTo(ox + 40, oy + 48); g.closePath(); g.fill();
+      g.moveTo(ox, oy); g.lineTo(ox + 36, oy); g.lineTo(ox + 80, oy + 48); g.lineTo(ox + 36, oy + 96);
+      g.lineTo(ox, oy + 96); g.lineTo(ox + 44, oy + 48); g.closePath(); g.fill();
     }
   }
   // Bus stop flag: a disc with a bus pictogram and BUS STOP.
   {
-    const [x, y] = cellXY(CELL.bus);
-    g.fillStyle = '#f4f2ea'; g.fillRect(x, y, ATLAS.cw, ATLAS.ch);
+    const { x, y, w, h } = layout.fixed.bus;
+    g.fillStyle = '#f4f2ea'; g.fillRect(x, y, w, h);
     g.fillStyle = '#b3261e'; g.beginPath(); g.arc(x + 64, y + 64, 50, 0, Math.PI * 2); g.fill();
     g.fillStyle = '#f4f2ea'; g.beginPath(); g.arc(x + 64, y + 64, 38, 0, Math.PI * 2); g.fill();
     g.fillStyle = '#1b2b5a';
@@ -3397,19 +3461,18 @@ function paintAtlas(signs) {
   // on the side it goes and the distance by road, right-aligned.
   const font = (px) => `600 ${px}px "Helvetica Neue", Helvetica, Arial, sans-serif`;
   for (let i = 0; i < signs.length; i++) {
-    const cell = CELL.first + i;
-    if (cell >= (ATLAS.w / ATLAS.cw) * (ATLAS.h / ATLAS.ch)) break;
-    const [x, y] = cellXY(cell);
+    const b = layout.boxes[i];
+    if (!b) continue;
+    const { x, y, w, h } = b;
     const s = signs[i];
-    const rows = s.lines.length, H = ATLAS.ch * (0.34 + 0.22 * (rows - 1)) / 0.78;
-    const h = Math.min(ATLAS.ch, Math.round(H));
-    g.fillStyle = '#f4f3ee'; g.fillRect(x, y, ATLAS.cw, h);
-    g.strokeStyle = '#141517'; g.lineWidth = 5; g.strokeRect(x + 5, y + 5, ATLAS.cw - 10, h - 10);
+    const rows = s.lines.length;
+    g.fillStyle = '#f4f3ee'; g.fillRect(x, y, w, h);
+    g.strokeStyle = '#141517'; g.lineWidth = 5; g.strokeRect(x + 5, y + 5, w - 10, h - 10);
     const rowH = (h - 14) / rows;
     for (let r = 0; r < rows; r++) {
       const L = s.lines[r];
       const cy = y + 7 + rowH * (r + 0.5);
-      const ax = L.turn > 0 ? x + ATLAS.cw - 30 : x + 26;
+      const ax = L.turn > 0 ? x + w - 30 : x + 26;
       // The arrow: a shaft and a head, turned the way the exit goes.
       g.save(); g.translate(ax, cy); g.rotate(L.turn * Math.PI / 2);
       g.fillStyle = '#141517';
@@ -3420,7 +3483,7 @@ function paintAtlas(signs) {
       g.fillStyle = '#141517'; g.textBaseline = 'middle';
       let px = Math.min(30, Math.floor(rowH * 0.62));
       g.font = font(px);
-      const left = L.turn > 0 ? x + 16 : x + 46, right = L.turn > 0 ? x + ATLAS.cw - 50 : x + ATLAS.cw - 16;
+      const left = L.turn > 0 ? x + 16 : x + 46, right = L.turn > 0 ? x + w - 50 : x + w - 16;
       g.textAlign = 'right';
       g.fillText(km, right, cy);
       const kmW = g.measureText(km).width + 12;
@@ -3428,7 +3491,6 @@ function paintAtlas(signs) {
       while (g.measureText(L.name).width > right - left - kmW && px > 12) { px -= 1; g.font = font(px); }
       g.fillText(L.name, left, cy);
     }
-    s.rect = atlasRect(cell, 1, h / ATLAS.ch);
   }
   const t = new THREE.CanvasTexture(c);
   t.colorSpace = THREE.SRGBColorSpace;
@@ -3506,7 +3568,7 @@ const FURN_FRAG_MAP = /* glsl */`
 #endif
 `;
 const FURN_FRAG_EMIT = /* glsl */`
-totalEmissiveRadiance += diffuseColor.rgb * vGlow * 5.5;
+totalEmissiveRadiance += diffuseColor.rgb * vGlow;       // vGlow is in GLOW's units
 `;
 
 // Studs sit ON the road, which is pulled toward the eye in depth (V_PULL);
@@ -3537,7 +3599,7 @@ function furnitureMaterial(uniforms, { atlas = null, bend = false, pull = false 
       .replace('#include <map_fragment>', '#include <map_fragment>\n' + FURN_FRAG_MAP)
       .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\n' + FURN_FRAG_EMIT);
   };
-  m.customProgramCacheKey = () => `openroad-furniture-1${atlas ? '-a' : ''}${bend ? '-b' : ''}${pull ? '-p' : ''}`;
+  m.customProgramCacheKey = () => `openroad-furniture-2${atlas ? '-a' : ''}${bend ? '-b' : ''}${pull ? '-p' : ''}`;
   return m;
 }
 
@@ -3655,7 +3717,8 @@ export function createRoadside(plan, opts = {}) {
   group.name = 'roadside';
   group.matrixAutoUpdate = false;
   const uniforms = { uNight: { value: 0 } };
-  const atlas = paintAtlas(plan.signs);
+  const layout = layoutSignAtlas(plan.signs);
+  const atlas = paintAtlas(plan.signs, layout);
   const disposables = [];
   const furn = furnitureMaterial(uniforms);
   const flex = furnitureMaterial(uniforms, { bend: true });
@@ -3705,7 +3768,7 @@ export function createRoadside(plan, opts = {}) {
   });
 
   const chevrons = add(makeFurnitureField('chevrons', chevronGeometry(), signMat, plan.chevrons.length, 'sign', { extras: { aCell: 4 } }));
-  const chev = atlasRect(CELL.chevron, 0.6667, 1);
+  const chev = layout.rects.chevron;
   plan.chevrons.forEach((c, i) => {
     putUpright(chevrons, i, c.x, c.y, c.z, c.yaw, c.flip < 0 ? 1 : -1);
     chevrons.extras.aCell.src.set(chev, i * 4);
@@ -3720,7 +3783,7 @@ export function createRoadside(plan, opts = {}) {
     const f = add(makeFurnitureField(`signs${rows}`, signGeometry(1.7, h, 1.35 + (0.58 - h) * 0.5), signMat, all.length, 'sign', { extras: { aCell: 4 } }));
     all.forEach((s, i) => {
       putUpright(f, i, s.x, s.y, s.z, s.yaw);
-      f.extras.aCell.src.set(s.rect || atlasRect(CELL.grey), i * 4);
+      f.extras.aCell.src.set(s.rect || layout.rects.grey, i * 4);
     });
   }
 
@@ -3729,7 +3792,7 @@ export function createRoadside(plan, opts = {}) {
   const glass = add(makeFurnitureField('shelterGlass', shelterGlassGeometry(), glassMat, plan.shelters.length, 'sign'));
   plan.shelters.forEach((p, i) => putUpright(glass, i, p.x, p.y, p.z, p.yaw));
   const flags = add(makeFurnitureField('stopFlags', signGeometry(0.52, 0.26, 2.1, 1), signMat, plan.stopPoles.length, 'sign', { extras: { aCell: 4 } }));
-  const bus = atlasRect(CELL.bus, 1, 1);
+  const bus = layout.rects.bus;
   plan.stopPoles.forEach((p, i) => { putUpright(flags, i, p.x, p.y, p.z, p.yaw); flags.extras.aCell.src.set(bus, i * 4); });
 
   const poles = add(makeFurnitureField('powerPoles', powerPoleGeometry(), furn, plan.poles.length, 'big', { shadow: true }));
@@ -3889,6 +3952,8 @@ export function createRoadside(plan, opts = {}) {
   };
   return {
     group, update, setQuality, dispose, stats, fields, plan,
+    /** Where every face sits in the sign atlas: { w, h, boxes, fixed, rects }. */
+    atlas: layout,
     get drawCalls() { let n = wires ? 1 : 0; for (const f of fields) if (f.mesh.count > 0) n++; return n; },
   };
 }

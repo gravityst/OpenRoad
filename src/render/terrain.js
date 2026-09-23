@@ -122,6 +122,8 @@ const DRY    = [0.52, 0.47, 0.28];
 const SOIL = [0.34, 0.26, 0.16];
 // A verge that tyres and feet have worn: trampled grass over dusty soil.
 const WORN = [0.43, 0.40, 0.29];
+// The outer edge of a gravel shoulder, where grass has grown back through it.
+const GROWN = [0.40, 0.40, 0.30];
 // The dry river bed: pale, grey, gravelly sand rather than beach.
 const WASH = [0.56, 0.53, 0.46];
 // Wet churned earth, for the fringe where tyres have dragged a dirt road out
@@ -147,9 +149,11 @@ const DETAIL = {
 // Surfaces as small integers, so the mud fringe can test a vertex's neighbours
 // with array lookups instead of string comparisons. 0 means "not sampled".
 const MCODE = { asphalt: 1, concrete: 2, sidewalk: 3, dirt: 4, gravel: 5, grass: 6, sand: 7, rock: 8 };
-// How muddy a neighbour makes you. A dirt road is the real source; the gravel
-// shoulder of a sealed road gets a weaker version of the same treatment.
-const MUDDY = new Float32Array([0, 0, 0, 0, 1.0, 0.35, 0, 0, 0]);
+// How muddy a neighbour makes you. A dirt road is the real source. Gravel
+// shoulders used to get a third of it, which drew a dark sawtooth down both
+// sides of every lane at the vertex spacing; the grass beside a shoulder is
+// dusty, not muddy, and verge wear (fillRows) paints that instead.
+const MUDDY = new Float32Array([0, 0, 0, 0, 1.0, 0, 0, 0, 0]);
 // ...and which surfaces will take mud at all. Tarmac does not.
 const TAKES_MUD = new Float32Array([0, 0, 0, 0, 0, 0, 1, 0.8, 0.5]);
 
@@ -720,7 +724,9 @@ export function createTerrain(world, ground, opts = {}) {
       out[1] = lerp(out[1], rgb2[1], roadMix);
       out[2] = lerp(out[2], rgb2[2], roadMix);
     }
-    const amp = PAVED[surface] === 1 ? 0.06 : 0.17;
+    // Tarmac is laid in one go and barely varies; a gravel shoulder is
+    // tipped, spread and washed out in patches and varies a good deal more.
+    const amp = surface === 'gravel' ? 0.11 : PAVED[surface] === 1 ? 0.06 : 0.17;
     const lum = valueNoise(x * 0.0091, z * 0.0091, tintSeed + 7);
     const mot = fine > 0 ? valueNoise(x * 0.029, z * 0.029, tintSeed + 31) : 0;
     const k = 1 + lum * amp * 0.62 + mot * amp * 0.45 * fine;
@@ -919,6 +925,27 @@ export function createTerrain(world, ground, opts = {}) {
         // paler and dustier than the field behind it. Measured from the edge
         // of the carriageway, and only on chunks fine enough to draw a band a
         // few metres wide.
+        // Shoulders, graded across their width: loose, clean gravel where it
+        // meets the carriageway, grown over and olive by the outer edge where
+        // nothing drives. A uniform grey band either side of every lane was
+        // the flattest thing left in the picture.
+        if (job.mud > 0 && surface === 'gravel') {
+          ground.roadAt(x, z, roadQ);
+          if (roadQ.edge) {
+            const k = roadQ.kind;
+            const sh = k === 'dirt' || k === 'track' ? 1.6 : k === 'highway' ? 3.5 : 2.4;
+            const f = (roadQ.dist - roadQ.width * 0.5) / sh;
+            if (f > 0) {
+              const t = smoothstep(0.35, 1.05, f) * job.mud;
+              rgb[0] = lerp(rgb[0], GROWN[0], t * 0.6); rgb[1] = lerp(rgb[1], GROWN[1], t * 0.6); rgb[2] = lerp(rgb[2], GROWN[2], t * 0.6);
+              if (dtl) {
+                const o4 = v * 4;
+                dtl[o4 + 2] = Math.max(dtl[o4 + 2], t * 150);
+                dtl[o4] *= 1 - t * 0.35;
+              }
+            }
+          }
+        }
         if (job.mud > 0 && surface === 'grass') {
           ground.roadAt(x, z, roadQ);
           if (roadQ.edge) {

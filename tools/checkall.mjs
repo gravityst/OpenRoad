@@ -14,6 +14,7 @@ const CHECKS = [
   ['vehicle', 'the car accelerates, stops, corners and steers the right way'],
   ['handling', 'keys steer like a driver would, and the car straightens itself'],
   ['catalog', 'every car matches the figures the garage quotes'],
+  ['smooth', 'the car moves speed x frame time every frame, at any frame rate'],
   ['collision', 'buildings are solid and can never add energy'],
   ['damage', 'damage only ever takes capability away'],
   ['carcrash', 'cars are solid against each other and both take the damage'],

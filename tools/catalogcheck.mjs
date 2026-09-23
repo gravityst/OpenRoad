@@ -5,8 +5,15 @@
 // runs the real physics on flat dry asphalt, so the numbers mean something, and
 // asserts both that each car is physically sane and that the CLASSES actually
 // mean something — otherwise the garage is decoration.
+//
+// It also holds the figures the garage PRINTS (carStats() in game/menus.js) to
+// the ones measured here. Nothing did, and when the car gained a driveline loss
+// and rotating mass the garage went on quoting the old model: every car 0.4 to
+// 2.3 s quicker to 100 than it is (the city car 8.4 s for a car that does
+// 10.7), and the SUV 14 km/h faster than it goes.
 import { CARS, CLASSES, specFor } from '../src/vehicles/catalog.js';
 import { createVehicle } from '../src/physics/vehicle.js';
+import { carStats } from '../src/game/menus.js';
 
 const FLAT = {
   sample(x, z, out) {
@@ -23,12 +30,17 @@ const check = (ok, msg) => { if (!ok) { console.log('  FAIL  ' + msg); fail++; }
 function measure(spec) {
   let car = createVehicle({ ground: FLAT, spec });
   car.reset(0, 0, 0);
-  let t = 0, t100 = -1;
-  while (t < 60) {
+  // `vmax` is the speed after a minute flat out, which the sanity checks below
+  // were written against. `vtop` is the fastest the car ever gets: the heavy
+  // cars are still gaining 5-8 km/h after that minute (the van 161 -> 168), and
+  // a quoted top speed means the one it reaches, not one it passes on the way.
+  let t = 0, t100 = -1, vmax = -1, vtop = 0;
+  while (t < 240) {
     car.input.throttle = 1; car.step(dt); t += dt;
     if (t100 < 0 && car.speed * 3.6 >= 100) t100 = t;
+    if (vmax < 0 && t >= 60) vmax = car.speed * 3.6;
+    vtop = Math.max(vtop, car.speed * 3.6);
   }
-  const vmax = car.speed * 3.6;
 
   car = createVehicle({ ground: FLAT, spec });
   car.reset(0, 0, 0); car.vz = -100 / 3.6;
@@ -44,23 +56,26 @@ function measure(spec) {
     car.input.throttle = 0.35; car.input.steer = 0.8; car.step(dt);
     lat = Math.max(lat, Math.abs(car.latG));
   }
-  return { t100, vmax, brake, lat };
+  return { t100, vmax, vtop, brake, lat };
 }
 
-console.log('car'.padEnd(23) + 'class'.padEnd(10) + 'drive  0-100     top    100-0     lat');
-console.log('-'.repeat(76));
-const r = {};
+console.log('car'.padEnd(23) + 'class'.padEnd(10) + 'drive  0-100     top    100-0     lat' +
+  '   garage quotes');
+console.log('-'.repeat(95));
+const r = {}, quoted = {};
 for (const c of CARS) {
   const m = measure(specFor(c.id));
-  r[c.id] = m;
+  const q = carStats(c);
+  r[c.id] = m; quoted[c.id] = q;
   console.log(
     `${c.brand} ${c.model}`.padEnd(23) +
     CLASSES[c.class].name.padEnd(10) +
     c.spec.drive.toUpperCase().padEnd(6) +
     (m.t100 < 0 ? '  --' : m.t100.toFixed(1) + 's').padStart(6) +
-    (m.vmax.toFixed(0) + ' km/h').padStart(11) +
+    (m.vtop.toFixed(0) + ' km/h').padStart(11) +
     (m.brake.toFixed(0) + ' m').padStart(8) +
-    (m.lat.toFixed(2) + ' g').padStart(8));
+    (m.lat.toFixed(2) + ' g').padStart(8) +
+    `${q.accel.toFixed(1)}s ${q.topKph} km/h`.padStart(18));
 }
 console.log();
 
@@ -70,6 +85,13 @@ for (const c of CARS) {
   check(m.vmax > 140 && m.vmax < 360, `${n}: top speed ${m.vmax.toFixed(0)} km/h`);
   check(m.brake > 24 && m.brake < 50, `${n}: 100-0 in ${m.brake.toFixed(0)} m`);
   check(m.lat > 0.80 && m.lat < 1.30, `${n}: ${m.lat.toFixed(2)} g cornering`);
+  // What the garage prints. It shows 0-100 to a tenth, so a tenth is the
+  // tolerance; the top speed to 3 km/h, about what the needle can show.
+  const q = quoted[c.id];
+  check(Math.abs(q.accel - m.t100) <= 0.1,
+    `${n}: garage quotes 0-100 in ${q.accel.toFixed(1)}s, the car does ${m.t100.toFixed(2)}s`);
+  check(Math.abs(q.topKph - m.vtop) <= 3,
+    `${n}: garage quotes ${q.topKph} km/h, the car reaches ${m.vtop.toFixed(0)}`);
 }
 
 check(r.corsara.t100 < r.v340.t100, 'the supercar should out-accelerate the saloon');

@@ -18,10 +18,10 @@
 // the physics needs (watts, gear ratios, drag area); a player wants horsepower,
 // 0-100 and a top speed. Writing those out by hand means the garage lies the
 // moment anyone retunes a car, so they are computed here from the same spec the
-// simulation runs on. See carStats().
+// simulation runs on — the 0-100 by driving the simulation itself. See carStats().
 
 import { CARS, CAR_BY_ID, CLASSES, STARTER, specFor } from '../vehicles/catalog.js';
-import { DEFAULT_SPEC } from '../physics/vehicle.js';
+import { DEFAULT_SPEC, DRIVELINE, createVehicle } from '../physics/vehicle.js';
 
 // The key, the defaults and the load/save pair now live in one module that
 // main.js imports too — they used to be duplicated here with a different set of
@@ -153,24 +153,20 @@ const persist = saveSettings;
 
 const RHO = 1.225;          // kg/m^3
 const GRAV = 9.81;
-// Crank to contact patch. It is 1.0 because physics/vehicle.js has no driveline
-// loss at all — it does `driveForce = crankTorque * ratio / wheelRadius`. This
-// was 0.86, which is a realistic figure for a real gearbox and the wrong figure
-// for this simulation: it cost the quoted top speeds up to 23 km/h against what
-// tools/catalogcheck.mjs actually measures.
-const DRIVELINE = 1.0;
+// Crank to contact patch comes from physics/vehicle.js rather than being
+// restated here. A local copy is how this file quoted top speeds 23 km/h slow
+// once (it assumed a loss the car did not have) and then 14 km/h fast (the car
+// gained one, 0.88, and the copy stayed at 1.0).
 const ROLL_C = 0.014;       // asphalt rolling resistance coefficient, per world/ground.js
 const SHIFT_AT = 0.93;      // fraction of the limiter vehicle.js upshifts at
 
 /**
- * Tractive force at the contact patch at road speed `v`, mirroring the engine
- * and gearbox in physics/vehicle.js rather than assuming rated power is on tap
- * at every speed. It is not: the engine makes peak torque well below the power
- * peak, first gear runs out long before 100 km/h, and a car pulling away sits
- * at idle rpm making less than half of what the brochure claims.
- *
- * Modelling that is the difference between a garage that is right to a tenth
- * and one that promised the 4x4 5.3 s when the simulation gives 6.7.
+ * Tractive force at the contact patch at road speed `v`, in the gear the box
+ * would be in, mirroring the engine in physics/vehicle.js rather than assuming
+ * rated power is on tap at every speed. It is not: the engine makes peak torque
+ * well below the power peak and tails off past it, and a car that runs out of
+ * revs in top gear sits on the limiter — which is in here too, because two of
+ * the cars top out on it.
  */
 function driveForce(spec, cylinders, v) {
   const wheelOmega = v / spec.wheelRadius;
@@ -185,9 +181,11 @@ function driveForce(spec, cylinders, v) {
     if (cylinders === 0) {
       // An electric motor holds peak torque to its base speed, then constant power.
       torque = peakTorque * (rpm <= spec.peakRpm ? 1 : spec.peakRpm / rpm);
+      if (rpm >= spec.redline - 200) torque *= 0.1;
     } else {
       const n = rpm / spec.peakRpm;
       torque = peakTorque * clamp(1.12 - 0.42 * (n - 0.85) * (n - 0.85) * 3.2, 0.25, 1.12);
+      if (rpm >= spec.redline - 60) torque *= 0.15;   // the limiter
     }
     return torque * ratio / spec.wheelRadius;
   }
@@ -195,82 +193,100 @@ function driveForce(spec, cylinders, v) {
 }
 
 /**
- * Top speed, in m/s. The car runs out of road speed at whichever comes first:
- * the power needed to push it through the air, or the redline in top gear.
+ * Top speed, in m/s: the first road speed at which the wheels, in the gear the
+ * box would have selected, push less than drag and rolling resistance resist.
+ * It follows the torque curve rather than assuming rated power at every speed,
+ * because most cars top out off their power peak — assuming the peak quoted the
+ * pickup and the SUV 10-14 km/h more than they reach.
+ *
+ * Worked out rather than driven, unlike the 0-100 below: the heavy cars are
+ * still gaining speed four simulated minutes in, and 28,800 steps a car is too
+ * long to make a player wait for a menu. tools/catalogcheck.mjs drives every
+ * car for those four minutes and holds this figure to within 3 km/h of it.
+ *
  * Downforce is included because on the supercar it is worth several km/h of
  * extra rolling drag, and quoting a number the car cannot reach is worse than
  * quoting a slightly conservative one.
  */
-function topSpeed(spec) {
-  let lo = 5, hi = 160;
-  for (let i = 0; i < 48; i++) {
-    const v = (lo + hi) * 0.5;
+function topSpeed(spec, cylinders) {
+  let v = 5;
+  for (; v < 160; v += 0.05) {
     const load = spec.mass * GRAV + spec.downforce * v * v;
-    const need = (0.5 * RHO * spec.dragArea * v * v + ROLL_C * load) * v;
-    if (need < spec.power * DRIVELINE) lo = v; else hi = v;
+    const resist = 0.5 * RHO * spec.dragArea * v * v + ROLL_C * load;
+    if (driveForce(spec, cylinders, v) * DRIVELINE < resist) break;
   }
-  const topGear = spec.gears[spec.gears.length - 1];
-  const geared = (spec.redline / 60) * 2 * Math.PI * spec.wheelRadius / (topGear * spec.finalDrive);
-  return Math.min(lo, geared);
+  return v;
 }
 
+// Flat, level, dry asphalt: the road a quoted figure is measured on, and the
+// same one tools/catalogcheck.mjs drives on.
+const TEST_ROAD = {
+  sample(x, z, out) {
+    const r = out || {};
+    r.y = 0; r.nx = 0; r.ny = 1; r.nz = 0;
+    r.surface = 'asphalt'; r.grip = 1; r.roughness = 0.03; r.rolling = 0.014; r.dust = 0;
+    return r;
+  },
+};
+
 /**
- * 0-100 km/h in seconds, forward-integrated against the same limits the
- * simulation uses: traction on the driven axle first, engine power after.
- * Load transfer is in because it is the whole reason the rear-drive cars launch
- * better than their static weight distribution suggests.
+ * 0-100 km/h in seconds, MEASURED: a new car of this spec pulls away from rest
+ * on TEST_ROAD with the throttle pinned and the default aids, stepped at the
+ * game's own 1/120 s.
+ *
+ * This used to integrate its own model of the engine and gearbox, which was
+ * right to a tenth until the car gained a driveline loss, rotating mass and a
+ * clutch that holds launch revs. The copy had none of them, so the garage
+ * quoted the city car 8.4 s for a car that does 10.7, and every car in the
+ * garage quicker than it is — by 0.4-2.3 s. Driving the real model cannot
+ * drift from it. The slowest car takes about 1,500 steps; all fifteen take
+ * 11-13 ms on an M2 (63 ms the very first time, before the JIT has warmed),
+ * once, when the garage is built.
  */
-function accelTime(spec, cylinders) {
-  const TARGET = 100 / 3.6;
-  const mu = (spec.gripFront + spec.gripRear) * 0.5;
-  const staticShare = spec.drive === 'fwd' ? spec.cgBias
-    : spec.drive === 'rwd' ? 1 - spec.cgBias : 1;
-  const transfer = spec.drive === 'fwd' ? -1 : spec.drive === 'rwd' ? 1 : 0;
-
-  const dt = 0.004;
-  let v = 0, t = 0, a = 4;
-  while (v < TARGET && t < 40) {
-    const share = clamp(staticShare + transfer * (a * spec.cgHeight) / (spec.wheelbase * GRAV), 0.12, 1);
-    const load = spec.mass * GRAV + spec.downforce * v * v;
-    const traction = mu * share * load;
-    const drag = 0.5 * RHO * spec.dragArea * v * v + ROLL_C * load;
-    a = (Math.min(traction, driveForce(spec, cylinders, v)) - drag) / spec.mass;
-    if (a <= 0) break;
-    v += a * dt;
+function accelTime(spec) {
+  const car = createVehicle({ ground: TEST_ROAD, spec, damage: false });
+  car.reset(0, 0, 0);
+  const dt = 1 / 120;
+  let t = 0;
+  while (t < 40) {
+    car.input.throttle = 1;
+    car.step(dt);
     t += dt;
+    if (car.speed * 3.6 >= 100) return t;
   }
-
-  // Every upshift on the way to 100 is a real gap in the drive.
-  let shifts = 0;
-  for (let g = 0; g < spec.gears.length - 1; g++) {
-    const vTop = (spec.redline * SHIFT_AT / 60) * 2 * Math.PI * spec.wheelRadius / (spec.gears[g] * spec.finalDrive);
-    if (vTop < TARGET) shifts++;
-  }
-  return t + shifts * spec.shiftTime;
+  return Infinity;   // never gets there, and the garage should say so
 }
 
 /**
  * The figures the garage prints for one catalogue entry. The spec is merged
  * over DEFAULT_SPEC first because catalog entries only state their differences,
  * and shiftTime in particular is usually left to the default.
+ *
+ * Memoised per entry: setCars() can run more than once, and each 0-100 is a
+ * short drive, not a formula.
  */
+const statsMemo = new WeakMap();
 export function carStats(car) {
+  const hit = statsMemo.get(car);
+  if (hit) return { ...hit };
   const spec = { ...DEFAULT_SPEC, ...car.spec };
   // `cylinders` lives on the catalogue entry, not inside its `spec` — specFor()
   // is what copies it across. The merge above therefore never sees it, so it is
   // read from the car. Without this the electric car is run through the
   // combustion torque curve and quoted a time it does not do.
   const cylinders = car.cylinders != null ? car.cylinders : spec.cylinders;
-  const top = topSpeed(spec);
-  return {
+  const top = topSpeed(spec, cylinders);
+  const out = {
     hp: Math.round((spec.power / 745.7) / 5) * 5,
     kw: Math.round(spec.power / 1000),
-    accel: accelTime(spec, cylinders),
+    accel: accelTime({ ...car.spec, cylinders }),
     topKph: Math.round(top * 3.6),
     mass: spec.mass,
     drive: spec.drive,
     gears: spec.gears.length,
   };
+  statsMemo.set(car, out);
+  return { ...out };
 }
 
 // ---------------------------------------------------------------------------

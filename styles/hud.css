@@ -625,19 +625,27 @@
  * a keyboard, so on touch they were drawn under the player's thumbs. The same
  * test touch.js uses to decide to show the rig (a coarse pointer and no fine
  * one) moves them: the minimap to the top-left corner, which nothing else
- * uses, and the cluster to the bottom centre, into the gap between wheel and
- * pedals — measured at 200 px on a 740 px phone and 410 px on a 1024 px
- * tablet, against a 98 and 144 px dial. */
+ * uses, and the cluster under it, above the wheel. Not the bottom centre,
+ * between wheel and pedals, where it went first: that is where the chase
+ * camera puts the car, and at 740x360 the dial (x 358-462, y 247-351)
+ * covered the lower third of it and the road just behind. */
 @media (hover: none) and (pointer: coarse) {
   .hud { --hud-map: calc(var(--hud-u) * 10.5); }
   .hud__map { grid-area: 1 / 1 / 2 / 2; align-self: start; }
-  .hud__cluster { grid-area: 3 / 2 / 4 / 3; justify-self: center; }
+  .hud__cluster { grid-area: 2 / 1 / 3 / 2; justify-self: start; align-self: start; flex-direction: row-reverse; align-items: flex-start; }
+  .hud__tells { align-items: flex-start; }
   .hud__toast { grid-area: 2 / 2 / 3 / 3; align-self: end; }
 }
-/* Upright, the gap between wheel and pedals is too narrow for the dial, so
- * the cluster goes under the minimap on the left, above the wheel. */
+/* A phone on its side has 92 px between the minimap (ending at 93 on a
+ * 360 px screen) and the top of the wheel's touch zone (194): the dial goes
+ * from 13 units to 11.5, 98 px to 87, to sit clear of the thumb. */
+@media (hover: none) and (pointer: coarse) and (orientation: landscape) and (max-height: 480px) {
+  .hud { --hud-dial: calc(var(--hud-u) * 11.5); }
+}
+/* Upright there is height to spare and no width: the telltales and the limit
+ * sign go in a row above the dial instead of beside it. */
 @media (hover: none) and (pointer: coarse) and (orientation: portrait) {
-  .hud__cluster { grid-area: 2 / 1 / 3 / 2; justify-self: start; align-self: start; flex-direction: column-reverse; align-items: flex-start; }
+  .hud__cluster { flex-direction: column-reverse; }
   .hud__tells { flex-direction: row; align-items: center; margin-bottom: 0; }
   .hud__limit { margin-bottom: 0; }
 }

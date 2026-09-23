@@ -631,7 +631,10 @@ export function createHUD(root, opts = {}) {
       const d = world.districts[i];
       // Upper-cased once, here: the minimap labels are set in capitals like
       // every other label, and doing it per frame would mint a string a frame.
-      places.push({ name: d.name.toUpperCase(), x: d.cx, z: d.cz, village: d.id.startsWith('v_') });
+      // tw is the label's drawn width, measured in relayout() whenever the
+      // map's font changes size, so drawMap() can keep it on the disc
+      // without a measureText (and its TextMetrics object) every frame.
+      places.push({ name: d.name.toUpperCase(), x: d.cx, z: d.cz, village: d.id.startsWith('v_'), tw: 0 });
       districtNames.set(d.id, d.name);
     }
   }
@@ -681,6 +684,7 @@ export function createHUD(root, opts = {}) {
       mapCtx.lineJoin = 'round';
       mapCtx.font = fontFor(mapCanvas.width * 0.066, 700, FONT_WORD);
       mapCtx.strokeStyle = COL_HALO;
+      for (let i = 0; i < places.length; i++) places[i].tw = mapCtx.measureText(places[i].name).width;
     }
 
     if (fitCanvas(compCanvas)) buildCompassTape();
@@ -926,6 +930,7 @@ export function createHUD(root, opts = {}) {
     const range = span * 1.55;
     const villageRange = range > 1200 ? range : 1200;
     const edge = r * 0.74;
+    const labelR = r * 0.92;
     g.strokeStyle = COL_HALO;
     g.lineWidth = w * 0.013;
     for (let i = 0; i < places.length; i++) {
@@ -947,10 +952,36 @@ export function createHUD(root, opts = {}) {
       g.arc(r + sx, r + sy, w * (onRim ? 0.010 : 0.015), 0, TAU);
       g.fillStyle = p.village ? COL_COOL : COL_LABEL;
       g.fill();
+      // The whole name stays on the disc. Centred on its dot, a long one at
+      // the rim ran off the edge: 'GREENMEADOW FARMS' is 0.56 of the disc's
+      // width, and read 'ENMEADOW FARMS'. Its centre is held inside the chord
+      // at the text's outer edge (within the bezel, 0.92 r), and a name wider
+      // than that chord — only ever near the top or bottom of the rim — is
+      // condensed to fit, down to 70%.
       const ly = r + sy + w * 0.056;
-      g.strokeText(p.name, r + sx, ly);
+      const dy = Math.abs(ly - r) + w * 0.033;
+      const half = labelR > dy ? Math.sqrt(labelR * labelR - dy * dy) : 0;
+      const tw = p.tw;
+      let lx = r + sx, k = 1;
+      if (tw > half * 2) {
+        lx = r;
+        k = tw > 0 ? Math.max(0.7, (half * 2) / tw) : 1;
+      } else {
+        const lo = r - half + tw * 0.5, hi = r + half - tw * 0.5;
+        lx = lx < lo ? lo : lx > hi ? hi : lx;
+      }
       g.fillStyle = onRim ? COL_LABEL_DIM : COL_LABEL;
-      g.fillText(p.name, r + sx, ly);
+      if (k < 1) {
+        // The map is drawn in device pixels on an identity transform, so a
+        // setTransform and back is the whole of it: no save/restore pair.
+        g.setTransform(k, 0, 0, 1, lx, ly);
+        g.strokeText(p.name, 0, 0);
+        g.fillText(p.name, 0, 0);
+        g.setTransform(1, 0, 0, 1, 0, 0);
+      } else {
+        g.strokeText(p.name, lx, ly);
+        g.fillText(p.name, lx, ly);
+      }
     }
 
     if (nav) drawNav(g, nav, px, pz, ch, sh, mpp, r, edge, w, range);

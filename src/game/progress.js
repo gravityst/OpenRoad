@@ -98,33 +98,56 @@ const num = (v, d = 0) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
 
 // ---- surviving an older build ----------------------------------------------
 // A round-one build that loads a v2 save writes it back as v1 with only the
-// v1 fields — but it keeps every flag that is `true` (up to 64). So a v2 save
-// also carries, as flags: a mark that it has been v2, the level rewards paid
-// so far, and the paints and trophies it owns. migrate() reads them back if a
-// round-one build has flattened the save in between. Twelve paints, 29
-// trophies, the mark and the level come to 43, under the 64 round one keeps.
-const V2_MARK = 'v2';
+// v1 fields — but it keeps every flag that is `true` (the first 64). So a v2
+// save also carries the facts migrate() needs to tell it apart from a real v1
+// save, all in ONE flag key whose value is `true`:
+//
+//   'v2|paid:7|p:lagoon,onyx|t:near-1,gold-1'
+//
+// the level rewards paid so far, the paints owned and the trophies won.
+// One flag per fact came to 43 of the 64 (12 paints, 29 trophies, the mark
+// and the level), and every paint or trophy added later would have pushed a
+// real one-shot flag, one added after them, past the 64th: a hint the player
+// had dismissed would come back on every load. Ids are [a-z0-9-], so '|'
+// and ',' can never occur inside one.
+const MIRROR = 'v2|';
+// This branch's first cut wrote one flag per fact under these names. It never
+// shipped, but a save that has them is read and then tidied into one key.
+const OLD_MIRROR = /^(v2$|paid:|paint:|trophy:)/;
 
-function flagNumber(flags, prefix) {
-  let n = 0;
-  for (const k of Object.keys(flags)) {
-    if (!k.startsWith(prefix) || flags[k] !== true) continue;
-    const v = parseInt(k.slice(prefix.length), 10);
-    if (v > n) n = v;
-  }
-  return n;
+function mirrorKey(d) {
+  return `${MIRROR}paid:${d.rewardLevel}|p:${d.paints.join(',')}|t:${Object.keys(d.trophies).join(',')}`;
 }
 
-/** Brings the flag mirrors up to date with the save. Cheap when nothing changed. */
+/** Brings the flag mirror up to date with the save: one string, one key. */
 function mirrorFlags(d) {
   const f = d.flags;
-  f[V2_MARK] = true;
-  if (f[`paid:${d.rewardLevel}`] !== true) {
-    for (const k of Object.keys(f)) if (k.startsWith('paid:')) delete f[k];
-    f[`paid:${d.rewardLevel}`] = true;
+  const key = mirrorKey(d);
+  if (f[key] === true) return;
+  for (const k of Object.keys(f)) if (k.startsWith(MIRROR) || OLD_MIRROR.test(k)) delete f[k];
+  f[key] = true;
+}
+
+/** The facts a v2 build left in the flags, or null for a save that never was v2. */
+function readMirror(flags) {
+  let m = null;
+  for (const k of Object.keys(flags)) {
+    if (flags[k] !== true) continue;
+    if (k.startsWith(MIRROR)) {
+      m = m || { paid: 0, paints: [], trophies: [] };
+      for (const part of k.split('|')) {
+        if (part.startsWith('paid:')) m.paid = Math.max(m.paid, parseInt(part.slice(5), 10) || 0);
+        else if (part.startsWith('p:')) m.paints.push(...part.slice(2).split(','));
+        else if (part.startsWith('t:')) m.trophies.push(...part.slice(2).split(','));
+      }
+    } else if (OLD_MIRROR.test(k)) {
+      m = m || { paid: 0, paints: [], trophies: [] };
+      if (k.startsWith('paid:')) m.paid = Math.max(m.paid, parseInt(k.slice(5), 10) || 0);
+      else if (k.startsWith('paint:')) m.paints.push(k.slice(6));
+      else if (k.startsWith('trophy:')) m.trophies.push(k.slice(7));
+    }
   }
-  for (const p of d.paints) if (f[`paint:${p}`] !== true) f[`paint:${p}`] = true;
-  for (const id of Object.keys(d.trophies)) if (f[`trophy:${id}`] !== true) f[`trophy:${id}`] = true;
+  return m;
 }
 
 /**
@@ -175,7 +198,7 @@ export function sanitize(raw) {
   const unpaid = num(raw.v, 1) >= 2 ? lvl : 1;
   out.rewardLevel = Math.max(1, Math.min(lvl, Math.floor(num(raw.rewardLevel, unpaid))));
   if (Array.isArray(raw.paints)) {
-    out.paints = [...new Set(raw.paints.filter((p) => typeof p === 'string' && PAINT_BY_ID[p]))];
+    out.paints = [...new Set(raw.paints.filter((p) => typeof p === 'string' && Object.hasOwn(PAINT_BY_ID, p)))];
   }
   if (raw.livery && typeof raw.livery === 'object') {
     for (const car of Object.keys(raw.livery).slice(0, 64)) {
@@ -234,15 +257,14 @@ export function migrate(raw) {
     // 2,775) and the paint the player bought gone. Round one keeps any flag
     // that is `true`, so the v2 build leaves the facts it needs there (see
     // mirrorFlags) and they are read back here.
-    if (data.flags[V2_MARK] === true) {
+    const m = readMirror(data.flags);
+    if (m) {
       const lv = levelFor(data.xp).level;
-      const paid = flagNumber(data.flags, 'paid:');
-      data.rewardLevel = Math.max(1, Math.min(lv, paid || lv));
-      for (const k of Object.keys(data.flags)) {
-        const paint = k.startsWith('paint:') ? k.slice(6) : null;
-        const trophy = k.startsWith('trophy:') ? k.slice(7) : null;
-        if (paint && PAINT_BY_ID[paint] && !data.paints.includes(paint)) data.paints.push(paint);
-        if (trophy && TROPHIES.some((t) => t.id === trophy) && data.trophies[trophy] == null) data.trophies[trophy] = '';
+      data.rewardLevel = Math.max(1, Math.min(lv, m.paid || lv));
+      // hasOwn, not a lookup: 'constructor' is a key of every object.
+      for (const paint of m.paints) if (Object.hasOwn(PAINT_BY_ID, paint) && !data.paints.includes(paint)) data.paints.push(paint);
+      for (const trophy of m.trophies) {
+        if (TROPHIES.some((t) => t.id === trophy) && data.trophies[trophy] == null) data.trophies[trophy] = '';
       }
     } else {
       data.rewardLevel = 1;

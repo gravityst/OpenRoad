@@ -502,6 +502,44 @@ console.log('\n-- the save --');
     check('a v2 save that has lost rewardLevel pays no level again',
       c.cash === b.cash && evc.filter((e) => e.type === 'level' || e.type === 'welcome').length === 0 && c.data.rewardLevel === levelFor(c.xp).level,
       `cash $${b.cash} -> $${c.cash}, rewardLevel ${c.data.rewardLevel} at level ${levelFor(c.xp).level}, events ${evc.map((e) => e.type).join() || 'none'}`);
+
+    // Everything owned, and then the case the mirror must never cause: 60
+    // one-shot flags set AFTER it. Round one keeps the first 64 keys, so the
+    // mirror has to be one of them however much a player owns, and the
+    // real flags must all survive too.
+    const s3 = memoryStorage();
+    const full = createProgress({ storage: s3, cars: CARS, today: () => '2026-09-23', tokensTotal: 50 });
+    full.drainEvents([]);
+    full.bankChain(1, 0, 100000);
+    for (const q of PAINTS) full.buyPaint(q.id);
+    for (const t of TROPHIES) full.data.trophies[t.id] = '2026-09-23';
+    for (let i = 0; i < 60; i++) full.setFlag(`hint${i}`);
+    const saved = JSON.parse(s3.getItem(PROGRESS_KEY));
+    const mirrors = Object.keys(saved.flags).filter((k) => !k.startsWith('hint'));
+    s3.setItem(PROGRESS_KEY, JSON.stringify(roundOne(saved)));
+    const back = createProgress({ storage: s3, cars: CARS, today: () => '2026-09-23', tokensTotal: 50 });
+    const hints = Object.keys(back.data.flags).filter((k) => k.startsWith('hint')).length;
+    check('the round-one mirror is one flag, however much is owned',
+      mirrors.length === 1 && back.data.paints.length === PAINTS.length && Object.keys(back.data.trophies).length === TROPHIES.length && hints === 60,
+      `${mirrors.length} mirror flag for ${PAINTS.length} paints and ${TROPHIES.length} trophies; after round one: ` +
+      `${back.data.paints.length} paints, ${Object.keys(back.data.trophies).length} trophies, ${hints} of 60 later flags kept`);
+
+    // A save from this branch's first cut (one flag per fact) reads the same
+    // and is tidied into the one key on its next save.
+    const legacy = roundOne(saved);
+    legacy.xp = xpForLevel(6);                  // level 6, with level 3's rewards paid
+    legacy.flags = { v2: true, 'paid:3': true, 'paint:lagoon': true, 'trophy:near-1': true, chainHint: true };
+    const s4 = memoryStorage({ [PROGRESS_KEY]: JSON.stringify(legacy) });
+    const lg = createProgress({ storage: s4, cars: CARS, today: () => '2026-09-23', tokensTotal: 50 });
+    // Levels paid on load arrive as one 'welcome' card that counts them.
+    const lgWelcome = lg.drainEvents([]).find((e) => e.type === 'welcome');
+    const lgLevels = lgWelcome ? lgWelcome.levels : 0;
+    lg.setFlag('tidy');
+    const lgFlags = Object.keys(JSON.parse(s4.getItem(PROGRESS_KEY)).flags);
+    check('...and a save with the old one-per-fact mirror reads back and tidies up',
+      lg.ownsPaint('lagoon') && lg.data.trophies['near-1'] != null && lgLevels === 3 && lg.data.rewardLevel === 6 &&
+      lgFlags.length === 3 && lgFlags.includes('chainHint'),
+      `Lagoon ${lg.ownsPaint('lagoon') ? 'kept' : 'lost'}, paid to 3, so ${lgLevels} levels (4-6) paid now, flags now ${lgFlags.map((k) => k.replace(/\|t:.*/, '|t:...')).join(' / ')}`);
   }
 
   // A fresh v2 round trip with everything in it.

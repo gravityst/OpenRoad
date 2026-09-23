@@ -486,6 +486,10 @@
   color: var(--or-text-2, rgba(238, 242, 246, 0.66));
 }
 .or-pause-progress { margin: -4px 0 14px; text-align: center; }
+/* The race buttons on the pause card are shown only while a race runs, by the
+   hidden attribute — which .or-btn's display: inline-flex quietly overrides,
+   so "Restart race" sat on every pause card, racing or not. */
+.or-btn[hidden] { display: none; }
 
 /* ---- the map's challenge list --------------------------------------------- */
 

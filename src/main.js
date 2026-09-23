@@ -319,7 +319,9 @@ async function boot() {
   // detail, and draws every car beyond the tier's near radius as one instanced
   // draw per model. This used to build every slot at the PLAYER's detail: 26
   // draw calls and ~22k triangles a car, up to 71 of them.
-  const fleet = mCar ? mCar.createFleet(scene, { quality: settings.quality || 'medium' }) : null;
+  // In safe(): the fleet claims the shared car kit when it is built, and a
+  // failure there must cost the traffic its models, not the boot.
+  const fleet = mCar ? safe(() => mCar.createFleet(scene, { quality: settings.quality || 'medium' })) : null;
   // Each slot's near model, for the damage rig. Filled only with DAMAGE on.
   const trafficModels = [];
   // Visual damage for traffic, one per slot, built on first contact like the

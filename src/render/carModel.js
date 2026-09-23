@@ -81,11 +81,18 @@
 // is built once per model and shared by every car of that model.
 
 import * as THREE from 'three';
-import { createHeavyModel, HEAVY_BODIES } from './heavy.js';
+
+// heavy.js (the lorry, the bus and the tractor) is loaded on its own. With a
+// static import, a fault in it failed this whole module, and main.js loses
+// the player's car model along with the traffic. Now the working vehicles
+// fall back to van bodies and nothing else changes.
+let heavy = null;
+try { heavy = await import('./heavy.js'); }
+catch (err) { console.error('[open road] heavy vehicles unavailable, drawn as vans:', err); }
 
 export const BODY_STYLES = ['sedan', 'coupe', 'hatch', 'suv', 'pickup', 'van', 'sports'];
 /** The working vehicles traffic also drives: see render/heavy.js. */
-export { HEAVY_BODIES };
+export const HEAVY_BODIES = heavy ? heavy.HEAVY_BODIES : ['box', 'bus', 'tractor'];
 
 // ===========================================================================
 // Style table
@@ -2990,8 +2997,8 @@ export function setCarQuality(tier) {
 export function createCarModel(spec = {}, opts = {}) {
   // The lorry, the bus and the tractor are built by heavy.js to this same
   // interface, from this file's kit and materials.
-  if (HEAVY_BODIES.includes(spec.body)) return createHeavyModel(spec, opts, HEAVY_DEPS);
-  const style = BODY_STYLES.includes(spec.body) ? spec.body : 'sedan';
+  if (heavy && HEAVY_BODIES.includes(spec.body)) return heavy.createHeavyModel(spec, opts, HEAVY_DEPS);
+  const style = BODY_STYLES.includes(spec.body) ? spec.body : HEAVY_BODIES.includes(spec.body) ? 'van' : 'sedan';
   const detail = opts.detail === 'low' ? 'low' : 'high';
   const seed = hash(`${spec.id || style}:${spec.name || ''}`);
   const K = acquireKit();
@@ -3353,7 +3360,11 @@ function defaults(spec) {
 // away is a sub-pixel emissive patch that the bloom cannot find; on a real
 // road at night it is the only thing you can see. All flares are one draw.
 //
-// None of it allocates per frame: every buffer is sized from the pool once.
+// Every buffer is sized from the pool once. sync() is not allocation-free,
+// though: realismcheck measures 3.9 KB a frame for 48 cars, day and night
+// alternating, read between two full collections. That is short-lived number
+// boxes, not buffers, and nothing is kept; the terrain streams 845 KB a frame
+// at speed.
 
 const FLEET = {
   low:    { near: 30, maxNear: 6,  flareFar: 450 },
@@ -3373,13 +3384,17 @@ const BAKE = {
 
 const FAR_VERT_PARS = /* glsl */`
 attribute vec4 aMat;      // paint flag, roughness, metalness, lamp code
+attribute vec3 aLivUv;    // livery panels: their uv, and 1 (everything else 0)
 attribute vec4 aLamp;     // per instance: head, brake, left, right
 attribute vec4 aFinish;   // per instance: paint metalness, paint roughness, beacon, -
+attribute vec4 aLivRect;  // per instance: its livery's rect in the atlas (0 = none)
 varying vec2 vRM;
 varying vec3 vEmit;
+varying vec3 vLiv;        // atlas uv, and whether this fragment wears it
 `;
 const FAR_VERT = /* glsl */`
 vColor.rgb = color.rgb * mix( vec3( 1.0 ), instanceColor.rgb, aMat.x );
+vLiv = vec3( aLivRect.xy + aLivUv.xy * aLivRect.zw, aLivUv.z * step( 1e-6, aLivRect.z ) );
 vRM = mix( aMat.yz, aFinish.yx, aMat.x );
 {
   float lc = aMat.w;
@@ -3399,20 +3414,35 @@ vRM = mix( aMat.yz, aFinish.yx, aMat.x );
 }
 `;
 
+// A livery panel wears its operator's flank from the atlas instead of the
+// flat colour it was baked with. The tractor's stripe is painted on clear, so
+// what is clear shows the bonnet under it, as the near model's alphaTest does.
+const FAR_FRAG_LIVERY = /* glsl */`
+#ifdef FAR_LIVERY
+  if ( vLiv.z > 0.5 ) {
+    vec4 lt = texture2D( uLivery, vLiv.xy );
+    if ( lt.a < 0.5 ) discard;
+    diffuseColor.rgb = lt.rgb;
+  }
+#endif
+`;
+
 function patchFar(shader) {
   envUniforms(shader);
   shader.vertexShader = shader.vertexShader
     .replace('#include <common>', '#include <common>\n' + FAR_VERT_PARS)
     .replace('#include <color_vertex>', '#include <color_vertex>\n' + FAR_VERT);
   shader.fragmentShader = shader.fragmentShader
-    .replace('#include <common>', '#include <common>\nvarying vec2 vRM;\nvarying vec3 vEmit;')
+    .replace('#include <common>', '#include <common>\nvarying vec2 vRM;\nvarying vec3 vEmit;\nvarying vec3 vLiv;\n#ifdef FAR_LIVERY\nuniform sampler2D uLivery;\n#endif')
+    .replace('#include <color_fragment>', '#include <color_fragment>\n' + FAR_FRAG_LIVERY)
     .replace('#include <roughnessmap_fragment>', 'float roughnessFactor = vRM.x;')
     .replace('#include <metalnessmap_fragment>', 'float metalnessFactor = vRM.y;')
     .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\ntotalEmissiveRadiance += vEmit;')
     .replace('#include <lights_fragment_begin>',
       '#include <lights_fragment_begin>\nreflectedLight.directSpecular = min( reflectedLight.directSpecular, vec3( 1.2 ) );');
 }
-const FAR_KEY = () => 'openroad-car-far-1';
+const FAR_KEY = () => 'openroad-car-far-2';
+const FAR_KEY_LIVERY = () => 'openroad-car-far-2-livery';
 
 const FLARE_VERT = /* glsl */`
 attribute vec3 aPos;       // world position of the lamp
@@ -3469,7 +3499,7 @@ const _fcol = new THREE.Color(), _fdir = new THREE.Vector3();
  * code that lights them. Also returns where the lamps are, for the flares.
  */
 function bakeModel(model) {
-  const pos = [], nrm = [], col = [], mat = [], idx = [];
+  const pos = [], nrm = [], col = [], mat = [], liv = [], idx = [];
   const lampAt = { head: [[0, 0, 0, 0], [0, 0, 0, 0]], tail: [[0, 0, 0, 0], [0, 0, 0, 0]], beacon: [0, 0, 0, 0] };
   model.group.updateMatrixWorld(true);
   const inv = new THREE.Matrix4().copy(model.group.matrixWorld).invert();
@@ -3495,6 +3525,8 @@ function bakeModel(model) {
     else if (o.material && o.material.color) { base = o.material.color.getHex(); rough = o.material.roughness ?? 0.5; metal = o.material.metalness ?? 0; }
     else base = 0x808080;
     const wheel = name === 'wheel';
+    // A livery panel keeps its uv, for the far atlas (see heavy.js).
+    const UV = name === 'livery' && g.attributes.uv ? g.attributes.uv.array : null;
     let rMax = 0;
     if (wheel) for (let i = 0; i < P.length; i += 3) rMax = Math.max(rMax, Math.hypot(P[i + 1], P[i + 2]));
     const v0 = pos.length / 3;
@@ -3514,6 +3546,7 @@ function bakeModel(model) {
       if (C) _fcol.multiply(_c.setRGB(C[i], C[i + 1], C[i + 2]));
       col.push(_fcol.r, _fcol.g, _fcol.b);
       mat.push(paint, r, mt, lamp);
+      if (UV) liv.push(UV[(i / 3) * 2], UV[(i / 3) * 2 + 1], 1); else liv.push(0, 0, 0);
       if (lamp === 1 || lamp === 2) {
         const acc = lampAt[lamp === 1 ? 'head' : 'tail'][_fv.x < 0 ? 0 : 1];
         acc[0] += _fv.x; acc[1] += _fv.y; acc[2] += _fv.z; acc[3]++;
@@ -3530,6 +3563,7 @@ function bakeModel(model) {
   geo.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));
   geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
   geo.setAttribute('aMat', new THREE.Float32BufferAttribute(mat, 4));
+  geo.setAttribute('aLivUv', new THREE.Float32BufferAttribute(liv, 3));
   geo.setIndex(pos.length / 3 > 65535 ? new THREE.Uint32BufferAttribute(idx, 1) : new THREE.Uint16BufferAttribute(idx, 1));
   geo.computeBoundingSphere();
   const avg = (a, fallback) => (a[3] > 0 ? [a[0] / a[3], a[1] / a[3], a[2] / a[3]] : fallback);
@@ -3554,8 +3588,17 @@ export function createFleet(scene, opts = {}) {
   const env = K.tex.env;
 
   const farMat = new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, roughness: 1, metalness: 1, envMap: env });
-  farMat.onBeforeCompile = patchFar;
-  farMat.customProgramCacheKey = FAR_KEY;
+  // The liveries far lorries, buses and tractors wear (null headless, or if
+  // heavy.js failed to load: the panels then keep their flat baked colour).
+  let livery = null;
+  try { livery = heavy && heavy.farLiveryAtlas ? heavy.farLiveryAtlas() : null; }
+  catch (err) { console.error('[open road] far liveries:', err); }
+  if (livery) farMat.defines = { FAR_LIVERY: '' };
+  farMat.onBeforeCompile = (shader) => {
+    patchFar(shader);
+    if (livery) shader.uniforms.uLivery = { value: livery.texture };
+  };
+  farMat.customProgramCacheKey = livery ? FAR_KEY_LIVERY : FAR_KEY;
 
   const slots = [];            // per pool slot: { key, model, near, colour, finish, blink }
   const kinds = new Map();     // key -> { template, bake, mesh, cap, n, lamp, finish, spec }
@@ -3601,7 +3644,12 @@ export function createFleet(scene, opts = {}) {
   }
   function specOf(t) { return { ...(t.spec || {}), body: t.body || (t.spec && t.spec.body), colour: t.colour }; }
 
-  /** Everything sized from the pool, once: bakes, instance buffers, flares. */
+  /**
+   * Everything sized from the pool, once: bakes, instance buffers, flares.
+   * A model that fails to build or bake loses its kind, and every car of that
+   * kind simply is not drawn; it must not take the frame loop down with it
+   * (this runs inside sync(), every frame, until it has succeeded once).
+   */
   function build(cars) {
     built = true;
     const counts = new Map();
@@ -3612,22 +3660,32 @@ export function createFleet(scene, opts = {}) {
       const colour = t.colour ?? (t.spec && t.spec.colour) ?? 0xb8bcc0;
       const fin = new THREE.MeshStandardMaterial();
       paintFinish(colour, fin);
+      // Its livery's rect in the far atlas, or zeros: nothing to wear.
+      const lr = livery ? livery.rectOf(t.body || (t.spec && t.spec.body), t.spec ? t.spec.livery : 0) : null;
       slots[i] = {
-        key, model: null, near: false, colour,
+        key, model: null, near: false, colour, noModel: false,
         metal: fin.metalness, rough: Math.max(0.18, fin.roughness - 0.08),
         blink: (i * 0.6180339887) % 1,
+        liv: lr ? Float32Array.from(lr) : new Float32Array(4),
       };
       fin.dispose();
       if (!kinds.has(key)) kinds.set(key, { spec: specOf(t), template: null, bake: null, mesh: null, cap: 0, n: 0 });
     }
-    for (const [key, k] of kinds) {
+    for (const [key, k] of [...kinds]) {
       k.cap = counts.get(key);
-      k.template = createCarModel(k.spec, { detail: 'low' });
+      try {
+        k.template = createCarModel(k.spec, { detail: 'low' });
+        k.bake = bakeModel(k.template);
+      } catch (err) {
+        console.error(`[open road] traffic model ${key} failed; those cars go undrawn:`, err);
+        if (k.template) k.template.dispose();
+        kinds.delete(key);
+        continue;
+      }
       k.template.group.visible = false;
       // Kept in the scene, hidden: compileAsync() compiles hidden objects,
       // so the near model's programs are ready before anything drives past.
       group.add(k.template.group);
-      k.bake = bakeModel(k.template);
       const mesh = new THREE.InstancedMesh(k.bake.geo, farMat, k.cap);
       mesh.name = `fleet:${key}`;
       mesh.frustumCulled = false;          // culled per instance below
@@ -3639,10 +3697,13 @@ export function createFleet(scene, opts = {}) {
       mesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
       k.lamp = new THREE.InstancedBufferAttribute(new Float32Array(k.cap * 4), 4);
       k.finish = new THREE.InstancedBufferAttribute(new Float32Array(k.cap * 4), 4);
+      k.livRect = new THREE.InstancedBufferAttribute(new Float32Array(k.cap * 4), 4);
       k.lamp.setUsage(THREE.DynamicDrawUsage);
       k.finish.setUsage(THREE.DynamicDrawUsage);
+      k.livRect.setUsage(THREE.DynamicDrawUsage);
       k.bake.geo.setAttribute('aLamp', k.lamp);
       k.bake.geo.setAttribute('aFinish', k.finish);
+      k.bake.geo.setAttribute('aLivRect', k.livRect);
       k.mesh = mesh;
       group.add(mesh);
     }
@@ -3678,11 +3739,18 @@ export function createFleet(scene, opts = {}) {
     group.add(flares);
   }
 
+  /** A slot's real model, built the first time it comes near; null if that failed. */
   function nearModel(i, t) {
     const s = slots[i];
-    if (!s.model) {
-      s.model = createCarModel(specOf(t), { detail: 'low', colour: s.colour });
-      group.add(s.model.group);
+    if (!s.model && !s.noModel) {
+      try {
+        s.model = createCarModel(specOf(t), { detail: 'low', colour: s.colour });
+        group.add(s.model.group);
+      } catch (err) {
+        // Drawn far (the instanced body) at any distance from now on.
+        console.error(`[open road] traffic model ${s.key} failed near; drawn far instead:`, err);
+        s.model = null; s.noModel = true;
+      }
     }
     return s.model;
   }
@@ -3736,12 +3804,12 @@ export function createFleet(scene, opts = {}) {
     let cand = 0;
     for (let i = 0; i < cars.length; i++) {
       const t = cars[i];
-      if (!t.active) { d2s[i] = Infinity; continue; }
+      if (!t.active || !kinds.has(slots[i].key)) { d2s[i] = Infinity; continue; }
       const dx = t.x - cam.x, dy = t.y - cam.y, dz = t.z - cam.z;
       const d2 = dx * dx + dy * dy + dz * dz;
       d2s[i] = d2;
       const lim = slots[i].near ? farR : nearR;
-      if (d2 < lim * lim) order[cand++] = i;
+      if (d2 < lim * lim && !slots[i].noModel) order[cand++] = i;
     }
     if (cand > T.maxNear) {
       // Insertion sort of a handful of indices by distance.
@@ -3761,7 +3829,8 @@ export function createFleet(scene, opts = {}) {
     let nb = 0, nf = 0, nNear = 0, nFar = 0, farTris = 0;
     for (let i = 0; i < cars.length; i++) {
       const t = cars[i], s = slots[i];
-      if (!t.active) { if (s.model) s.model.group.visible = false; continue; }
+      const k = kinds.get(s.key);
+      if (!t.active || !k) { if (s.model) s.model.group.visible = false; continue; }
       const head = lights ? 1 : 0;
       const brake = t.braking ? 1 : 0;
       const lit = ((clock + s.blink) % 0.78) < 0.44;
@@ -3772,13 +3841,12 @@ export function createFleet(scene, opts = {}) {
       _fe.set(t.pitch || 0, t.yaw || 0, -(t.roll || 0), 'YXZ');
       _fq.setFromEuler(_fe);
       _fm.compose(_fp.set(t.x, t.y, t.z), _fq, _fs.set(1, 1, 1));
-      const k = kinds.get(s.key);
       const radius = k.template.dims.length * 0.5 + 4 + Math.sqrt(d2s[i]) * 0.05;
       const inView = swinging || _frust.intersectsSphere(_fsph.set(_fp, radius));
 
-      if (s.near) {
+      const m = s.near ? nearModel(i, t) : null;
+      if (m) {
         nNear++;
-        const m = nearModel(i, t);
         m.group.visible = true;
         m.group.position.set(t.x, t.y, t.z);
         m.group.rotation.set(0, t.yaw, 0);
@@ -3789,7 +3857,8 @@ export function createFleet(scene, opts = {}) {
         m.setBrakeLights(brake);
         m.setHeadlights(lights);
         m.setIndicator(t.indicator || 0);
-        if (m.setBeacon) m.setBeacon(beacon);
+        // No beacon setter: a near tractor turns its own, off the clock, in
+        // setWheelSpin (heavy.js). Only the far instance needs it handed in.
       } else {
         if (s.model) s.model.group.visible = false;
         if (inView) {
@@ -3803,6 +3872,7 @@ export function createFleet(scene, opts = {}) {
           const L = k.lamp.array, F = k.finish.array;
           L[j * 4] = head; L[j * 4 + 1] = brake; L[j * 4 + 2] = indL; L[j * 4 + 3] = indR;
           F[j * 4] = s.metal; F[j * 4 + 1] = s.rough; F[j * 4 + 2] = beacon; F[j * 4 + 3] = 0;
+          k.livRect.array.set(s.liv, j * 4);
           farTris += k.bake.triangles;
           // Its contact shadow: under the body, on the ground plane of the car.
           const dm = k.template.dims;
@@ -3874,6 +3944,7 @@ export function createFleet(scene, opts = {}) {
         mesh.instanceColor.needsUpdate = true;
         k.lamp.needsUpdate = true;
         k.finish.needsUpdate = true;
+        k.livRect.needsUpdate = true;
       }
     }
     // Nearest first, so the road's eight go to the cars that matter.

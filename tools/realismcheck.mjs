@@ -28,6 +28,8 @@
 // Headless, so it cannot see the paint. What to LOOK at is listed at the end.
 import * as THREE from 'three';
 import { readFileSync } from 'node:fs';
+import { setFlagsFromString } from 'node:v8';
+import { runInNewContext } from 'node:vm';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildWorld, pointOnEdge, woodland } from '../src/world/layout.js';
@@ -42,6 +44,9 @@ import { drawnSize, SOLID_FRACTION } from '../src/render/city.js';
 import { planRoadside, createRoadside, createRoads } from '../src/render/roads.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+// A full collection on demand, for measuring what a frame allocates.
+setFlagsFromString('--expose-gc');
+const gc = runInNewContext('gc');
 const read = (f) => readFileSync(resolve(ROOT, f), 'utf8');
 
 let fail = 0;
@@ -221,7 +226,47 @@ function overlapDepth(a, b) {
   // player detail, 12 at 'low' — whether it was 20 m away or 300.
   check('the whole traffic pool costs fewer draw calls than two near cars did', calls <= 2 * 26 + 12,
     `${calls} calls for ${active} cars (was ${active} x 26 = ${active * 26} before frustum culling)`);
-  check('near cars are capped by the tier', st.near <= 10, `${st.near} near (medium caps at 10)`);
+
+  // That view has no car inside the near radius, so it proves nothing about
+  // the near path. Now a queue beside the camera: 16 cars, both lanes, within
+  // 36 m, against medium's cap of 10 near and its 46 m radius.
+  {
+    const r0 = ground.nearestRoad(px, pz, 300);
+    const e = r0.edge;
+    const s0 = Math.min(Math.max(r0.s, 40), e.length - 40);
+    let placed = 0;
+    for (let q = 0; q < traffic.cars.length && placed < 16; q++) {
+      // Eight a lane, 6 m apart; `travel` runs from the end a car starts at.
+      const at = s0 + ((placed >> 1) - 4) * 6, dir = placed % 2 ? 1 : -1;
+      if (traffic.spawnAt(q, e.i, dir, dir > 0 ? at : e.length - at, 0)) placed++;
+    }
+    const mid = pointOnEdge(e, s0);
+    camera.position.set(mid.x - mid.tz * 4, ground.heightAt(mid.x, mid.z) + 2.6, mid.z + mid.tx * 4);
+    camera.lookAt(mid.x + mid.tx * 20, ground.heightAt(mid.x, mid.z) + 1, mid.z + mid.tz * 20);
+    camera.updateMatrixWorld(true);
+    let inR = 0;
+    for (const c of traffic.cars) if (c.active && camera.position.distanceTo(new THREE.Vector3(c.x, c.y, c.z)) < fleet.tune.near) inR++;
+    fleet.sync(traffic.cars, camera, 0);
+    let qCalls = 0, qCasters = 0;
+    fleet.group.traverseVisible((o) => {
+      if (!o.isMesh) return;
+      if (o.isInstancedMesh && o.count === 0) return;
+      if (o.geometry && o.geometry.isInstancedBufferGeometry && o.geometry.instanceCount === 0) return;
+      qCalls++;
+      if (o.castShadow) qCasters++;
+    });
+    const qs = fleet.stats;
+    // A near car is its real model at 'low' detail: 12-15 calls each measured
+    // (section 3), so the cap bounds the cost of any jam. The browser, fleet
+    // group toggled, measured 125 calls with 10 near; the old per-slot path
+    // drew 498 for the same 62 cars.
+    const budget = fleet.tune.maxNear * 15 + qs.kinds + 2;
+    console.log(`  a queue by the camera: ${inR} cars inside ${fleet.tune.near} m, ${qs.near} drawn near, ${qs.far} far; ${qCalls} fleet draw calls, ${qCasters} shadow casters`);
+    check('a queue beside the camera is capped at the tier\'s near count', inR > fleet.tune.maxNear && qs.near === fleet.tune.maxNear,
+      `${qs.near} near of ${inR} inside the radius (medium caps at ${fleet.tune.maxNear})`);
+    check('and the whole pool then costs at most the cap\'s worth of models', qCalls <= budget,
+      `${qCalls} calls, budget ${budget} (${fleet.tune.maxNear} near x 15 + ${qs.kinds} far models + shadows + flares)`);
+  }
 
   // Lamps survive the trip to the far side: a braking far car has its brake
   // value set on its instance.
@@ -240,18 +285,57 @@ function overlapDepth(a, b) {
   }
   check('a far car still brakes, indicates and runs its lamps', lampOk, lampOk ? 'brake value reached its instance' : 'no far car had its brake lamp');
 
-  // Next to nothing allocated per frame, and nothing kept: 2000 syncs, day
-  // and night alternating (the flares run at night). Measured 3.1 KB a frame
-  // by day and 7.7 KB at night with --expose-gc: short-lived number boxes,
-  // against the 845 KB a frame the terrain streams at speed.
+  // Cheap, and next to nothing allocated per frame: 2000 syncs timed, day and
+  // night alternating (the flares run at night), with the queue above still
+  // standing by the camera, so ten of them are near. Allocation is then read
+  // between two full collections over 300 frames, few enough that the young
+  // generation cannot fill and collect in the middle (a bare heapUsed
+  // difference over 2000 came out at -26 KB a frame). Measured 3.9 KB a
+  // frame: short-lived number boxes, against the 845 KB a frame the terrain
+  // streams at speed.
   for (let i = 0; i < 200; i++) fleet.sync(traffic.cars, camera, i % 2 ? 0.8 : 0);
-  const heap0 = process.memoryUsage().heapUsed;
   const t0 = performance.now();
   for (let i = 0; i < 2000; i++) fleet.sync(traffic.cars, camera, i % 2 ? 0.8 : 0);
   const ms = (performance.now() - t0) / 2000;
-  const perFrame = (process.memoryUsage().heapUsed - heap0) / 2000;
+  gc();
+  const heap0 = process.memoryUsage().heapUsed;
+  for (let i = 0; i < 300; i++) fleet.sync(traffic.cars, camera, i % 2 ? 0.8 : 0);
+  const perFrame = (process.memoryUsage().heapUsed - heap0) / 300;
   check('fleet.sync is cheap: well under a tenth of a millisecond, a few KB', ms < 0.1 && perFrame < 12000,
     `${(ms * 1000).toFixed(0)} us and ${(perFrame / 1024).toFixed(1)} KB a frame for ${active} cars`);
+
+  // A model that throws costs its own cars and nothing else. fleet.sync runs
+  // every frame from main.js's stepFrame, so an exception out of it stops the
+  // game. Two faults, by a livery that cannot be read as a number (heavy.js
+  // does `spec.livery | 0`): every lorry, so the lorry model cannot even be
+  // baked, and one bus that is not the first, so the bus model bakes and only
+  // that bus's own near model fails, in the middle of the queue.
+  {
+    const sc2 = new THREE.Scene();
+    const f2 = createFleet(sc2, { quality: 'medium' });
+    const cars = traffic.cars.map((c) => ({ ...c, spec: { ...c.spec } }));
+    for (const c of cars) if (c.body === 'box') c.spec.livery = Symbol('unreadable');
+    const buses = cars.map((c, i) => (c.body === 'bus' ? i : -1)).filter((i) => i >= 0);
+    const bad = buses[1];
+    // Nearest of all to the camera, so it is certainly among the ten near.
+    const cx = camera.position.x, cz = camera.position.z;
+    Object.assign(cars[bad], { active: true, x: cx + 2, y: ground.heightAt(cx + 2, cz + 2), z: cz + 2 });
+    cars[bad].spec.livery = Symbol('unreadable');
+    const errors = [];
+    const logged = console.error;
+    console.error = (...a) => errors.push(a.map(String).join(' '));
+    let threw = null;
+    try { for (let i = 0; i < 30; i++) f2.sync(cars, camera, i % 2 ? 0.8 : 0); } catch (err) { threw = err; }
+    console.error = logged;
+    const lorries = cars.filter((c) => c.body === 'box').length;
+    const kindsOk = f2.stats.kinds === st.kinds - 1;
+    const nearFailed = errors.some((e) => /failed near/.test(e));
+    check('a model that throws costs its own cars, never the frame', !threw && kindsOk && nearFailed && !f2.model(bad) && f2.stats.near > 0,
+      threw ? `sync threw: ${threw.message}` :
+        `${lorries} lorries dropped with their model (${f2.stats.kinds} of ${st.kinds} kinds), the bad bus drawn far ` +
+        `(its near build ${nearFailed ? 'threw and was caught' : 'was never tried'}), ${f2.stats.near} near and ${f2.stats.far} far still drawn, ${errors.length} errors logged`);
+    f2.dispose();
+  }
   fleet.dispose();
 }
 

@@ -786,9 +786,15 @@ try {
   const prey = flee.sort((a, b) => Math.hypot(a.x - itP.x, a.z - itP.z) - Math.hypot(b.x - itP.x, b.z - itP.z))[0];
   itP.drive = towards(itP, () => prey.x, () => prey.z, 9);
   const tagged = await until(() => A.net.mode && A.net.mode.it === prey.net.id, 15000);
+  // Ace hearing it is not the prey having logged it: each screen hears the
+  // tag on its own socket and logs it on its next frame. Live, reading the
+  // prey's log the instant Ace knew failed 2 runs in 5 ("no tag", with the
+  // prey IT a moment later); a simulated clock never splits them.
+  await until(() => prey.events.some((e) => e.k === 'tag'), 1000, 10);
   const tagEv = prey.events.find((e) => e.k === 'tag');
   check(tagged && tagEv && tagEv.to === prey.net.id && tagEv.from === itP.net.id,
-    'IT drives up to someone and tags them: the pass reaches every screen', tagEv ? `${itP.name} tagged ${prey.name}` : 'no tag');
+    'IT drives up to someone and tags them: the pass reaches every screen',
+    tagEv ? `${itP.name} tagged ${prey.name}` : tagged ? `Ace saw ${prey.name} tagged; ${prey.name} never logged it` : 'no tag in 15 s');
   itP.drive = null;
   // The new IT turns straight round: no tag-back.
   prey.drive = towards(prey, () => itP.x, () => itP.z, 6);
@@ -847,8 +853,14 @@ try {
     'when the last coin goes the game ends, most coins on top', rows);
 
   // ==== what it costs ==============================================================
-  // Wall-clock, so the budgets are ten times what an M-series laptop measures:
-  // a loaded machine must not turn this into a coin toss.
+  // Wall-clock, so the budgets sit well above what an M-series laptop measures:
+  // a loaded machine must not turn this into a coin toss. `cost` times only
+  // modes.update(), never the socket work around it, and its tail is mostly
+  // the garbage collector. Live against wrangler dev, while every frame sorted
+  // with Array.prototype.sort (~0.9 KB of merge state a call) a review run
+  // measured p99 266 us — a 1.5x margin. With the sort in place and the rows'
+  // strings built on change, nine live runs measured mean 8-15 us, p99
+  // 35-88 us (at least 4.5x), and the simulated run 1.6 / 7.3 us.
   {
     const sorted = cost.slice().sort((a, b) => a - b);
     const p = (q) => sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))] * 1000;

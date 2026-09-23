@@ -839,6 +839,25 @@
   .goal__controls { width: 70vw; }
   .goal__notes { top: 46%; }
 }
+/* On touch the minimap takes the top-left corner (hud.css), so the one-time
+   controls card centres under the compass instead. */
+@media (hover: none) and (pointer: coarse) {
+  .goal__controls {
+    left: 0;
+    right: 0;
+    top: calc(var(--g-gap) + env(safe-area-inset-top, 0px) + var(--g-u) * 5.4);
+    margin-inline: auto;
+    transform: translateY(calc(var(--g-u) * -1));
+  }
+}
+/* A short screen (a phone on its side) keeps the objective and the wallet
+   and drops the dailies and the next-reward strip: both are on the pause
+   card, and in this height they reached down into the touch buttons. */
+@media (max-height: 500px) {
+  .goal__daily.is-on,
+  .goal__next.is-on { display: none; }
+  .goal__col:has(.goal__next.is-on) .goal__xp { display: block; }
+}
 
 @media (prefers-reduced-motion: reduce) {
   .goal *, .goal *::before { animation: none !important; transition: none !important; }

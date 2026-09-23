@@ -400,6 +400,9 @@
 .or-logo__open { fill: var(--or-text); }
 .or-logo__road { fill: var(--or-signal); }
 .or-brand .or-logo { width: clamp(190px, 26vw, 330px); height: auto; }
+/* Two cuts of the logotype are on the page; a phone on its side, with no
+   height to spare, gets the one-line one. */
+.or-brand .or-logo--line { display: none; }
 .or-strap {
   display: flex;
   align-items: center;
@@ -483,7 +486,6 @@
   align-items: stretch;
   gap: 6px;
   align-self: start;
-  min-height: 0;
 }
 
 /* PLAY: the one yellow thing on the screen. */
@@ -561,7 +563,7 @@
   min-height: 52px;
   padding: 6px 16px 6px 18px;
   border: 0;
-  background: linear-gradient(90deg, rgba(7, 11, 22, 0.78), rgba(7, 11, 22, 0.40));
+  background: linear-gradient(90deg, rgba(7, 11, 22, 0.86), rgba(7, 11, 22, 0.62));
   color: var(--or-text);
   text-align: left;
   cursor: pointer;
@@ -635,7 +637,6 @@
   display: flex;
   flex-direction: column;
   gap: var(--or-s4);
-  min-height: 0;
   padding: 16px 18px 18px;
   color: var(--or-text);
 }
@@ -851,6 +852,7 @@
 .or-carlist {
   height: 100%;
   overflow-y: auto;
+  touch-action: pan-y;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -914,6 +916,7 @@
   min-width: 0;
   padding: clamp(16px, 1.8vw, 22px);
   overflow-y: auto;
+  touch-action: pan-y;
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -1088,6 +1091,7 @@
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
+  touch-action: pan-y;
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -1368,6 +1372,7 @@
   display: flex;
   gap: 6px;
   overflow-x: auto;
+  touch-action: pan-x;
   padding: 10px 2px 4px;
   scrollbar-width: thin;
 }
@@ -1422,6 +1427,7 @@
   min-height: 0;
   width: min(1040px, 100%);
   overflow-y: auto;
+  touch-action: pan-y;
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
   align-content: start;
@@ -1534,7 +1540,7 @@
   .or-spec { max-height: 46vh; }
   .or-carlist-wrap { overflow: visible; padding: 4px 0; clip-path: none; background: none; }
   .or-carlist-wrap::before { display: none; }
-  .or-carlist { flex-direction: row; overflow-x: auto; overflow-y: hidden; padding-bottom: 4px; gap: 4px; }
+  .or-carlist { flex-direction: row; overflow-x: auto; overflow-y: hidden; padding-bottom: 4px; gap: 4px; touch-action: pan-x; }
   .or-car { width: auto; min-width: 170px; background: var(--or-slab); padding-left: 10px; }
   .or-car-chip { height: 28px; }
   .or-row { grid-template-columns: 1fr; gap: 10px; }
@@ -1554,7 +1560,11 @@
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto auto auto auto auto minmax(0, 1fr);
     grid-template-areas: "brand" "next" "friends" "menu" "career" "foot";
+    align-content: start;
     overflow-y: auto;
+    /* The page is touch-action: none so a thumb never scrolls the game; a
+       list that does scroll has to say so, or on a phone it cannot. */
+    touch-action: pan-y;
     column-gap: 0;
   }
   .or-brand { margin-bottom: var(--or-s4); }
@@ -1578,16 +1588,19 @@
   .or-title-inner {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     grid-template-rows: auto auto auto minmax(0, 1fr);
+    /* Next up spans the logotype's row and the one below it, so the one-line
+       logotype sets the first row alone and the menu starts right under it. */
     grid-template-areas:
       "brand  next"
+      "menu   next"
       "menu   friends"
-      "menu   career"
-      "menu   .";
+      "menu   career";
     column-gap: var(--or-s5);
     align-content: start;
   }
-  .or-brand { margin-bottom: 10px; }
-  .or-brand .or-logo { width: clamp(150px, 22vw, 210px); }
+  .or-brand { margin-bottom: 12px; }
+  .or-brand .or-logo--stacked { display: none; }
+  .or-brand .or-logo--line { display: block; width: clamp(200px, 34vw, 300px); }
   .or-strap { display: none; }
   .or-play { min-height: 54px; margin-bottom: 4px; }
   .or-play-label { font-size: 1.7rem; }

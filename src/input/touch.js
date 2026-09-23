@@ -33,6 +33,8 @@
 // Steering sign follows the project convention (see physics/vehicle.js):
 // right = +X, and steer > 0 turns right. On the wheel that is clockwise.
 
+import { icon } from '../game/icons.js';
+
 const TAU = Math.PI * 2;
 const DEG = Math.PI / 180;
 
@@ -82,9 +84,14 @@ const PEDAL_STR = new Array(21);
 for (let i = 0; i <= 20; i++) PEDAL_STR[i] = (i / 20).toFixed(2);
 
 // The Road button (back onto the nearest road, the R key's job) sits out of
-// the aux group's flow, just above it: in portrait that group is a 2x2 grid
-// whose fourth cell is deliberately left for the handbrake, and a fourth aux
-// button in the flow lands underneath it.
+// the aux group's flow, just above it (touch.css, .touch__btn--road): in
+// portrait that group is a 2x2 grid whose fourth cell is deliberately left
+// for the handbrake, and a fourth aux button in the flow lands underneath it.
+//
+// Every control carries a glyph from the game's icon set as well as a word:
+// a six-year-old reads a pedal before the word "Brake". The Horn button stays
+// in the markup (read() still reports it) but touch.css hides it: the game is
+// silent, and a button that does nothing is the first thing a kid presses.
 const MARKUP = `
 <div class="touch__steer" data-ctl="steer">
   <div class="touch__wheel">
@@ -107,16 +114,15 @@ const MARKUP = `
   </div>
 </div>
 <div class="touch__aux">
-  <button type="button" tabindex="-1" class="touch__btn" data-ctl="camera" aria-label="Change camera">Cam</button>
-  <button type="button" tabindex="-1" class="touch__btn" data-ctl="horn" aria-label="Horn">Horn</button>
-  <button type="button" tabindex="-1" class="touch__btn" data-ctl="look" aria-label="Look behind">Look</button>
-  <button type="button" tabindex="-1" class="touch__btn" data-ctl="reset" aria-label="Back to the road"
-    style="position:absolute;right:0;bottom:calc(100% + 0.5rem)">Road</button>
+  <button type="button" tabindex="-1" class="touch__btn" data-ctl="camera" aria-label="Change camera">${icon('camera')}<span>Cam</span></button>
+  <button type="button" tabindex="-1" class="touch__btn" data-ctl="horn" aria-label="Horn"><span>Horn</span></button>
+  <button type="button" tabindex="-1" class="touch__btn" data-ctl="look" aria-label="Look behind">${icon('look')}<span>Look</span></button>
+  <button type="button" tabindex="-1" class="touch__btn touch__btn--road" data-ctl="reset" aria-label="Back to the road">${icon('road')}<span>Road</span></button>
 </div>
 <div class="touch__pads">
-  <button type="button" tabindex="-1" class="touch__hand" data-ctl="handbrake" aria-label="Handbrake">Hand<br>brake</button>
-  <button type="button" tabindex="-1" class="touch__pad touch__pad--brake" data-ctl="brake" aria-label="Brake"><span>Brake</span></button>
-  <button type="button" tabindex="-1" class="touch__pad touch__pad--gas" data-ctl="throttle" aria-label="Throttle"><span>Gas</span></button>
+  <button type="button" tabindex="-1" class="touch__hand" data-ctl="handbrake" aria-label="Handbrake">${icon('handbrake')}<span>Hand</span></button>
+  <button type="button" tabindex="-1" class="touch__pad touch__pad--brake" data-ctl="brake" aria-label="Brake">${icon('brake')}<span>Brake</span></button>
+  <button type="button" tabindex="-1" class="touch__pad touch__pad--gas" data-ctl="throttle" aria-label="Throttle">${icon('pedal')}<span>Go</span></button>
 </div>`;
 
 /** A phone reports a coarse pointer and nothing else. A touchscreen laptop

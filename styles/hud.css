@@ -618,6 +618,30 @@
   .hud .hud__nav::after { display: none; }
 }
 
+/* ---- touch: the thumbs own the bottom corners ----------------------------
+ *
+ * On a phone or a tablet the steering wheel sits bottom left and the pedals
+ * bottom right (touch.css) — exactly where the minimap and the speedo are on
+ * a keyboard, so on touch they were drawn under the player's thumbs. The same
+ * test touch.js uses to decide to show the rig (a coarse pointer and no fine
+ * one) moves them: the minimap to the top-left corner, which nothing else
+ * uses, and the cluster to the bottom centre, into the gap between wheel and
+ * pedals — measured at 200 px on a 740 px phone and 410 px on a 1024 px
+ * tablet, against a 98 and 144 px dial. */
+@media (hover: none) and (pointer: coarse) {
+  .hud { --hud-map: calc(var(--hud-u) * 10.5); }
+  .hud__map { grid-area: 1 / 1 / 2 / 2; align-self: start; }
+  .hud__cluster { grid-area: 3 / 2 / 4 / 3; justify-self: center; }
+  .hud__toast { grid-area: 2 / 2 / 3 / 3; align-self: end; }
+}
+/* Upright, the gap between wheel and pedals is too narrow for the dial, so
+ * the cluster goes under the minimap on the left, above the wheel. */
+@media (hover: none) and (pointer: coarse) and (orientation: portrait) {
+  .hud__cluster { grid-area: 2 / 1 / 3 / 2; justify-self: start; align-self: start; flex-direction: column-reverse; align-items: flex-start; }
+  .hud__tells { flex-direction: row; align-items: center; margin-bottom: 0; }
+  .hud__limit { margin-bottom: 0; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .hud,
   .hud__toast,

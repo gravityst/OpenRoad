@@ -410,7 +410,7 @@ export function createMenus(root, opts = {}) {
     <section class="or-screen or-title" data-screen="title" role="dialog" aria-modal="true" aria-label="Main menu">
       <div class="or-title-inner">
         <header class="or-brand">
-          ${logotype({ stacked: true })}
+          ${logotype({ stacked: true })}${logotype({ stacked: false })}
           <p class="or-strap">Open-world driving</p>
         </header>
         <div class="or-nextup" hidden aria-live="polite">

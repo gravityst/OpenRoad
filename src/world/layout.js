@@ -19,7 +19,7 @@
 // ground while claiming different heights. Each of those was measured, not
 // guessed, and each has a pass here that fixes it.
 
-import { fbm, ridged, valueNoise, mulberry, smoothstep, clamp, lerp } from './noise.js';
+import { fbm, ridged, valueNoise, hash2, mulberry, smoothstep, clamp, lerp } from './noise.js';
 
 export const ROAD = {
   highway: { width: 26.0, lanes: 2, speed: 39, surface: 'asphalt', markings: 'highway' },
@@ -1093,6 +1093,65 @@ export function valleyWeight(x, z, seed) {
 }
 
 /**
+ * Land use: which field (x, z) is in, and what is growing in it.
+ *
+ * Open country is not one continuous lawn; it is a patchwork of fields a few
+ * hundred metres across, each managed differently, and the patchwork is most
+ * of what makes a view across farmland read as real. Fields are cells of a
+ * jittered Voronoi lattice (~230 m), each assigned a use by a hash of its id:
+ *
+ *   0 pasture   grazed grass, the default, and always the valley floor
+ *   1 hay       mown meadow — paler, with the mower's stripes
+ *   2 cereal    a grain crop, green-gold, with tramlines
+ *   3 fallow    left to rough grass and weeds, olive-brown
+ *
+ * `edge` is the distance to the nearest field boundary, for the grassy margin
+ * every field has; `dir` is the direction the field was worked in, for
+ * stripes. The surface under the wheels is 'grass' in all of them — this is
+ * paint, not physics. Writes into `out` and returns it; allocates nothing.
+ */
+const FIELD = 230;
+
+/**
+ * The woodland mask the planting pass uses: above ~0.08 is woodland, rising
+ * to full density by ~0.2. A domain-warped fbm, because plain fbm thresholds
+ * into blobs that all look like each other. Exported so the ground can paint
+ * a forest floor exactly where the forest is.
+ */
+export function woodland(x, z, seed) {
+  const s = seed | 0;
+  const wx = x + fbm(x / 1300, z / 1300, s + 61, 2) * 420;
+  const wz = z + fbm(x / 1300, z / 1300, s + 62, 2) * 420;
+  return fbm(wx / 640, wz / 640, s + 55, 4);
+}
+
+export function fieldAt(x, z, seed, out) {
+  const s = (seed | 0) + 8123;
+  const fx = x / FIELD, fz = z / FIELD;
+  const ix = Math.floor(fx), iz = Math.floor(fz);
+  let d1 = 1e9, d2 = 1e9, bx = 0, bz = 0;
+  for (let j = -1; j <= 1; j++) {
+    for (let i = -1; i <= 1; i++) {
+      const cx = ix + i, cz = iz + j;
+      const px = cx + 0.12 + hash2(cx, cz, s) * 0.76;
+      const pz = cz + 0.12 + hash2(cx, cz, s + 1) * 0.76;
+      const d = (px - fx) * (px - fx) + (pz - fz) * (pz - fz);
+      if (d < d1) { d2 = d1; d1 = d; bx = cx; bz = cz; } else if (d < d2) d2 = d;
+    }
+  }
+  // Distance to the boundary, in metres: half the difference of the two
+  // nearest distances is exact on a straight bisector and close elsewhere.
+  out.edge = (Math.sqrt(d2) - Math.sqrt(d1)) * 0.5 * FIELD;
+  const h = hash2(bx, bz, s + 2);
+  out.use = h < 0.58 ? 0 : h < 0.76 ? 1 : h < 0.90 ? 2 : 3;
+  out.id = bx * 7919 + bz;
+  const a = hash2(bx, bz, s + 3) * Math.PI;
+  out.dx = Math.cos(a); out.dz = Math.sin(a);
+  out.ripe = hash2(bx, bz, s + 4);
+  return out;
+}
+
+/**
  * The dry river bed: 0 outside it, rising to 1 along a meandering thalweg in
  * the bottom of the valley makeTerrain cuts. The valley itself is a kilometre
  * wide and was all sand, which read as a desert strip across a green country;
@@ -1208,13 +1267,8 @@ function buildProps(world, rnd, ground) {
   const inBounds = (x, z) => Math.abs(x) < half - 6 && Math.abs(z) < half - 6;
 
   // ---- Masks --------------------------------------------------------------
-  // Woodland: a warped fbm, thresholded. The warp is what makes the woods
-  // irregular — plain fbm thresholds into blobs that all look like each other.
-  const forest = (x, z) => {
-    const wx = x + fbm(x / 1300, z / 1300, seed + 61, 2) * 420;
-    const wz = z + fbm(x / 1300, z / 1300, seed + 62, 2) * 420;
-    return fbm(wx / 640, wz / 640, seed + 55, 4);
-  };
+  // Woodland: a warped fbm, thresholded (see woodland()).
+  const forest = (x, z) => woodland(x, z, seed);
   // Where conifers rather than broadleaves hold the ground: uphill, and in
   // plantation-sized patches anywhere. The map's median height is about -21 m
   // and its 95th percentile +18 m, so "uphill" is measured on that scale.

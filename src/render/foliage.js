@@ -41,7 +41,7 @@
 // Nothing in this file allocates after load, and nothing here touches the DOM.
 
 import * as THREE from 'three';
-import { mulberry, clamp, lerp, smoothstep, hash2 } from '../world/noise.js';
+import { mulberry, clamp, lerp, smoothstep } from '../world/noise.js';
 
 // ===========================================================================
 // Atlas layout

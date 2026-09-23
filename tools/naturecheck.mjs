@@ -252,7 +252,16 @@ for (const tier of ['high', 'medium', 'low']) {
     `mean ${(tSum / frames).toFixed(2)} ms (chunk streaming budget 3 ms + grass 0.5 ms), worst ${tMax.toFixed(1)} ms`);
   check('no field ever runs out of instance capacity', saturated === 0, `${saturated} field-frames at capacity`);
 
-  // Every live tuft: on turf, off the road.
+  // Every live tuft: on turf, off the road. Checked beside the road the
+  // player spawns on rather than where the drive ended — that is inside the
+  // densest wood on the map, whose floor is litter and moss with no grass at
+  // all, and a road verge is the harder test of the clearance anyway.
+  {
+    const sp = g.nearestRoad(-22, -250, 400);
+    place(sp.x, sp.z);
+    terrain.update(cam, 0);
+    for (let i = 0; i < 30; i++) terrain.update(cam, 1 / 60);
+  }
   const gm = terrain.group.children.find((m) => m.name === 'grass');
   const P = gm.geometry.attributes.iPos.array;
   const road = {}, o = {};

@@ -77,7 +77,7 @@
 
 import * as THREE from 'three';
 import { fbm, valueNoise, clamp, lerp, smoothstep, tileNoise, tileFbm, tileCells } from '../world/noise.js';
-import { valleyWeight } from '../world/layout.js';
+import { valleyWeight, woodland, fieldAt } from '../world/layout.js';
 import { paintGrassCard } from './foliage.js';
 
 // rings[l] is the largest Chebyshev chunk distance still drawn at level l;
@@ -126,6 +126,13 @@ const WORN = [0.43, 0.40, 0.29];
 const GROWN = [0.40, 0.40, 0.30];
 // The dry river bed: pale, grey, gravelly sand rather than beach.
 const WASH = [0.56, 0.53, 0.46];
+// Forest floor: shade, leaf litter and moss, and not much grass.
+const FLOOR = [0.23, 0.25, 0.13];
+// Land use (layout.js fieldAt): mown hay, a grain crop green and ripe, fallow.
+const HAY = [0.45, 0.45, 0.23];
+const CROP_GREEN = [0.38, 0.43, 0.17];
+const CROP_RIPE = [0.62, 0.54, 0.27];
+const FALLOW = [0.39, 0.37, 0.22];
 // Wet churned earth, for the fringe where tyres have dragged a dirt road out
 // onto the verge. Darker than SOIL and much less saturated — mud is soil with
 // the light gone out of it.
@@ -673,7 +680,14 @@ export function createTerrain(world, ground, opts = {}) {
    * river valley IS the low corridor — it is cut by makeTerrain as a Gaussian
    * trough down to -18 m and nothing else on the map goes anywhere near that.
    */
-  function palette(surface, x, z, ny, y, crest, out) {
+  // Set by palette() for the grass it has just coloured, and read by weigh()
+  // and the tuft filler for the same point, so the woodland mask — three
+  // fbm calls — is evaluated once a vertex rather than three times.
+  let palWood = 0;
+  const fieldQ = { edge: 0, use: 0, id: 0, dx: 1, dz: 0, ripe: 0 };
+
+  function palette(surface, x, z, ny, y, crest, out, fine = 1) {
+    palWood = 0;
     if (surface === 'grass') {
       // A slow wet/dry sweep at field scale, pulled toward lush in the valley
       // and toward straw on the high ground and the sunlit brows, then bare
@@ -689,9 +703,42 @@ export function createTerrain(world, ground, opts = {}) {
       const bare = smoothstep(0.14, 0.55, 1 - ny) * 0.7;
       const a = dry < 0.5 ? LUSH : MEADOW, b = dry < 0.5 ? MEADOW : DRY;
       const t = dry < 0.5 ? dry * 2 : dry * 2 - 1;
-      out[0] = lerp(lerp(a[0], b[0], t), SOIL[0], bare);
-      out[1] = lerp(lerp(a[1], b[1], t), SOIL[1], bare);
-      out[2] = lerp(lerp(a[2], b[2], t), SOIL[2], bare);
+      out[0] = lerp(a[0], b[0], t); out[1] = lerp(a[1], b[1], t); out[2] = lerp(a[2], b[2], t);
+
+      // The patchwork. Fields keep a grassy margin at their boundary and
+      // stay out of the valley floor, which is all grazing. Stripes and
+      // tramlines only on chunks fine enough to draw them without aliasing.
+      const F = fieldAt(x, z, terrain.seed ?? 0, fieldQ);
+      const inField = smoothstep(3, 9, F.edge) * (1 - smoothstep(0.3, 0.65, moist));
+      if (F.use > 0 && inField > 0) {
+        let c0, c1, c2;
+        const u = x * F.dx + z * F.dz;
+        if (F.use === 1) {
+          const stripe = Math.sin(u * (Math.PI * 2 / 7)) * 0.075 * fine;
+          c0 = HAY[0] * (1 + stripe); c1 = HAY[1] * (1 + stripe); c2 = HAY[2] * (1 + stripe);
+        } else if (F.use === 2) {
+          const r = F.ripe;
+          const d = Math.abs((u / 18) - Math.floor(u / 18) - 0.5) * 18;
+          const tram = 1 - smoothstep(7.6, 8.8, d) * 0.22 * fine;
+          c0 = lerp(CROP_GREEN[0], CROP_RIPE[0], r) * tram;
+          c1 = lerp(CROP_GREEN[1], CROP_RIPE[1], r) * tram;
+          c2 = lerp(CROP_GREEN[2], CROP_RIPE[2], r) * tram;
+        } else {
+          const patch = 1 + valueNoise(x * 0.06, z * 0.06, tintSeed + 97) * 0.12;
+          c0 = FALLOW[0] * patch; c1 = FALLOW[1] * patch; c2 = FALLOW[2] * patch;
+        }
+        out[0] = lerp(out[0], c0, inField); out[1] = lerp(out[1], c1, inField); out[2] = lerp(out[2], c2, inField);
+      }
+
+      // Forest floor, but only under closed canopy. The planting mask starts
+      // at 0.08 with scattered margin trees; painting the floor from there
+      // turned every wood's ragged edge into what looked like dead grass.
+      palWood = smoothstep(0.15, 0.3, woodland(x, z, terrain.seed ?? 0));
+      if (palWood > 0) {
+        const k = palWood * 0.72;
+        out[0] = lerp(out[0], FLOOR[0], k); out[1] = lerp(out[1], FLOOR[1], k); out[2] = lerp(out[2], FLOOR[2], k);
+      }
+      out[0] = lerp(out[0], SOIL[0], bare); out[1] = lerp(out[1], SOIL[1], bare); out[2] = lerp(out[2], SOIL[2], bare);
       return;
     }
     if (surface === 'sand') {
@@ -717,7 +764,7 @@ export function createTerrain(world, ground, opts = {}) {
    * bleach in the sun too, and a hollow is in shadow whatever is lying in it.
    */
   function tint(surface, x, z, ny, y, crest, fine, roadMix, out) {
-    palette(surface, x, z, ny, y, crest, out);
+    palette(surface, x, z, ny, y, crest, out, fine);
     if (roadMix > 0 && PAVED[surface] === 1) {
       palette(terrain.cover(x, z, ny), x, z, ny, y, crest, rgb2);
       out[0] = lerp(out[0], rgb2[0], roadMix);
@@ -754,7 +801,7 @@ export function createTerrain(world, ground, opts = {}) {
     const w = DETAIL[surface] || DETAIL.grass;
     let g = w[0], sa = w[1], gr = w[2], so = w[3];
     if (gr > 0.5) {
-      const bare = smoothstep(0.14, 0.55, 1 - ny) * 0.7;
+      const bare = Math.max(smoothstep(0.14, 0.55, 1 - ny) * 0.7, palWood * 0.6);
       g = lerp(g, 0.30, bare); gr = lerp(gr, 0.08, bare); so = lerp(so, 0.95, bare);
     }
     out[o] = g * 255; out[o + 1] = sa * 255; out[o + 2] = gr * 255; out[o + 3] = so * 255;
@@ -1214,11 +1261,14 @@ export function createTerrain(world, ground, opts = {}) {
             ground.roadAt(x, z, rq);
             if (rq.edge && rq.dist - rq.width * 0.5 < 2.8) ok = false;
           }
-          latOk[L] = ok ? 1 : 0;
           if (ok) {
             palette('grass', x, z, g.ny, g.y, 0, pal);
             latCol[L * 3] = toLinear(pal[0]); latCol[L * 3 + 1] = toLinear(pal[1]); latCol[L * 3 + 2] = toLinear(pal[2]);
+            // Deep in a wood the floor is litter and moss; only the margins
+            // and the rides carry grass.
+            if (palWood > 0.75) ok = false;
           }
+          latOk[L] = ok ? 1 : 0;
         }
       }
       const rnd = mulberryLocal((Math.imul(ti, 73856093) ^ Math.imul(tj, 19349663) ^ seedG) >>> 0);

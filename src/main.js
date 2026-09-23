@@ -1234,8 +1234,9 @@ async function boot() {
   function onTrafficHit(other, severity, lx, lz, closing) {
     // DAMAGE off: the struck car keeps only the shove and spin collision.js
     // already gave it, and drives on. No damage model, no speed cap, never
-    // written off, never alight. Measured: a 60 m/s head-on left the car at
-    // speedCap 0 and burning for ~24 s; now it is back up to speed in seconds.
+    // written off, never alight. Measured, 60 m/s head-on into a car doing
+    // 16 m/s: it used to sit at speedCap 0, burning, for the full 10 s watched;
+    // now it pulls away at its own pace and is back to 13.1 m/s 9 s later.
     if (!DAMAGE) return;
     if (!other.damage) other.damage = createDamage(other.spec || {});
     const hw = (other.spec ? other.spec.track : 1.6) * 0.5;
@@ -1407,19 +1408,35 @@ async function boot() {
     const night = sky.state ? sky.state.nightFactor || 0 : 0;
     const k = 1 - 0.7 * clampNum(night, 0, 1);
     const col = (((0xd8 * k) | 0) << 16) | (((0xd2 * k) | 0) << 8) | ((0xc6 * k) | 0);
-    const y = ground.heightAt(x, z) + 0.15;
+    // Out from the surface into open air. A wall is drawn at its full lot size
+    // but is solid at 94% of it (collision.js), so the contact point on a big
+    // warehouse sits up to a metre INSIDE the rendered wall, and a puff made
+    // there was depth-tested away completely.
+    const ox = x + pushX * 0.9, oz = z + pushZ * 0.9;
+    const y = ground.heightAt(ox, oz) + 0.35;
     if (!fresh) {
-      particles.emitDust(x, y, z, 0.3 + sev * 2, col);
+      particles.emitDust(ox, y, oz, 0.3 + sev * 2, col);
       return;
     }
-    // 3 puffs for a brush, 20 for a 60 m/s head-on (emitDust caps a call at 24).
-    particles.emitDust(x, y, z, 3 + 17 * sev, col);
+    // 4 puffs for a brush, 24 for anything past 18 m/s into the surface
+    // (severity saturates there), in three clouds: one at the contact and one
+    // either side of the car, spread along the surface that was hit. From the
+    // chase camera a head-on's contact point is hidden behind the car's own
+    // body; a single cloud there was seen only as a glint through the glass.
+    const n = 4 + 20 * sev;
+    const tx = -pushZ, tz = pushX;
+    const mid = (car.x - ox) * tx + (car.z - oz) * tz;    // the car's centre, along it
+    const cx = ox + tx * mid, cz = oz + tz * mid;
+    particles.emitDust(ox, y + 0.3, oz, n * 0.34, col);
+    particles.emitDust(cx + tx * 1.6, y, cz + tz * 1.6, n * 0.33, col);
+    particles.emitDust(cx - tx * 1.6, y, cz - tz * 1.6, n * 0.33, col);
     cue.cool = 0.18;
     cue.last = sev;
     // The camera nods the way the car was shoved: forward into a wall, sideways
-    // off a door. 0.005 rad for a brush, 0.025 (about a degree and a half) for
-    // the hardest hit — the landing thump is 0.012 — and gone in a third of a
-    // second. A knock already running is only replaced by a harder one.
+    // off a door. Amplitude 0.005 rad for a brush and 0.025 for the hardest hit,
+    // and the nod peaks at 70% of that — about one degree at most, against the
+    // landing thump's 0.012 — and is gone in a third of a second. A knock
+    // already running is only replaced by a harder one.
     const amp = 0.005 + 0.020 * clampNum(sev, 0, 1);
     if (amp > cue.amp * Math.exp(-9 * cue.t)) {
       const along = pushX * -Math.sin(car.yaw) + pushZ * -Math.cos(car.yaw);

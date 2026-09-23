@@ -2826,6 +2826,26 @@ function paintFinish(hex, mat) {
   else if (hsl.l < 0.14) { mat.metalness = 0.3; mat.roughness = 0.26; }
   else if (hsl.s < 0.16) { mat.metalness = 0.72; mat.roughness = 0.32; }
   else { mat.metalness = 0.42; mat.roughness = 0.3; }
+  mat.userData.finish = { metalness: mat.metalness, roughness: mat.roughness, lum: luminance(_c.setHex(hex)) };
+}
+
+const luminance = (c) => 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+
+/**
+ * Fire takes the shine off paint. render/carDamage.js cooks a burning car by
+ * pulling the paint COLOUR toward soot and leaves everything else alone, and
+ * with a mirror-finish clearcoat that read as a freshly polished black car
+ * rather than a husk. How far the colour has fallen below its clean value is
+ * how charred the panel is, so the clearcoat and gloss follow it down. A
+ * repair puts the colour back and the finish comes back with it.
+ */
+function charFinish(mat) {
+  const f = mat.userData.finish;
+  if (!f) return;
+  const k = f.lum > 0.03 ? clamp((f.lum - luminance(mat.color)) / (f.lum - 0.01), 0, 1) : 0;
+  mat.clearcoat = 1 - 0.92 * k;
+  mat.roughness = lerp(f.roughness, 0.85, k);
+  mat.metalness = lerp(f.metalness, 0.1, k);
 }
 
 const _cam = new THREE.Vector3(), _car = new THREE.Vector3();
@@ -2911,7 +2931,20 @@ export function createCarModel(spec = {}, opts = {}) {
     if (detail === 'high' && COSMETIC.has(b)) cosmetic.push(mesh);
   }
   const paintMesh = chassis.getObjectByName('paint');
-  if (paintMesh) paintMesh.onBeforeRender = (renderer, scene) => updateEnv(scene);
+  // Once a frame, while this car is on screen: pick up the sky for every
+  // car's reflections, and follow the damage renderer's soot with the gloss.
+  // Compare-and-skip, so an undamaged car does three float compares.
+  let lastR = -1, lastG = -1, lastB = -1;
+  if (paintMesh) {
+    paintMesh.onBeforeRender = (renderer, scene) => {
+      updateEnv(scene);
+      const c = paint.color;
+      if (c.r !== lastR || c.g !== lastG || c.b !== lastB) {
+        lastR = c.r; lastG = c.g; lastB = c.b;
+        charFinish(paint);
+      }
+    };
+  }
 
   // ---- contact shadow -------------------------------------------------------
   const SHADOW_ALPHA = 0.62;

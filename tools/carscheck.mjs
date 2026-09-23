@@ -323,6 +323,20 @@ for (const k of bad) for (const msg of problems[k]) console.log(`        ${k.pad
     `metalness ${white} white, ${blue} blue`);
   check('the paint is clearcoated', paint.clearcoat >= 0.9 && paint.clearcoatRoughness < 0.1);
 
+  // carDamage cooks a burning car by pulling the paint colour toward soot; the
+  // gloss has to follow it down, or a husk looks like a polished black car.
+  const paintMesh = byName(m, 'paint');
+  const scene = new THREE.Scene();
+  const clean = paint.color.clone();
+  paint.color.lerp(new THREE.Color(0x15161a), 0.85);
+  paintMesh.onBeforeRender(null, scene);
+  const charred = { cc: paint.clearcoat, r: paint.roughness };
+  paint.color.copy(clean);
+  paintMesh.onBeforeRender(null, scene);
+  check('fire takes the shine off, and a repair puts it back',
+    charred.cc < 0.3 && charred.r > 0.7 && paint.clearcoat === 1 && paint.roughness < 0.4,
+    `clearcoat ${charred.cc.toFixed(2)} charred, ${paint.clearcoat.toFixed(2)} repaired`);
+
   m.setHeadlights(true);
   const head = byName(m, 'lHead').material, tail = byName(m, 'lTail').material;
   check('headlights on light the tails as running lights', head.emissiveIntensity === 2.4 && tail.emissiveIntensity === 0.45);

@@ -57,6 +57,9 @@ import {
   mulberry, clamp, lerp, smoothstep, valueNoise, valueNoise3, tileFbm, tileCells,
 } from '../world/noise.js';
 import {
+  archGeometry, hoodooGeometry, lighthouseGeometry, beamGeometry, snowPoleGeometry,
+} from './landmarks.js';
+import {
   paintAtlas, buildSpecies, meshFrom, rasterImpostors, SPECIES, ATLAS_W, ATLAS_H, CELLS,
 } from './foliage.js';
 
@@ -830,12 +833,12 @@ export function createProps(world, ground, opts = {}) {
    * the placed position — a lamp pool sits a couple of metres off its pole,
    * which is nothing against a 32 m cell.
    */
-  function makeStore(indices, place, tint) {
+  function makeStore(indices, place, tint, list = world.props) {
     const n = indices.length;
     if (n === 0) return null;
     const start = new Int32Array(G * G + 1);
     for (let k = 0; k < n; k++) {
-      const p = world.props[indices[k]];
+      const p = list[indices[k]];
       start[cellOf(p.x, p.z) + 1]++;
     }
     for (let c = 0; c < G * G; c++) start[c + 1] += start[c];
@@ -843,7 +846,7 @@ export function createProps(world, ground, opts = {}) {
     const srcM = new Float32Array(n * 16);
     const srcC = tint ? new Float32Array(n * 3) : null;
     for (let k = 0; k < n; k++) {
-      const p = world.props[indices[k]];
+      const p = list[indices[k]];
       out.lx = 0; out.lz = 0;
       place(p, out);
       const slot = cursor[cellOf(p.x, p.z)]++;
@@ -1123,6 +1126,7 @@ export function createProps(world, ground, opts = {}) {
     near: lodU(-2, -1, 1e6, 2e6), mid: lodU(-2, -1, 1e6, 2e6), far: lodU(-2, -1, 1e6, 2e6),
     bushNear: lodU(-2, -1, 1e6, 2e6), bushMid: lodU(-2, -1, 1e6, 2e6), bushFar: lodU(-2, -1, 1e6, 2e6),
     rockNear: lodU(-2, -1, 1e6, 2e6), rockFar: lodU(-2, -1, 1e6, 2e6), stone: lodU(-2, -1, 1e6, 2e6),
+    landmark: lodU(-2, -1, 1e6, 2e6),
   };
 
   // The biome field over the map, for the canopy, impostor and rock shaders
@@ -1161,6 +1165,10 @@ export function createProps(world, ground, opts = {}) {
     near: canopyMat(U.near), mid: canopyMat(U.mid), far: impostorMat(U.far),
     bushNear: canopyMat(U.bushNear), bushMid: canopyMat(U.bushMid), bushFar: impostorMat(U.bushFar),
     rockNear: rockMat(U.rockNear), rockFar: rockMat(U.rockFar), stone: rockMat(U.stone),
+    // The landmarks' rock carries its own bed colours (landmarks.js), so the
+    // biome map does not redden it a second time.
+    landmark: inject(new THREE.MeshLambertMaterial({ vertexColors: true }), 'rock',
+      { orLod: U.landmark, orFocus: focusU, orRockTex: { value: rockTex }, orBiome: bioU, orBiomeK: bioOff }),
     // Palms and cacti share the trees' distances but not their recolouring:
     // a cactus is green BECAUSE it is in the desert.
     exNear: canopyMat(U.near, bioOff), exMid: canopyMat(U.mid, bioOff), exFar: impostorMat(U.far, bioOff),
@@ -1369,6 +1377,76 @@ export function createProps(world, ground, opts = {}) {
   }, false), { name: 'lightpools', geometry: decalGeo, material: poolMat, ...fixed(260), renderOrder: 3 });
   if (poolField) poolField.mesh.visible = false;
 
+  // ---- Landmarks (render/landmarks.js, placed by world/layout.js) ---------
+  // A few big shapes seen from a kilometre, streamed and dithered out at the
+  // far edge like everything else; arches and hoodoos cast shadows, because
+  // driving through an arch's shadow is half of driving under it.
+  const LM = world.landmarks || [];
+  const archIdx = [[], []], hoodooIdx = [[], [], [], []], houseIdx = [], poleIdx2 = [];
+  for (let i = 0; i < LM.length; i++) {
+    const l = LM[i];
+    if (l.type === 'arch') archIdx[(l.variant | 0) % 2].push(i);
+    else if (l.type === 'hoodoo') hoodooIdx[(l.variant | 0) % 4].push(i);
+    else if (l.type === 'lighthouse') houseIdx.push(i);
+    else if (l.type === 'snowpole') poleIdx2.push(i);
+  }
+  const lmr = mulberry((seed | 0) + 9107);
+  const ARCH_SPAN = 33.5, ARCH_H = 20;
+  const lmPlace = (p, o) => {
+    o.x = p.x; o.z = p.z; o.y = p.y; o.rot = p.rot || 0;
+    const sc = p.scale || 1;
+    o.sx = o.sz = o.sy = sc;
+    if (p.type === 'arch') { o.sx = (p.span || ARCH_SPAN) / ARCH_SPAN; o.sy = (p.height || ARCH_H) / ARCH_H; o.sz = 1; }
+  };
+  const landmarkFields = [];
+  const lmField = (idx, name, geo, mat, radius, shadow) => {
+    if (!idx.length) return null;
+    disposables.push(geo);
+    const f = makeField(makeStore(idx, lmPlace, false, LM), { name, geometry: geo, material: mat, maxRadius: radius });
+    if (f && shadow) { f.mesh.castShadow = true; f.mesh.receiveShadow = true; }
+    if (f) landmarkFields.push(f);
+    return f;
+  };
+  for (let v = 0; v < 2; v++) lmField(archIdx[v], 'arch' + v, archGeometry(lmr, ARCH_SPAN, ARCH_H), mats.landmark, 1050, true);
+  for (let v = 0; v < 4; v++) lmField(hoodooIdx[v], 'hoodoo' + v, hoodooGeometry(lmr, 18), mats.landmark, 1050, true);
+  lmField(poleIdx2, 'snowpoles', snowPoleGeometry(), poleMat, 240, false);
+  // The lighthouse: body, a lantern that glows at dusk, and a beam that
+  // sweeps round twice a minute after dark — the one moving light on the
+  // coast, visible from across the bay.
+  let lantern = null, beam = null, beamMat = null, lanternMat = null;
+  if (houseIdx.length) {
+    const lh = lighthouseGeometry(mergeGeometries);
+    const bodyMat = new THREE.MeshLambertMaterial({ vertexColors: true });
+    lanternMat = new THREE.MeshBasicMaterial({ color: 0x9fb7c2, toneMapped: false, side: THREE.DoubleSide });
+    disposables.push(bodyMat, lanternMat, lh.lamp);
+    const bf = lmField(houseIdx, 'lighthouse', lh.body, bodyMat, 1050, true);
+    const L0 = LM[houseIdx[0]];
+    lantern = new THREE.Mesh(lh.lamp, lanternMat);
+    lantern.name = 'lighthouse.lantern';
+    lantern.position.set(L0.x, L0.y, L0.z);
+    lantern.matrixAutoUpdate = false;
+    lantern.updateMatrix();
+    group.add(lantern);
+    const bg = beamGeometry();
+    beamMat = new THREE.ShaderMaterial({
+      uniforms: { uOpacity: { value: 0 } },
+      vertexShader: 'attribute float fade; varying float vF; void main() { vF = fade; gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 ); }',
+      fragmentShader: 'uniform float uOpacity; varying float vF; void main() { gl_FragColor = vec4( vec3( 1.0, 0.93, 0.78 ) * vF * vF * uOpacity, 1.0 ); }',
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+    });
+    disposables.push(bg, beamMat);
+    beam = new THREE.Mesh(bg, beamMat);
+    beam.name = 'lighthouse.beam';
+    beam.position.set(L0.x, L0.y, L0.z);
+    beam.frustumCulled = false;
+    beam.renderOrder = 7;
+    beam.visible = false;
+    group.add(beam);
+    if (!bf) lantern.visible = false;
+  }
+  stats.landmarks = { arches: archIdx[0].length + archIdx[1].length, hoodoos: hoodooIdx.reduce((a, b) => a + b.length, 0),
+    lighthouses: houseIdx.length, snowpoles: poleIdx2.length };
+
   let shadeField = null;
   if (wantShade) {
     shadeField = makeField(makeStore(shadeIdx, (p, o) => {
@@ -1404,6 +1482,8 @@ export function createProps(world, ground, opts = {}) {
     band(U.bushNear, 0, n); band(U.bushMid, n, m); band(U.bushFar, m, bf);
     band(U.rockNear, 0, T.rockNear * range); band(U.rockFar, T.rockNear * range, T.rockFar * range);
     band(U.stone, 0, T.stone * range);
+    // The landmarks fade out just inside the far edge of their field.
+    band(U.landmark, 0, T.far * range * 0.98);
     // A field keeps everything out to the far side of its outer band.
     const reach = (x) => x * (1 + BAND * 0.5);
     for (const f2 of fields) {
@@ -1455,6 +1535,7 @@ export function createProps(world, ground, opts = {}) {
     // Wrapped well before float precision matters to a sine in the shader.
     if (windTime > 3600) windTime -= 3600;
     windU.value.w = windTime;
+    if (beam && beam.visible) beam.rotation.y = (windTime * 0.21) % (Math.PI * 2);
 
     if (!primed) {
       primed = true;
@@ -1490,6 +1571,12 @@ export function createProps(world, ground, opts = {}) {
     night = clamp(t, 0, 1);
     const lit = smoothstep(0.18, 0.72, night);
     lampMat.emissiveIntensity = lit * 2.6;
+    if (lanternMat) {
+      // Pale glass by day, the lamp by night (unlit, so it reads as a light).
+      lanternMat.color.setRGB(lerp(0.62, 4.0, lit), lerp(0.72, 3.4, lit), lerp(0.76, 2.2, lit));
+      beamMat.uniforms.uOpacity.value = smoothstep(0.35, 0.8, night) * 0.16;
+      beam.visible = beamMat.uniforms.uOpacity.value > 0.002;
+    }
     if (poolField) {
       poolMat.opacity = lit * 0.85;
       const on = poolMat.opacity > 0.01;

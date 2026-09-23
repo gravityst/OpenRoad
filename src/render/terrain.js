@@ -157,12 +157,19 @@ const MUD  = [0.23, 0.175, 0.125];
 // is pulled toward its neighbour's ground where the two meet, so a border is
 // a change of country rather than a seam.
 //
-// Red Canyon: sunburnt hardpan, orange dune sand, rust-red rock, and on the
-// odd patch of grass at its edge, dry red straw.
-const HARDPAN = [0.70, 0.40, 0.24];
-const DUNE = [0.84, 0.54, 0.32];
+// Red Canyon: sunburnt hardpan, pinkish dune sand, rust-red rock, and on
+// the odd patch of grass at its edge, dry red straw. The ground is paler and
+// less saturated than the rock on purpose: in real red-rock country the
+// sand is tan and the cliffs are what burn, and with both at one orange
+// (the first version) nothing stood out from anything.
+const HARDPAN = [0.70, 0.47, 0.33];
+const DUNE = [0.84, 0.62, 0.44];
 const RED_ROCK = [0.66, 0.33, 0.19];
-const SCRUB = [0.60, 0.46, 0.29];
+const SCRUB = [0.58, 0.49, 0.34];
+// Desert pavement, the dark wind-sorted gravel on old flats, and the pale
+// silt of a dry wash.
+const PAVEMENT = [0.52, 0.37, 0.27];
+const SILT = [0.86, 0.74, 0.58];
 // Frostpeak Pass: snow a touch blue in its hollows, grey granite, and a dark
 // meadow green below the snow line. Snow's albedo is really 0.8-0.9, but under
 // this sun (4.6) and tone curve anything past about 0.8 sRGB clips to paper
@@ -551,7 +558,7 @@ const F_MAIN = `
   // Granite (the only rock bluer than it is red) is not bedded at all.
   float orStrata = 0.84 + 0.16 * sin( vOrPos.y * 2.7 + orMa.r * 9.0 ) * ( 1.0 - smoothstep( 60.0, 220.0, length( vOrPos.xyz - cameraPosition ) ) )
                  * ( 1.0 - smoothstep( 0.0, 0.004, vOrRock.b - vOrRock.r ) );
-  orStrata = mix( orStrata, 0.74 + 0.26 * sin( vOrPos.y * 0.85 + orMa.r * 4.0 ) * sin( vOrPos.y * 0.31 + 1.3 ), orDes );
+  orStrata = mix( orStrata, 0.86 + 0.14 * sin( vOrPos.y * 0.85 + orMa.r * 4.0 ) * sin( vOrPos.y * 0.31 + 1.3 ), orDes );
   // Granite is not bedded; it weathers in patches, lighter where a face
   // has freshly spalled and darker where lichen and meltwater have been.
   // (Jointing drawn as a sine across the face, the first try, striped every
@@ -559,8 +566,31 @@ const F_MAIN = `
   orStrata *= mix( 1.0, 0.72 + 0.42 * orMb.g + ( orMa.r - 0.5 ) * 0.3, orSnowy );
   vec3 orBareCol = mix( vec3( 0.095, 0.055, 0.024 ), vec3( 0.24, 0.085, 0.034 ), orDes );
   diffuseColor.rgb = mix( diffuseColor.rgb, orBareCol * ( 0.85 + orMb.b * 0.3 ), orBare );
+
+  // ---- Red rock: the canyon's layer cake. ---------------------------------
+  // Sandstone lies in beds laid flat over the whole region, so the bands are
+  // keyed to absolute height and every mesa and wall in the canyon shows the
+  // same sequence at the same level, the way the real ones do: deep red and
+  // orange beds, a pale cream caprock band 3-4 m thick every 23 m, and thin
+  // chocolate seams every 7 m that fade out before they can alias. Each bed
+  // wanders a few metres with the macro noise, so no band is a ruled line.
+  // Desert varnish, the dark streaks where water has run down a cliff for a
+  // few thousand years, only on faces steep enough to have them: one tap of
+  // the macro map stretched 600:1 down the slope. All LINEAR colour. One
+  // colour on every wall (the first version) read as orange plastic.
+  float orYb = vOrPos.y + ( orMa.r - 0.5 ) * 9.0 + ( orMb.g - 0.5 ) * 2.5;
+  float orPh = fract( orYb * ( 1.0 / 23.0 ) );
+  float orCapBand = smoothstep( 0.70, 0.74, orPh ) * ( 1.0 - smoothstep( 0.86, 0.90, orPh ) );
+  float orPh2 = fract( orYb * ( 1.0 / 7.3 ) );
+  float orSeam = smoothstep( 0.40, 0.46, orPh2 ) * ( 1.0 - smoothstep( 0.54, 0.60, orPh2 ) )
+               * ( 1.0 - smoothstep( 250.0, 600.0, length( vOrPos.xyz - cameraPosition ) ) );
+  vec3 orRed = mix( vec3( 0.30, 0.074, 0.033 ), vec3( 0.42, 0.14, 0.055 ), smoothstep( 0.2, 0.8, sin( orYb * 0.37 ) * 0.5 + 0.5 ) );
+  orRed = mix( orRed, vec3( 0.60, 0.45, 0.31 ), orCapBand * 0.85 );
+  orRed = mix( orRed, vec3( 0.16, 0.06, 0.03 ), orSeam * 0.5 );
+  float orVarnish = smoothstep( 0.5, 0.8, texture2D( orMacro, vec2( ( vOrPos.x + vOrPos.z ) * 0.019, vOrPos.y * 0.0016 ) ).b );
+  orRed *= 1.0 - orVarnish * 0.4 * smoothstep( 0.2, 0.45, orSl );
   // rockTint is stored doubled (0..0.5 across a byte), so it is halved here.
-  diffuseColor.rgb = mix( diffuseColor.rgb, vOrRock.rgb * 0.5 * orStrata, orRock );
+  diffuseColor.rgb = mix( diffuseColor.rgb, mix( vOrRock.rgb * 0.5, orRed, orDes ) * orStrata, orRock );
   orW = vec4( orW.x + orRock * 0.9, orW.y, orW.z * ( 1.0 - max( orBare, orRock ) ), orW.w + orBare * 0.8 );
   // ^4 rather than ^2, so the crossfade between projections is confined to
   // genuinely steep ground: at 20 degrees of slope the up plane still holds 98%
@@ -909,9 +939,12 @@ export function createTerrain(world, ground, opts = {}) {
       // The farmland's river wash, the canyon's orange dunes and the bay's
       // pale beach, by weight; darker where the sea has just been.
       const wash = 1 - wD - wC;
-      out[0] = WASH[0] * wash + DUNE[0] * wD + BEACH[0] * wC;
-      out[1] = WASH[1] * wash + DUNE[1] * wD + BEACH[1] * wC;
-      out[2] = WASH[2] * wash + DUNE[2] * wD + BEACH[2] * wC;
+      // The canyon's sand drifts between pink-tan and the pale silt the
+      // wind sorts out of it, in patches a few dozen metres across.
+      const silt = wD > 0 ? smoothstep(-0.15, 0.65, valueNoise(x / 61, z / 61, tintSeed + 151)) * 0.45 : 0;
+      out[0] = WASH[0] * wash + lerp(DUNE[0], SILT[0], silt) * wD + BEACH[0] * wC;
+      out[1] = WASH[1] * wash + lerp(DUNE[1], SILT[1], silt) * wD + BEACH[1] * wC;
+      out[2] = WASH[2] * wash + lerp(DUNE[2], SILT[2], silt) * wD + BEACH[2] * wC;
       const wet = surface === 'water' ? 1 : smoothstep(seaLevel + 1.0, seaLevel + 0.1, y);
       if (wet > 0) { out[0] = lerp(out[0], WET_SAND[0], wet); out[1] = lerp(out[1], WET_SAND[1], wet); out[2] = lerp(out[2], WET_SAND[2], wet); }
       return;
@@ -928,10 +961,13 @@ export function createTerrain(world, ground, opts = {}) {
       out[1] = lerp(out[1], HARDPAN[1] * wD + SNOW[1] * wA + out[1] * wG, k);
       out[2] = lerp(out[2], HARDPAN[2] * wD + SNOW[2] * wA + out[2] * wG, k);
     } else if (surface === 'dirt' && wD > 0) {
-      // Hardpan, in sun-baked plates of slightly different red.
+      // Hardpan, in sun-baked plates of slightly different red, and on the
+      // old flats dark desert pavement in broad patches.
       const k = 1 + valueNoise(x / 23, z / 23, tintSeed + 141) * 0.1 * wD;
-      out[0] = lerp(out[0], HARDPAN[0], wD) * k; out[1] = lerp(out[1], HARDPAN[1], wD) * k;
-      out[2] = lerp(out[2], HARDPAN[2], wD) * k;
+      const pv = smoothstep(0.1, 0.5, fbm(x / 140, z / 140, tintSeed + 143, 2)) * 0.6;
+      out[0] = lerp(out[0], lerp(HARDPAN[0], PAVEMENT[0], pv), wD) * k;
+      out[1] = lerp(out[1], lerp(HARDPAN[1], PAVEMENT[1], pv), wD) * k;
+      out[2] = lerp(out[2], lerp(HARDPAN[2], PAVEMENT[2], pv), wD) * k;
     } else if (surface === 'rock' && wD + wA > 0) {
       const base = 1 - wD - wA;
       out[0] = out[0] * base + RED_ROCK[0] * wD + GRANITE[0] * wA;

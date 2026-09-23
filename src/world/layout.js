@@ -935,10 +935,26 @@ function buildLots(world, rnd, ground) {
   };
   const between = (r) => r[0] + rnd() * (r[1] - r[0]);
 
-  const TARGET = 420;
+  // How many farms each biome keeps, of those the farmland would have: a
+  // barn every few hundred metres is right for the heartland and the
+  // autumn woods, fewer on the coast, and in the canyon and on the pass
+  // only the odd homestead — a red barn and a steel shed at every bend of
+  // Red Canyon made it read as farmland painted orange. The target is cut
+  // by the same share (420 x 0.62), so the heartland keeps the density it
+  // had rather than soaking up the buildings the wild country lost.
+  const KEEP_BY_BIOME = [1.0, 0.25, 0.3, 0.75, 0.85];
+  const bio = world.biomes || null;
+  const bq = new Float64Array(5);
+  const TARGET = bio ? 260 : 420;
   for (let attempt = 0; attempt < TARGET * 14 && world.lots.length < TARGET; attempt++) {
     const x = (rnd() * 2 - 1) * (world.half - 140);
     const z = (rnd() * 2 - 1) * (world.half - 140);
+    if (bio) {
+      bio.weightsAt(x, z, bq);
+      let keep = 0;
+      for (let b = 0; b < 5; b++) keep += bq[b] * KEEP_BY_BIOME[b];
+      if (rnd() > keep) continue;
+    }
 
     // Farms sit BESIDE a road, not in open country — a building nobody could
     // drive to looks like it was dropped there, because it was.
@@ -955,6 +971,9 @@ function buildLots(world, rnd, ground) {
       rot: Math.atan2(near.tx, near.tz) + (rnd() - 0.5) * 0.5,
       kind: spec.kind, height: between(spec.h),
       district: 'country', seed: (rnd() * 1e9) | 0,
+      // The biome it stands in (biomes.js BIOME), so a renderer can build
+      // it to suit the country: see the round-three notes for city.js.
+      biome: bio ? bio.dominant(x, z) : 0,
     };
     world.lots.push(lot);
   }
@@ -1697,6 +1716,31 @@ function buildProps(world, rnd, ground) {
     }
   }
 
+  // ---- Canyon scrub ---------------------------------------------------------
+  // Real red-rock country is not bare: it is dotted all the way to the
+  // horizon with sage and juniper a metre or so high, grey-green (props.js
+  // dusts their foliage by the biome map), and that stipple is what gives a
+  // canyon floor its scale. The open-country lattice above put one bush in
+  // seven thousand square metres; this puts one in about six hundred, on
+  // the flats only, thinning toward the canyon's border.
+  if (bio) {
+    const DS = 14;
+    const dN = Math.floor((half * 2) / DS);
+    for (let j = 0; j < dN; j++) {
+      for (let i = 0; i < dN; i++) {
+        const x = -half + (i + rnd()) * DS, z = -half + (j + rnd()) * DS;
+        const roll = rnd();
+        if (roll > 0.34 || !inBounds(x, z)) continue;
+        const wd = weights(x, z)[1];
+        if (wd < 0.55 || roll > 0.34 * smoothstep(0.55, 0.8, wd)) continue;
+        if (clearance(x, z) < 3 || inLot(x, z)) continue;
+        ground.sample(x, z, g);
+        if (g.surface === 'rock' || g.surface === 'water' || g.ny < 0.9) continue;
+        plant('bush', roll < 0.13 ? BUSH.juniper : BUSH.shrub, x, z, g.y, 0.32 + rnd() * 0.42);
+      }
+    }
+  }
+
   // ---- The back of the beach ------------------------------------------------
   // Palms where the sand meets the turf, a few metres above the water, in
   // loose lines and clumps: the one thing that says "seaside" from a
@@ -1793,6 +1837,159 @@ function buildProps(world, rnd, ground) {
         if (clearance(x, z) < 1.5 || inLot(x, z)) continue;
         plant('stone', 0, x, z, ground.heightAt(x, z), 0.15 + rnd() * 0.35);
       }
+    }
+  }
+
+  if (bio) buildLandmarks(world, ground, clearance, inLot);
+}
+
+/**
+ * The biomes' landmarks (render/landmarks.js draws them), into
+ * world.landmarks as { type, x, z, y, rot, scale, variant, span?, height? }.
+ *
+ * Their own random stream, seeded from the world's, so placing them neither
+ * depends on nor disturbs the planting before them — and, like everything
+ * else, every client places the same ones.
+ *
+ *   arch        Red Canyon: natural stone arches spanning its roads, where a
+ *               road runs straight across open canyon floor away from any
+ *               junction, up to three, at least 700 m apart.
+ *   hoodoo      Red Canyon: stands of four to nine rock chimneys on the flat
+ *               canyon floor, 45 to 260 m off a road — close enough to see,
+ *               never in the way.
+ *   lighthouse  Sunspray Bay: on the highest ground that stands out into
+ *               the sea, within sight of a road.
+ *   snowpole    Frostpeak Pass: along both edges of every road over snow,
+ *               every 26 m, alternating sides.
+ */
+function buildLandmarks(world, ground, clearance, inLot) {
+  const L = (world.landmarks = []);
+  const bio = world.biomes;
+  const seed = world.seed | 0;
+  const r = mulberry(seed + 9001);
+  const w = new Float64Array(5);
+  const half = world.half;
+  const inMap = (x, z) => Math.abs(x) < half - 30 && Math.abs(z) < half - 30;
+  const g = { y: 0, nx: 0, ny: 1, nz: 0, surface: 'grass', grip: 0, roughness: 0, rolling: 0, dust: 0 };
+  const junction = world.nodes.filter((n) => n.edges.length >= 3);
+  const nearJunction = (x, z, d) => junction.some((n) => (n.x - x) ** 2 + (n.z - z) ** 2 < d * d);
+
+  // ---- Arches ---------------------------------------------------------------
+  {
+    const cand = [];
+    for (const e of world.edges) {
+      if (e.kind !== 'rural' && e.kind !== 'gravel' && e.kind !== 'dirt') continue;
+      // Edges run junction to junction or every 130 m, whichever is sooner,
+      // so the straightness test reaches only as far as the edge does.
+      for (let s = 15; s < e.length - 15; s += 18) {
+        const p = pointOnEdge(e, s);
+        if (!p || !inMap(p.x, p.z) || bio.weightsAt(p.x, p.z, w)[1] < 0.9) continue;
+        // Straight: the heading up to 30 m either way within 0.2 rad.
+        const a = pointOnEdge(e, s - 30), b = pointOnEdge(e, s + 30);
+        const turn = Math.abs(Math.atan2(a.tx * b.tz - a.tz * b.tx, a.tx * b.tx + a.tz * b.tz));
+        if (turn > 0.2 || nearJunction(p.x, p.z, 160)) continue;
+        const S = e.width * 0.5 + 12;
+        // Both feet on open, even ground within a few metres of the road's
+        // height, clear of any OTHER road and of buildings.
+        let ok = true;
+        for (const side of [-1, 1]) {
+          const fx = p.x + p.nx * (S + 2.2) * side, fz = p.z + p.nz * (S + 2.2) * side;
+          const dy = ground.heightAt(fx, fz) - p.y;
+          if (dy < -5 || dy > 4 || clearance(fx, fz) < 8 || inLot(fx, fz)) { ok = false; break; }
+        }
+        if (!ok) continue;
+        // Paved roads first (the loop through the canyon is the road most
+        // players drive), then by a hash, so the choice is the seed's.
+        cand.push({ e, p, S, score: (e.kind === 'rural' ? 1 : 0) + r() });
+      }
+    }
+    cand.sort((a, b) => b.score - a.score);
+    for (const c of cand) {
+      if (L.length >= 3) break;
+      if (L.some((q) => (q.x - c.p.x) ** 2 + (q.z - c.p.z) ** 2 < 700 * 700)) continue;
+      L.push({
+        type: 'arch', x: c.p.x, z: c.p.z, y: ground.heightAt(c.p.x, c.p.z),
+        // Local X, the span, lies across the road: along its normal.
+        rot: Math.atan2(-c.p.nz, c.p.nx), scale: 1, variant: L.length,
+        span: c.S * 2, height: 16 + r() * 7,
+      });
+    }
+  }
+
+  // ---- Hoodoos --------------------------------------------------------------
+  {
+    const centres = [];
+    for (let t = 0; t < 20000 && centres.length < 11; t++) {
+      const x = (r() * 2 - 1) * (half - 60), z = (r() * 2 - 1) * (half - 60);
+      if (bio.weightsAt(x, z, w)[1] < 0.9) continue;
+      const c = clearance(x, z);
+      if (c < 45 || c > 260 || bio.relief(x, z) > 2 || inLot(x, z)) continue;
+      // Not in a circuit's infield: a kid looks across it to the next corner.
+      if ((world.circuits || []).some((q) => (q.x - x) ** 2 + (q.z - z) ** 2 < (q.r * 1.3) ** 2)) continue;
+      if (centres.some((q) => (q[0] - x) ** 2 + (q[1] - z) ** 2 < 260 * 260)) continue;
+      if (L.some((q) => (q.x - x) ** 2 + (q.z - z) ** 2 < 120 * 120)) continue;
+      centres.push([x, z]);
+    }
+    for (const [cx, cz] of centres) {
+      const n = 4 + Math.floor(r() * 6);
+      for (let k = 0; k < n; k++) {
+        const a = r() * 6.28, d = k === 0 ? 0 : 6 + r() * 30;
+        const x = cx + Math.cos(a) * d, z = cz + Math.sin(a) * d;
+        if (clearance(x, z) < 22 || inLot(x, z) || !inMap(x, z)) continue;
+        ground.sample(x, z, g);
+        if (g.ny < 0.93 || g.surface === 'water') continue;
+        // The tallest in the middle of a stand, the young ones round it.
+        const h = k === 0 ? 17 + r() * 7 : 8 + r() * 11;
+        L.push({ type: 'hoodoo', x, z, y: g.y, rot: r() * 6.28, scale: h / 18, variant: Math.floor(r() * 4) });
+      }
+    }
+  }
+
+  // ---- The lighthouse -----------------------------------------------------------
+  {
+    let best = null, bs = -Infinity;
+    for (let t = 0; t < 6000; t++) {
+      const x = (r() * 2 - 1) * (half - 80), z = 1100 + r() * (half - 1180);
+      if (bio.weightsAt(x, z, w)[3] < 0.85 || bio.seaAt(x, z) > 0) continue;
+      const y = ground.heightAt(x, z);
+      if (y < bio.seaLevel + 7) continue;
+      const c = clearance(x, z);
+      if (c < 30 || c > 240 || inLot(x, z)) continue;
+      ground.sample(x, z, g);
+      if (g.ny < 0.9) continue;
+      // A headland: sea on as many sides as possible, close by.
+      let sea = 0;
+      for (let k = 0; k < 16; k++) {
+        const a = (k / 16) * Math.PI * 2;
+        if (bio.seaAt(x + Math.cos(a) * 110, z + Math.sin(a) * 110) > 0.5) sea++;
+      }
+      if (sea < 5) continue;
+      const sc = sea + (y - bio.seaLevel) * 0.08 - c * 0.01;
+      if (sc > bs) { bs = sc; best = { x, z, y }; }
+    }
+    if (best) {
+      // The cottage stands on the landward side.
+      let ax = 0, az = 0;
+      for (let k = 0; k < 16; k++) {
+        const a = (k / 16) * Math.PI * 2;
+        if (bio.seaAt(best.x + Math.cos(a) * 110, best.z + Math.sin(a) * 110) > 0.5) { ax += Math.cos(a); az += Math.sin(a); }
+      }
+      L.push({ type: 'lighthouse', x: best.x, z: best.z, y: best.y, rot: Math.atan2(az, -ax), scale: 1, variant: 0 });
+    }
+  }
+
+  // ---- Snow poles ------------------------------------------------------------------
+  for (const e of world.edges) {
+    if (e.kind === 'circuit' || e.kind === 'rallyx' || e.kind === 'track') continue;
+    let k = 0;
+    for (let s = 13; s < e.length - 13; s += 26, k++) {
+      const p = pointOnEdge(e, s);
+      if (!p || bio.weightsAt(p.x, p.z, w)[2] < 0.6 || nearJunction(p.x, p.z, 24)) continue;
+      const side = k % 2 === 0 ? 1 : -1;
+      const off = e.width * 0.5 + 2.2;
+      const x = p.x + p.nx * off * side, z = p.z + p.nz * off * side;
+      if (!inMap(x, z) || clearance(x, z) < 1.4) continue;
+      L.push({ type: 'snowpole', x, z, y: ground.heightAt(x, z), rot: r() * 6.28, scale: 0.9 + r() * 0.2, variant: 0 });
     }
   }
 }
@@ -1994,6 +2191,7 @@ export function buildWorld(seed = 20260820) {
   }
 
   world.buildLots = (ground) => buildLots(world, rnd, ground);
+  world.landmarks = [];
   world.buildProps = (ground) => buildProps(world, rnd, ground);
   return world;
 }

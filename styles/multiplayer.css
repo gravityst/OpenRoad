@@ -614,7 +614,9 @@
   border: 1px solid var(--mp-edge);
   border-left: calc(var(--mp-u) * 0.3) solid var(--k);
   border-radius: var(--mp-radius);
-  background: var(--mp-panel-hi);
+  /* Near-solid: it is the one thing on screen to act on, and on a phone it
+     sits over the objectives column, whose words showed through at 0.86. */
+  background: rgba(12, 15, 20, 0.95);
   box-shadow: var(--mp-shadow), 0 0 calc(var(--mp-u) * 3) color-mix(in srgb, var(--k) 25%, transparent);
   cursor: pointer;
   overflow: hidden;
@@ -824,4 +826,9 @@
 @media (max-width: 640px), (max-height: 520px) {
   .mpg-tower { width: min(calc(var(--mp-u) * 18), 46vw); }
   .mpg-card { top: calc(var(--mp-u) * 4.5 + env(safe-area-inset-top, 0px)); }
+}
+/* A phone held upright: the objectives column fills the top right, so the
+   banners drop below it rather than landing on its words. */
+@media (max-width: 640px) and (orientation: portrait) {
+  .mpg-flash { top: 38%; }
 }

@@ -233,6 +233,10 @@ export function createRoster(opts) {
     if (!modes.canPlay) {
       return { act: '', label: 'Start', sub: net && net.status === 'off' ? 'Turn on "Connect to other drivers" in Settings' : net && net.serverProto === 1 ? 'Party games arrive when the room is updated' : 'Connecting…', live: false };
     }
+    // The podium: a rematch for the players who were in it; anyone else may
+    // start a new game over it (the room allows that).
+    const played = v.inGame || v.watching;
+    if (v.kind === kind && v.phase === 'done' && !played) return online ? { act: 'start', label: 'Start', sub: null, live: false } : { act: '', label: 'Start', sub: 'Needs a friend online', live: false };
     if (v.kind === kind) {
       if (v.phase === 'done') return { act: 'again', label: 'Rematch', sub: 'Finished. Same players, same game', live: true };
       if (v.inGame) return { act: 'leave', label: 'Leave', sub: v.phase === 'lobby' ? `You're in. ${v.entrants} in so far` : 'You are playing', live: true };

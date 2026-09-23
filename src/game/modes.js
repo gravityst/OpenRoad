@@ -176,19 +176,32 @@ export function createModes(opts) {
     for (const e of m.ps) if (e.id === id) return e;
     return null;
   }
+  // Who this player is, read once a frame (opts.self() builds an object).
+  const selfInfo = { name: '', carId: '', colour: 0 };
+  function readSelf() {
+    const s = opts.self ? opts.self() : null;
+    selfInfo.name = (s && s.name) || 'You';
+    selfInfo.carId = (s && s.carId) || '';
+    selfInfo.colour = s ? s.colour | 0 : 0;
+  }
+  readSelf();
   function nameOf(id) {
-    if (id === me()) return (opts.self && opts.self().name) || 'You';
+    if (id === me()) return selfInfo.name;
     const p = net && net.people.get(id);
     return p ? p.name : `Driver-${id}`;
   }
+  // A player's colour, by id: party.colourFor wants a car-like object, so one
+  // scratch object is reused rather than one built per row per frame.
+  const colourQ = { id: -1, carId: '', colour: 0 };
   function cssOf(id) {
     if (!opts.colourOf) return '#ffffff';
-    if (id === me()) {
-      const s = opts.self ? opts.self() : {};
-      return opts.colourOf({ id, carId: s.carId || '', colour: s.colour | 0 }).css;
+    colourQ.id = id;
+    if (id === me()) { colourQ.carId = selfInfo.carId; colourQ.colour = selfInfo.colour; }
+    else {
+      const p = net && net.people.get(id);
+      colourQ.carId = p ? p.car : ''; colourQ.colour = p ? p.colour : 0;
     }
-    const p = net && net.people.get(id);
-    return opts.colourOf({ id, carId: p ? p.car : '', colour: p ? p.colour : 0 }).css;
+    return opts.colourOf(colourQ).css;
   }
 
   // ---- what the room says ------------------------------------------------------
@@ -237,6 +250,8 @@ export function createModes(opts) {
       events.push({ k: 'left', id: ev.id });
     }
   }
+
+  function expire(s, id) { if (clock > s.until) say.delete(id); }
 
   function onEmote(id, e) {
     say.set(id, { e, until: clock + EMOTE_S });
@@ -299,7 +314,8 @@ export function createModes(opts) {
   function update(dt, self, driving) {
     clock += dt;
     if (self) { lastSelf.x = self.x; lastSelf.z = self.z; lastSelf.ok = true; }
-    for (const [id, s] of say) if (clock > s.until) say.delete(id);
+    readSelf();
+    if (say.size) say.forEach(expire);
     const m = g();
     const id = me();
     const v = view;

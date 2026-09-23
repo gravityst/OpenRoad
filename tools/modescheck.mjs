@@ -110,6 +110,32 @@ const goalsStub = { list: gen.list, byId: gen.byId, nav: null };
     bad2.length ? bad2.slice(0, 4).join('; ') : '20 fields of 8-12 coins, every one on a road');
 }
 
+// ---- 1b. the layers main.js loads for the games ----------------------------------
+//
+// main.js imports these through layer(), which turns a module that fails to
+// load into null — the game runs on, silently without party games. This is
+// the thing that notices.
+{
+  const { readFileSync, existsSync } = await import('node:fs');
+  const want = {
+    'src/game/modes.js': ['createModes', 'gridSpot', 'pickCoinSpots', 'EMOTE_TEXT'],
+    'src/game/modesUi.js': ['createModesUi'],
+    'src/render/modeFx.js': ['createModeFx'],
+    'src/game/roster.js': ['createRoster', 'GAME_MARK'],
+    'server/modes.js': ['createModes'],
+  };
+  const missing = [];
+  for (const [f, names] of Object.entries(want)) {
+    try { const m = await imp(f); for (const n of names) if (!(n in m)) missing.push(`${f}:${n}`); }
+    catch (err) { missing.push(`${f} (${String(err.message).split('\n')[0]})`); }
+  }
+  const css = resolve(ROOT, 'styles/multiplayer.css');
+  const html = readFileSync(resolve(ROOT, 'index.html'), 'utf8');
+  if (!existsSync(css)) missing.push('styles/multiplayer.css');
+  if (!/<link rel="stylesheet" href="styles\/multiplayer\.css">/.test(html)) missing.push('index.html does not link styles/multiplayer.css');
+  check(!missing.length, 'the party-game layers load and export what main.js calls, and their stylesheet is linked', missing.join(', '));
+}
+
 // ---- 2. the referee, on its own ------------------------------------------------
 //
 // Tag decided from positions alone: a car alongside and closing is tagged; a car
@@ -353,6 +379,7 @@ function liveSocketFactory(heard) {
 
 const URL0 = LIVE ? argUrl : 'wss://room.test/';
 const players = [];
+const cost = [];                 // ms per modes.update() while a game is on
 
 function roadStart(k) {
   // Spread over the map: every player starts somewhere different.
@@ -400,7 +427,9 @@ function addPlayer(name, k, opts = {}) {
     if (P.modes) {
       // As in the game: the controller is handed where the car is DRAWN
       // (main.js's pose), which trails a placement by a frame.
+      const c0 = performance.now();
       P.modes.update(dt, P.drawn, true);
+      if (P.net.mode) cost.push(performance.now() - c0);
       P.drawn.x = P.x; P.drawn.z = P.z; P.drawn.yaw = P.yaw;
       for (const e of P.modes.events) P.events.push({ t: sim.t, ...e });
       P.modes.events.length = 0;
@@ -644,6 +673,36 @@ try {
   const rows = host.modes.view.rows.map((r) => `${r.pos}.${r.name}:${r.stat}`).join(' ');
   check(host.net.mode && host.net.mode.phase === 'done' && host.modes.view.rows[0].name === 'Eff',
     'when the last coin goes the game ends, most coins on top', rows);
+
+  // ==== what it costs ==============================================================
+  // Wall-clock, so the budgets are ten times what an M-series laptop measures:
+  // a loaded machine must not turn this into a coin toss.
+  {
+    const sorted = cost.slice().sort((a, b) => a - b);
+    const p = (q) => sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))] * 1000;
+    const mean = sorted.reduce((a, b) => a + b, 0) / Math.max(1, sorted.length) * 1000;
+    check(sorted.length > 1000 && p(0.99) < 400, "a player's game logic costs microseconds a frame",
+      `${sorted.length} frames: mean ${mean.toFixed(1)} us, p99 ${p(0.99).toFixed(1)} us (budget 400 us)`);
+    // The room, full: sixteen players in tag, every pair checked 20 times a second.
+    let t = 1.7e12;
+    const core = CORE.createRoomCore({ proto: 2, now: () => t, maxPlayers: 16 });
+    const socks = [];
+    for (let k = 0; k < 16; k++) { const sk = { send() {}, close() {} }; core.open(sk); core.message(sk, JSON.stringify({ t: 'join', proto: 2, name: 'P' + k })); socks.push(sk); }
+    core.message(socks[0], JSON.stringify({ t: 'mode', a: 'tag' }));
+    for (let k = 1; k < 16; k++) core.message(socks[k], JSON.stringify({ t: 'mode', a: 'join' }));
+    const ticks = [];
+    for (let n = 0; n < 1400; n++) {
+      t += 50;
+      for (let k = 0; k < 16; k++) core.message(socks[k], PROTO.encodeState({ x: k * 20 + Math.sin(n / 9 + k) * 30, z: Math.cos(n / 7) * 40, vx: 5, vz: 0, respawnSeq: 0 }, n * 50));
+      const a = performance.now();
+      core.tick();
+      if (n > 200) ticks.push(performance.now() - a);
+    }
+    ticks.sort((a, b) => a - b);
+    const tp = (q) => ticks[Math.floor(q * (ticks.length - 1))] * 1000;
+    check(core.modes.game.kind === 'tag' && tp(0.99) < 3000, 'a full room of sixteen in tag costs the server a fraction of each 50 ms tick',
+      `tick (snapshot for 16 + referee) median ${tp(0.5).toFixed(0)} us, p99 ${tp(0.99).toFixed(0)} us (budget 3000 us)`);
+  }
 
   // ==== the old pages ============================================================
   const oldHeard = [...O1.heard, ...O2.heard].filter((x) => x.t === 'mode' || x.t === 'emote');

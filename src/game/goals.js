@@ -265,6 +265,13 @@ export function createGoals(opts) {
       return;
     }
     progress.peak('mult', e.mult);
+    // The first link anyone ever makes says what the meter is, once: a
+    // number appearing under the compass means nothing to a kid until it
+    // does, and "don't crash" is the whole rule.
+    if (!progress.flag('chainHint')) {
+      progress.setFlag('chainHint');
+      toast('SKILL CHAIN! Near misses, jumps, drifts and speed add to it. Crash and it is gone', 5);
+    }
     if (k === 'near' || k === 'oncoming') {
       progress.track('near', 1);
       if (e.amount < 0.35) kick(1.6);

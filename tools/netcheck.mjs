@@ -878,6 +878,119 @@ for (const prof of ['lan', 'wifi', 'rough', 'fuzz']) {
   } finally { uninstallRuntime(); }
 }
 
+// ---- 8. finding each other, on the real world ------------------------------------
+{
+  const { buildWorld } = await imp('src/world/layout.js');
+  const { createGround } = await imp('src/world/ground.js');
+  const { CARS } = await imp('src/vehicles/catalog.js');
+  const PARTY = await imp('src/game/party.js');
+  const world = buildWorld();
+  const ground = createGround(world);
+  const rng = mulberry(42);
+  const roads = world.edges.filter((e) => e.kind !== 'track' && e.pts && e.pts.length > 3);
+  function onRoadPoint() {
+    const e = roads[(rng() * roads.length) | 0];
+    const i = 1 + ((rng() * (e.pts.length - 3)) | 0);
+    const a = e.pts[i], b = e.pts[i + 1];
+    let yaw = Math.atan2(-(b.x - a.x), -(b.z - a.z));
+    if (rng() < 0.5) yaw += Math.PI;
+    return { x: a.x, z: a.z, y: a.y, yaw };
+  }
+  // A fake net: the party logic reads room.car(id) and people, nothing else.
+  const cars = new Map();
+  const people = new Map();
+  const net = { people, room: { car: (id) => cars.get(id) || null } };
+  let placed = null;
+  const party = PARTY.createParty({ net, world, ground, place: (x, z, yaw) => { placed = { x, z, yaw }; } });
+  function friend(id, p) {
+    cars.set(id, { id, active: true, fade: 1, x: p.x, z: p.z, y: p.y || 0, yaw: p.yaw, carId: 'kaida', colour: 2, name: 'F' + id });
+    people.set(id, { id, name: 'F' + id, car: 'kaida', colour: 2 });
+  }
+
+  let bad = [], n = 0;
+  for (let k = 0; k < 60; k++) {
+    const p = onRoadPoint();
+    const offRoad = k >= 45;
+    if (offRoad) { p.x += (rng() - 0.5) * 160; p.z += (rng() - 0.5) * 160; }
+    cars.clear(); people.clear();
+    friend(7, p);
+    const s = party.spotNear(7);
+    n++;
+    if (!s) { bad.push(`#${k} no spot`); continue; }
+    const r = ground.roadAt(s.x, s.z, {});
+    const d = Math.hypot(s.x - p.x, s.z - p.z);
+    const fx = -Math.sin(p.yaw), fz = -Math.cos(p.yaw);
+    const along = Math.abs(Math.cos(Math.atan2(-r.tx, -r.tz) - s.yaw));
+    const behind = (s.x - p.x) * fx + (s.z - p.z) * fz;
+    const sameWay = Math.cos(s.yaw - p.yaw);
+    if (!r.onRoad) bad.push(`#${k} off the road (${r.dist.toFixed(1)} m)`);
+    else if (along < 0.9) bad.push(`#${k} not facing along the road`);
+    else if (d < 6) bad.push(`#${k} on top of them (${d.toFixed(1)} m)`);
+    else if (!offRoad && d > 45) bad.push(`#${k} ${d.toFixed(0)} m away`);
+    else if (!offRoad && (behind > 2 || sameWay < 0)) bad.push(`#${k} not behind them facing their way`);
+  }
+  check(bad.length === 0, '"Go" and Play put you on a road right behind a friend, facing their way',
+    bad.length ? bad.slice(0, 4).join('; ') : `${n} friends, 45 on roads and 15 in fields`);
+
+  // Guide: a route along roads, from you to them, that follows them.
+  bad = [];
+  let routes = 0, replans = 0, arrived = 0;
+  for (let k = 0; k < 12; k++) {
+    cars.clear(); people.clear();
+    const me = onRoadPoint(), them = onRoadPoint();
+    if (Math.hypot(me.x - them.x, me.z - them.z) < 400) { k--; continue; }
+    friend(9, them);
+    if (!party.startGuide(9, me)) { bad.push(`#${k} no route`); continue; }
+    party.update(0.016, me, null);
+    const g = party.guide;
+    const r = g.route;
+    routes++;
+    let offs = 0;
+    for (let i = 0; i < r.n; i += 3) if (!ground.roadAt(r.xs[i], r.zs[i], {}).onRoad) offs++;
+    const start = Math.hypot(r.xs[0] - me.x, r.zs[0] - me.z);
+    const end = Math.hypot(r.xs[r.n - 1] - them.x, r.zs[r.n - 1] - them.z);
+    if (offs > 0) bad.push(`#${k} ${offs} route points off road`);
+    if (start > 40 || end > 40) bad.push(`#${k} route runs ${start.toFixed(0)}..${end.toFixed(0)} m from the ends`);
+    if (!party.nav || party.nav.route !== r) bad.push(`#${k} the minimap is not given the route`);
+    // They drive off: the route must follow within a second.
+    const moved = onRoadPoint();
+    cars.get(9).x = moved.x; cars.get(9).z = moved.z;
+    for (let f = 0; f < 60; f++) party.update(1 / 60, me, null);
+    const r2 = party.guide.route;
+    if (r2 && Math.hypot(r2.xs[r2.n - 1] - moved.x, r2.zs[r2.n - 1] - moved.z) < 40) replans++;
+    // You arrive.
+    const ev = party.update(0.016, { x: moved.x + 10, z: moved.z, yaw: 0 }, null);
+    if (ev === 'arrived' && party.guide.id < 0) arrived++;
+  }
+  check(bad.length === 0 && routes === 12 && replans === 12 && arrived === 12,
+    'Guide routes along real roads, follows a friend who drives off, and says when you get there',
+    bad.length ? bad.slice(0, 4).join('; ') : `${routes} routes all on roads, ${replans} re-planned after the friend moved, ${arrived} arrivals`);
+
+  // Direction in the list: dead ahead is 0, to the right is +90 degrees.
+  cars.clear(); people.clear();
+  friend(3, { x: 100, z: 0, yaw: 0 });
+  friend(4, { x: 0, z: -100, yaw: 0 });
+  const rows = party.roster({ x: 0, z: 0, yaw: 0 });
+  const right = rows.find((r) => r.id === 3), ahead = rows.find((r) => r.id === 4);
+  check(Math.abs(right.bearing - Math.PI / 2) < 0.01 && Math.abs(ahead.bearing) < 0.01 && Math.abs(right.dist - 100) < 0.01,
+    'the friends list says how far and which way, relative to where you point',
+    `right ${(right.bearing * 180 / Math.PI).toFixed(0)} deg, ahead ${(ahead.bearing * 180 / Math.PI).toFixed(0)} deg`);
+
+  // Every paint of every car gives a beacon you can see: bright, saturated,
+  // never near-black, never the GPS cyan.
+  let dull = [];
+  for (const c of CARS) {
+    for (let i = 0; i < c.colours.length; i++) {
+      const hex = PARTY.playerColour(c.id, i, 5);
+      const r = (hex >> 16) & 255, g = (hex >> 8) & 255, b = hex & 255;
+      const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+      const cyan = Math.abs(r - 0x4f) + Math.abs(g - 0xd8) + Math.abs(b - 0xf0) < 60;
+      if (mx < 150 || mx - mn < 70 || cyan) dull.push(`${c.id}/${i} ${PARTY.cssOf(hex)}`);
+    }
+  }
+  check(dull.length === 0, "every car's every paint makes a bright player colour, and none is the GPS cyan", dull.join(', '));
+}
+
 if (failures) {
   console.log(`\n${failures} check(s) failed.`);
   process.exit(1);

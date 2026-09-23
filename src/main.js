@@ -322,8 +322,14 @@ async function boot() {
       if (url) {
         net = mNet.createNet({
           url, name: settings.name || '', seed: world.seed,
-          carId: settings.car || '', maxPlayers: 16,
+          // The car and paint everyone else sees, and this client's ground,
+          // which remote cars are laid on between samples (net/room.js).
+          carId: chosenCar, colour: chosenColour, maxPlayers: 16,
+          heightAt: ground.heightAt,
         });
+        // Off in Settings means off from the first frame — it used to connect
+        // anyway and only let go once the settings screen was touched.
+        if (settings.multiplayer === false) net.disable();
       }
     } catch (err) {
       console.error('[open road] multiplayer unavailable:', err);
@@ -335,6 +341,67 @@ async function boot() {
     ? mTags.createNameTags(document.body, { showTags: settings.nameTags !== false })
     : null;
   if (tags) tags.setSize(renderer.domElement.clientWidth, renderer.domElement.clientHeight);
+
+  // Finding each other: the friends list (Tab), a beacon over everyone,
+  // starting next to a friend, Go and Guide. Loaded here rather than in the
+  // layer list above, which destructures by position and is shared with every
+  // other part of the game; each of these may be null, and the game without
+  // them is the game with multiplayer and no way to find anybody.
+  const [mParty, mRoster, mBeacons] = net ? await Promise.all([
+    layer('./game/party.js', 'friends'),
+    layer('./game/roster.js', 'friends list'),
+    layer('./render/beacons.js', 'player beacons'),
+  ]) : [null, null, null];
+  const party = mParty ? safe(() => mParty.createParty({
+    net, world, ground,
+    // The goals layer already built the road graph; borrow it. Read at the
+    // first Guide, long after `goals` exists.
+    graph: () => (goals ? goals.graph : null),
+    place: (x, z, yaw) => placeCar(x, z, yaw),
+  })) : null;
+  const colourOf = party ? party.colourFor : null;
+  const roster = mRoster && party ? safe(() => mRoster.createRoster({
+    party, net, onGo: goToFriend, onGuide: guideToFriend,
+    onStopGuide: () => party.stopGuide(),
+  })) : null;
+  if (net && roster) net.onEvent = (e) => roster.onNetEvent(e);
+  const beacons = mBeacons && party ? safe(() => mBeacons.createBeacons(scene, {
+    quality: settings.quality || 'medium', heightAt: ground.heightAt,
+  })) : null;
+
+  /** "Go": onto the road right behind them, facing their way. */
+  function goToFriend(id) {
+    if (!party) return;
+    if (goals && goals.activeRace) goals.abandon();
+    const s = party.goTo(id);
+    if (!s) { if (roster) roster.toast('They are not on the road yet — try again in a moment'); return; }
+    if (mode !== 'driving') startDriving();
+    if (roster) roster.toast(`You're right behind ${s.name}!`, colourOf(net.room.car(id) || { id }).css);
+  }
+
+  /** "Guide": a route along the roads that keeps pointing at them. */
+  function guideToFriend(id) {
+    if (!party) return;
+    if (goals && goals.activeRace) {
+      if (roster) roster.toast('Finish the race first — or press Backspace to leave it');
+      return;
+    }
+    if (!party.startGuide(id, car)) {
+      if (roster) roster.toast('Could not find a road to them yet — try Go instead');
+      return;
+    }
+    if (mode !== 'driving') startDriving();
+    const g = party.guide;
+    if (roster) roster.toast(`Follow the arrows on the road to ${g.name}`, g.css);
+  }
+
+  /** The guide says you got there, or that they went. */
+  function announceGuide(ev) {
+    if (!roster) return;
+    const g = party.guide;
+    if (ev === 'arrived') roster.toast(`You found ${g.name}!`, g.css);
+    else if (ev === 'lost') roster.toast(`Lost ${g.name} — they left or went quiet`, g.css);
+  }
 
   // One model per remote SLOT, built lazily and kept — same reasoning as the
   // traffic pool above. A slot that goes quiet hides its mesh rather than
@@ -353,44 +420,67 @@ async function boot() {
     onToast: (msg, secs) => hud.toast(msg, secs),
   }) : null;
 
+  // Per slot: { m: model, rev: the room's infoRev it was built for, spec,
+  // spin }. Each player is drawn in the car and paint they chose (sent at
+  // join and on every garage change); a slot is rebuilt only when that
+  // changes or a different player takes it over.
   const remoteModels = [];
-  function syncRemoteModels(night) {
+  function syncRemoteModels(night, dt) {
     if (!net || !mCar) return;
     const list = net.room.cars;
+    let built = 0;
     for (let i = 0; i < list.length; i++) {
       const c = list[i];
-      let m = remoteModels[i];
-      if (m === undefined) {
-        if (!c.active) continue;
+      let r = remoteModels[i];
+      if (!c.active || c.fade <= 0) { if (r && r.m) r.m.group.visible = false; continue; }
+      if (!r || r.rev !== c.infoRev) {
+        // One build per frame at most. A body style nobody has driven yet costs
+        // tens of milliseconds the first time, and a room filling up at once
+        // must not stack those into one visible hitch.
+        if (built > 0) { if (r && r.m) r.m.group.visible = false; continue; }
+        built++;
+        if (r && r.m) r.m.dispose();
+        const known = !!CAR_BY_ID[c.carId];
+        const spec = specFor(known ? c.carId : STARTER, c.colour);
+        // An old server sends no car: the starter, in the old per-id colour.
+        if (!known) spec.colour = remoteColour(c.id);
+        let m = null;
         try {
-          m = mCar.createCarModel({ ...(specFor(STARTER) || {}), colour: remoteColour(c.id) });
+          m = mCar.createCarModel(spec);
           scene.add(m.group);
         } catch (err) {
           console.error('[open road] remote car model failed:', err);
           m = null;
         }
-        remoteModels[i] = m;
+        r = remoteModels[i] = { m, rev: c.infoRev, spec, spin: 0 };
       }
+      const m = r.m;
       if (!m) continue;
-      if (!c.active || c.fade <= 0) { m.group.visible = false; continue; }
       m.group.visible = true;
       m.group.position.set(c.x, c.y, c.z);
       m.group.rotation.set(0, c.yaw, 0);
       if (c.pitch) m.group.rotateX(c.pitch);
-      if (c.roll) m.group.rotateZ(c.roll);
+      // -roll, as the player's own car and the traffic do. With +roll every
+      // remote car leaned OUT of its corners.
+      if (c.roll) m.group.rotateZ(-c.roll);
       // Same calls the traffic pool makes — createCarModel has no setWheels or
       // setLights, so guessing those names would have failed silently behind an
       // `if`, which is exactly how a car ends up sliding on frozen wheels.
-      m.setSteer(c.steer * 0.6);
-      m.setWheelSpin(c.wheelSpin);
+      m.setSteer(c.steer * (r.spec.maxSteer || 0.6));
+      // Wheels turn at the speed the car is DRAWN moving. The angle on the
+      // wire is sampled at 20 Hz, and a wheel turning 90 rad/s sampled that
+      // slowly aliases into one creeping backwards.
+      r.spin += c.speed / (r.spec.wheelRadius || 0.34) * dt;
+      m.setWheelSpin(r.spin);
       m.setBrakeLights(c.brake ? 1 : 0);
-      m.setHeadlights(night > 0.35);
+      m.setHeadlights(c.lights || night > 0.35);
+      m.setReverseLights(c.speed < -0.5);
       const ind = c.indL ? -1 : c.indR ? 1 : 0;
       m.setIndicator(ind === 0 ? 0 : (indicatorPhase % 0.9 < 0.45 ? ind : 0));
     }
   }
 
-  /** A stable colour per player id, so the same person looks the same all session. */
+  /** A stable colour per player id, for a player whose car we were not told. */
   function remoteColour(id) {
     const h = (id * 47) % 360;
     return new THREE.Color().setHSL(h / 360, 0.62, 0.48).getHex();
@@ -556,6 +646,17 @@ async function boot() {
     menus.on('teleport', () => goals.abandon());
     menus.on('quit-to-title', () => goals.abandon());
   }
+  // Other drivers: everyone sees the car you take out, and pressing Play
+  // while friends are online starts you on the road right behind one of them
+  // — whoever you picked on the title screen, or else the nearest. Registered
+  // after goals.onDrive, so the challenge GPS is set up either way.
+  menus.on('drive', (p) => {
+    if (net && p && p.id) net.setCar(p.id, p.colour | 0);
+    if (!party || !p || !p.fresh) return;
+    const s = party.onPlay(car);
+    if (s && roster) roster.toast(`You're right behind ${s.name}!`, colourOf(net.room.car(s.id) || { id: s.id }).css);
+  });
+  if (roster) { roster.attach(menus); roster.setWorldHalf(world.half); }
   // menus.js saves the car a Drive takes out. This object is the one main.js
   // saves back (the steering keys, the settings screen), and it still holds
   // the car read at boot — so keep it in step, or the next save puts the old
@@ -1035,8 +1136,18 @@ async function boot() {
       wire.respawnSeq = respawnSeq & 0xff;
       teleported = false;
       net.update(dt, wire);
-      syncRemoteModels(night);
-      if (tags) tags.update(camera, net.room.cars, car);
+      syncRemoteModels(night, dt);
+      if (party) {
+        const ev = party.update(dt, car, goals ? goals.nav : null);
+        if (ev) announceGuide(ev);
+        // While guiding, the minimap's GPS line leads to the friend instead.
+        if (party.nav && driving) hudState.nav = party.nav;
+      }
+      if (beacons) {
+        beacons.setVisible(settings.nameTags !== false);
+        beacons.update(dt, camera, net.room.cars, colourOf, party ? party.guide : null, driving);
+      }
+      if (roster) roster.update(dt, car, mode);
     }
     debris.update(dt, camera.position);
     fxCars[0] = car;
@@ -1044,6 +1155,13 @@ async function boot() {
 
     // ---- camera ----
     updateCamera(dt, driving);
+    // Name tags and edge arrows go through THIS frame's camera, after it has
+    // moved. Projected before it, through last frame's matrices, every tag
+    // trailed its car by a frame and swam against it at speed.
+    if (net && tags) {
+      camera.updateMatrixWorld();
+      tags.update(camera, net.room.cars, car, colourOf, party ? party.guide.id : -1);
+    }
 
     // ---- streaming ----
     terrain.update(camera.position, dt);

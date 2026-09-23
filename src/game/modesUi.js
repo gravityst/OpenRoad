@@ -23,6 +23,11 @@ import { EMOTE_TEXT, GAME_NAME, fmtClock, fmtRaceTime } from './modes.js';
 const BIG_S = 1.7, SMALL_S = 2.4;      // s a banner stays up
 const PODIUM_BAR_MS = 12000;           // the room's podium time (server/modes.js)
 const CARD_LATE_S = 6;                 // s a "game under way" card stays before it folds away
+// The narrowest the tower may be squeezed to beside the objectives column:
+// place, stripe, about eight letters of a name, a clock. Any narrower and the
+// names are all "Dri…"; it goes below the column instead.
+const TOWER_MIN_W = 150;               // px
+const FIT_S = 0.5;                     // s between re-measuring the HUD around it
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -138,7 +143,7 @@ export function createModesUi(opts) {
   pAgain.addEventListener('click', () => again());
   pClose.addEventListener('click', () => { podiumClosed = view.gid; podium.hidden = true; });
   root.appendChild(podium);
-  let podiumFor = -1, podiumClosed = -1, podiumBar = -1;
+  let podiumFor = -1, podiumClosed = -1, podiumBar = -1, podiumUp = false;
 
   // ---- say, on a touch screen ----------------------------------------------------
   const say = el('div', 'mpg-say');
@@ -175,6 +180,56 @@ export function createModesUi(opts) {
     if (big) for (let i = flashes.length - 2; i >= 0; i--) if (flashes[i].el.classList.contains('mpg-flash__big')) { flashes[i].el.remove(); flashes.splice(i, 1); }
     while (flashes.length > 3) flashes.shift().el.remove();
   }
+
+  /**
+   * Keeps the tower off the HUD. Its corner is shared: the place line sits
+   * top centre and the objectives column top right (hud.js, goals.js — other
+   * files, other layouts). On a wide screen they are nowhere near it; on a
+   * phone held upright the tower's header covered the place line and its
+   * right edge the DAILY panel. So it measures them, by class name (one that
+   * is not there is simply not avoided), and takes the room that is left:
+   * below the place line if it would cover it, narrower beside the column,
+   * or below the column when narrower would be too narrow. Twice a second
+   * while it shows (the column grows and shrinks) and on a resize: two
+   * layout reads, never one a frame.
+   */
+  let fitIn = 0, fitTop = '', fitW = '';
+  function rectOf(sel) {
+    const e = document.querySelector(sel);
+    if (!e) return null;
+    const r = e.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 ? r : null;
+  }
+  function fitTower() {
+    fitIn = FIT_S;
+    if (podiumUp) return;                   // the tower is folded away under it
+    if (fitTop) tower.style.removeProperty('--mpg-top');
+    if (fitW) tower.style.removeProperty('--mpg-w');
+    // Layout box, not getBoundingClientRect(): the drop-in animation moves
+    // the tower with a transform for its first 0.3 s, and that is not where
+    // it will sit. (.mpg is fixed at inset 0, so offsets are the viewport's.)
+    const x = tower.offsetLeft, y = tower.offsetTop, tw = tower.offsetWidth, th = tower.offsetHeight;
+    const gap = Math.max(6, x);
+    let top = y, w = tw;
+    // The heading tape and the place line under it (the tape is hidden on a
+    // phone held upright, and then only the place line counts).
+    for (const nav of [rectOf('.hud__compass'), rectOf('.hud__place')]) {
+      if (nav && nav.left < x + w + gap && nav.right > x - gap && nav.bottom + gap * 0.6 > top) top = nav.bottom + gap * 0.6;
+    }
+    const col = rectOf('.goal__col');
+    if (col && col.left < x + w + gap && col.top < top + th && col.bottom > top) {
+      const room = col.left - gap - x;
+      if (room >= TOWER_MIN_W) w = Math.min(w, room);
+      else top = Math.max(top, col.bottom + gap * 0.6);
+    }
+    fitTop = top !== y ? `${Math.round(top)}px` : '';
+    fitW = w !== tw ? `${Math.floor(w)}px` : '';
+    if (fitTop) tower.style.setProperty('--mpg-top', fitTop);
+    if (fitW) tower.style.setProperty('--mpg-w', fitW);
+    leftTop = -2;
+  }
+  const onResize = () => { fitIn = 0; };
+  window.addEventListener('resize', onResize);
 
   /** The left column (friends chip, toasts) starts below the tower. */
   let leftTop = -1;
@@ -515,7 +570,16 @@ export function createModesUi(opts) {
       pRest.hidden = !pRest.children.length;
       pAgain.hidden = !(v.inGame || v.watching);
     }
-    if (podium.hidden === show) podium.hidden = !show;
+    if (podium.hidden === show) {
+      podium.hidden = !show;
+      // While it is up, the left column (friends chip, toasts, Guide banner,
+      // Say) steps out of its way: on a phone held upright the podium is as
+      // wide as the screen, and the chip and Say were drawn across 2nd place.
+      root.classList.toggle('has-podium', show);
+      document.documentElement.toggleAttribute('data-mpg-podium', show);
+      podiumUp = show;
+      leftTop = -2; fitIn = 0;              // the tower is back when it goes: re-place
+    }
     if (show) {
       const q = Math.round(Math.max(0, Math.min(1, v.clockLeft / PODIUM_BAR_MS)) * 400);   // 400 steps: under a pixel
       if (q !== podiumBar) { podiumBar = q; pBarFill.style.transform = `scaleX(${(q / 400).toFixed(4)})`; }
@@ -570,8 +634,12 @@ export function createModesUi(opts) {
       toast(touch ? 'Tap Say… to wave at your friends' : 'Press 1, 2, 3 or 4 to say Hi, Follow me, Wait up or Nice one', '#eef4fa');
     }
     const tw = on && (view.inGame || view.watching) && view.rows.length > 0;
-    if (tower.hidden === tw) { tower.hidden = !tw; leftTop = -2; }
-    if (tw) renderTower();
+    if (tower.hidden === tw) { tower.hidden = !tw; leftTop = -2; fitIn = 0; }
+    if (tw) {
+      renderTower();
+      fitIn -= dt;
+      if (fitIn <= 0) fitTower();
+    }
     renderCard();
     renderCount();
     renderPodium();
@@ -580,7 +648,9 @@ export function createModesUi(opts) {
   }
 
   function dispose() {
+    document.documentElement.removeAttribute('data-mpg-podium');
     window.removeEventListener('keydown', onKey);
+    window.removeEventListener('resize', onResize);
     root.remove();
     document.documentElement.style.removeProperty('--mp-left-top');
   }

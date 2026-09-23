@@ -119,7 +119,13 @@
   border: 1px solid var(--mp-edge);
   border-left: calc(var(--mp-u) * 0.3) solid var(--mp-accent);
   border-radius: var(--mp-radius);
-  background: rgba(10, 13, 18, 0.9);
+  /* Opaque, and above everything else in .ormp (the toasts, the Guide banner
+   * and the chip are later siblings, and painted over it at z-index auto: the
+   * first Tab after Play put "You're right behind Juno!" across Juno's row).
+   * At 0.9 alpha the friend arrows and the objectives column read through it
+   * on a phone. It is a menu while it is open; nothing shows through a menu. */
+  z-index: 3;
+  background: #0b0e13;
   box-shadow: 0 calc(var(--mp-u) * 1) calc(var(--mp-u) * 3.5) rgba(0, 0, 0, 0.55);
   transition: opacity 150ms ease, transform 150ms ease;
 }
@@ -456,7 +462,7 @@
   filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 6px currentColor);
 }
 .orarrow__lbl {
-  position: absolute; transform: translate(-50%, -50%);
+  position: absolute; left: 0; top: 0; transform-origin: 0 0;
   padding: 3px 7px;
   border-left: 3px solid currentColor;
   border-radius: 3px;
@@ -498,8 +504,10 @@
   --row: calc(var(--mp-u) * 2.25);
   position: absolute;
   left: calc(var(--mp-gap) + env(safe-area-inset-left, 0px));
-  top: calc(var(--mp-gap) + env(safe-area-inset-top, 0px));
-  width: min(calc(var(--mp-u) * 21), 44vw);
+  /* --mpg-top / --mpg-w: set by modesUi.js only when the HUD's place line or
+   * objectives column would otherwise be under the tower (a phone, upright). */
+  top: var(--mpg-top, calc(var(--mp-gap) + env(safe-area-inset-top, 0px)));
+  width: var(--mpg-w, min(calc(var(--mp-u) * 21), 44vw));
   border: 1px solid var(--mp-edge);
   border-top: calc(var(--mp-u) * 0.3) solid var(--k);
   border-radius: var(--mp-radius);
@@ -750,10 +758,20 @@
   border: 1px solid var(--mp-edge);
   border-top: calc(var(--mp-u) * 0.35) solid var(--k);
   border-radius: var(--mp-radius);
-  background: rgba(10, 13, 18, 0.9);
+  /* Opaque, like the party panel: at 0.9 the tower and a friend's name tag
+   * read through the steps on a phone. */
+  background: #0b0e13;
   box-shadow: 0 calc(var(--mp-u) * 1.2) calc(var(--mp-u) * 4) rgba(0, 0, 0, 0.6);
   animation: mpg-podium-in 0.5s cubic-bezier(0.2, 1.2, 0.4, 1);
 }
+/* The podium is a moment, not a HUD: the tower (whose rows it repeats) and
+ * the left column wait (modesUi.js sets these while it is up). .ormp paints
+ * above .mpg, so its pieces are hidden, not merely stacked under. */
+.mpg.has-podium .mpg-say,
+.mpg.has-podium .mpg-tower { display: none !important; }
+:root[data-mpg-podium] .ormp-chip,
+:root[data-mpg-podium] .ormp-toasts,
+:root[data-mpg-podium] .ormp-guide { visibility: hidden; }
 @keyframes mpg-podium-in { from { transform: translate(-50%, -44%); opacity: 0; } }
 .mpg-podium__kind { font: 900 calc(var(--mp-u) * 0.8)/1 var(--mp-font); letter-spacing: 0.22em; text-transform: uppercase; color: var(--k); }
 .mpg-podium__title { margin-top: calc(var(--mp-u) * 0.35); font: 900 calc(var(--mp-u) * 1.6)/1.1 var(--mp-font); }
@@ -824,7 +842,7 @@
   .ormp *, .mpg *, .ortag-layer * { animation: none !important; transition: none !important; }
 }
 @media (max-width: 640px), (max-height: 520px) {
-  .mpg-tower { width: min(calc(var(--mp-u) * 18), 46vw); }
+  .mpg-tower { width: var(--mpg-w, min(calc(var(--mp-u) * 18), 46vw)); }
   .mpg-card { top: calc(var(--mp-u) * 4.5 + env(safe-area-inset-top, 0px)); }
 }
 /* A phone held upright: the objectives column fills the top right, so the

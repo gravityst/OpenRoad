@@ -589,8 +589,10 @@ export function createRoster(opts) {
     lastSelf = self;
     tickToasts(dt);
     // Toasts are for the road. On the title screen the badge says the same
-    // thing, and a toast there landed on top of the wordmark.
-    const showToasts = mode === 'driving';
+    // thing, and a toast there landed on top of the wordmark. With the panel
+    // open they wait behind it (their clocks keep running): the panel is
+    // above them, but a long one's tail still poked out past its edge.
+    const showToasts = mode === 'driving' && !open;
     if (toasts.hidden === showToasts) toasts.hidden = !showToasts;
     if (mode !== 'driving' && open) close();
     renderChip();

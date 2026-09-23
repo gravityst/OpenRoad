@@ -31,6 +31,15 @@ import * as THREE from 'three';
 const MAX_TAGS = 14;            // nearest N; a busy room must not become a wall of text
 const COMPACT = 320;            // past this, just the name and how far away
 const EDGE = 50;                // px inset for off-screen arrows
+// Off-screen arrows stacked along one edge. Each label sits on the INNER side
+// of its arrow (right of a left-edge arrow, under a top-edge one), so a stack
+// up a side is rows of arrow-and-label: a 20 px triangle with a 19 px label
+// beside it, 34 px a row. Along the top or bottom, a name and a distance
+// side by side need ~150 px. (The label used to hang 34 px below every
+// arrow: up a side, the next friend's arrow, 44 px down, sat on its words,
+// and a left-edge label ran off the screen.)
+const STACK_Y = 34, STACK_X = 150;
+const LABEL_GAP = 16;           // px from an arrow's point to its label
 
 const DEFAULT_CSS = '#7ef29a';
 
@@ -139,7 +148,7 @@ export function createNameTags(root, opts = {}) {
     lbl.className = 'orarrow__lbl';
     el.append(tri, lbl);
     layer.appendChild(el);
-    const a = { el, lbl, txt: '', col: '', guide: false, shown: false, it: false };
+    const a = { el, lbl, txt: '', col: '', guide: false, shown: false, it: false, nm: '', say: '', dk: -2 };
     arrows.push(a);
     return a;
   }
@@ -312,10 +321,10 @@ export function createNameTags(root, opts = {}) {
         for (let tries = 0; tries < 6; tries++) {
           let hit = false;
           for (let j = 0; j < ai - 1; j++) {
-            if (Math.abs(placed[j * 2] - px) < 110 && Math.abs(placed[j * 2 + 1] - py) < 40) { hit = true; break; }
+            if (Math.abs(placed[j * 2] - px) < (side ? 60 : STACK_X - 4) && Math.abs(placed[j * 2 + 1] - py) < (side ? STACK_Y - 2 : 40)) { hit = true; break; }
           }
           if (!hit) break;
-          if (side) py = Math.min(h - EDGE, py + 44); else px = Math.min(w - EDGE, px + 120);
+          if (side) py = Math.min(h - EDGE, py + STACK_Y); else px = Math.min(w - EDGE, px + STACK_X);
         }
         placed[(ai - 1) * 2] = px; placed[(ai - 1) * 2 + 1] = py;
         const ang = Math.atan2(dy, dx) + Math.PI / 2;   // triangle points "up"
@@ -323,11 +332,21 @@ export function createNameTags(root, opts = {}) {
           `translate(${px.toFixed(1)}px,${py.toFixed(1)}px) rotate(${ang.toFixed(3)}rad)`;
         a.el.style.opacity = (Math.round(c.fade * 20) / 20).toFixed(2);
         const say = games ? games.say(c.id) : '';
-        const lbl = say ? `${nm}: ${say}` : `${nm}  ${fmt(c.dist)}`;
-        if (lbl !== a.txt) { a.lbl.textContent = lbl; a.txt = lbl; }
-        // Counter-rotate the label so text stays upright whatever the arrow does.
-        a.lbl.style.transform =
-          `translate(-50%,-50%) rotate(${(-ang).toFixed(3)}rad) translate(0,34px)`;
+        // Rebuilt when what it says changes (the metre, or the km to a tenth),
+        // not every frame.
+        const dk = c.dist < 1000 ? Math.round(c.dist) : 1000 + Math.round(c.dist / 100);
+        if (say !== a.say || nm !== a.nm || (!say && dk !== a.dk)) {
+          a.say = say; a.nm = nm; a.dk = dk;
+          a.txt = say ? `${nm}: ${say}` : `${nm}  ${fmt(c.dist)}`;
+          a.lbl.textContent = a.txt;
+        }
+        // Counter-rotated so the text stays upright whatever the arrow does,
+        // then moved inward off the arrow's point (see STACK_Y). The label's
+        // transform origin is the point itself (multiplayer.css).
+        const ox = side ? (dx < 0 ? LABEL_GAP : -LABEL_GAP) : 0;
+        const oy = side ? 0 : (dy < 0 ? LABEL_GAP : -LABEL_GAP);
+        const anchor = side ? (dx < 0 ? 'translate(0,-50%)' : 'translate(-100%,-50%)') : (dy < 0 ? 'translate(-50%,0)' : 'translate(-50%,-100%)');
+        a.lbl.style.transform = `rotate(${(-ang).toFixed(3)}rad) translate(${ox}px,${oy}px) ${anchor}`;
       }
     }
     for (let i = ti; i < tags.length; i++) show(tags[i], false);

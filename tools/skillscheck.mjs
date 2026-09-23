@@ -36,6 +36,15 @@ const check = (name, ok, detail) => {
   if (!ok) fail++;
 };
 
+// This thread's CPU time in microseconds: time the scheduler gave the core to
+// someone else is not in it. process.threadCpuUsage() is Node 23.9 and later;
+// before that the whole process's figure is the nearest there is (it also
+// counts V8's helper threads, so it can only read long, never short).
+const CPU_CLOCK = process.threadCpuUsage ? 'thread CPU' : 'process CPU';
+const cpuRead = process.threadCpuUsage ? () => process.threadCpuUsage() : () => process.cpuUsage();
+const cpuNow = () => { const c = cpuRead(); return c.user + c.system; };
+const cpuSince = (c0) => cpuNow() - c0;
+
 function memoryStorage(seed) {
   const m = new Map(seed ? Object.entries(seed) : []);
   return {
@@ -265,11 +274,21 @@ console.log('\n-- the chain, staged --');
   const cars = [];
   for (let i = 0; i < 88; i++) cars.push(trafficCar(i, ((i % 8) - 4) * 3.1, -((i / 8) | 0) * 9, i % 3 ? 0 : Math.PI, 20));
   for (let i = 0; i < 600; i++) sk.update(1 / 60, car, cars, null, true);
-  const N = 20000;
-  const t0 = performance.now();
-  for (let i = 0; i < N; i++) { car.z -= 0.5; sk.update(1 / 60, car, cars, null, true); sk.clearEvents(); }
-  const us = ((performance.now() - t0) / N) * 1000;
-  check('the detectors cost little per frame', us < 40, `${us.toFixed(1)} us a frame against 88 traffic cars (budget 40 us)`);
+  // Five batches of 4,000 and the FASTEST batch is the figure — the same
+  // 20,000 frames as before, the same 40 us budget. The review measured this
+  // at 2.7-8 us on a machine shared by five engineers' harness runs: the
+  // spread is the scheduler, not the detectors, and a single long batch
+  // counts every time another process holds the core. The minimum of
+  // repeated batches is the standard way to time code on a busy machine;
+  // it is still the full per-frame cost of every frame in that batch.
+  const N = 4000;
+  let us = Infinity;
+  for (let b = 0; b < 5; b++) {
+    const t0 = performance.now();
+    for (let i = 0; i < N; i++) { car.z -= 0.5; sk.update(1 / 60, car, cars, null, true); sk.clearEvents(); }
+    us = Math.min(us, ((performance.now() - t0) / N) * 1000);
+  }
+  check('the detectors cost little per frame', us < 40, `${us.toFixed(1)} us a frame against 88 traffic cars (budget 40 us, fastest of 5 x 4,000)`);
 }
 
 // ---------------------------------------------------------------------------
@@ -442,6 +461,49 @@ console.log('\n-- the save --');
   check('reloading the migrated save pays nothing again', ev2.length === 0 && again.serialize() === p.serialize() && again.migratedFrom === 2,
     `${ev2.length} events on the second load, saves identical`);
 
+  // The review's case, replayed: the migrated save is loaded by a ROUND-ONE
+  // build, which writes it back flattened to v1, and then by this one again.
+  // roundOne() is round one's sanitize(), field for field (makeover/preview
+  // src/game/progress.js): it keeps cash, xp, owned, results, tokens, the
+  // `true` flags (first 64) and its six stats, and writes v:1.
+  const roundOne = (raw) => {
+    const out = { v: 1, cash: Math.max(0, Math.floor(raw.cash)), xp: Math.max(0, Math.floor(raw.xp)),
+      owned: raw.owned.slice(0, 64), results: raw.results, tokens: raw.tokens, flags: {},
+      stats: { races: 0, finishes: 0, tokens: 0, jumps: 0, bestJump: 0, topSpeed: 0 } };
+    for (const k of Object.keys(raw.flags).slice(0, 64)) if (raw.flags[k] === true) out.flags[k] = true;
+    for (const k of Object.keys(out.stats)) out.stats[k] = Math.max(0, raw.stats && Number.isFinite(raw.stats[k]) ? raw.stats[k] : out.stats[k]);
+    return out;
+  };
+  {
+    const s2 = memoryStorage({ [PROGRESS_KEY]: JSON.stringify(v1) });
+    const a = createProgress({ storage: s2, cars: CARS, today: () => '2026-09-23', tokensTotal: 50 });
+    a.drainEvents([]);
+    a.bankChain(1, 0, 400);                     // enough for the Lagoon paint
+    const bought = a.buyPaint('lagoon');
+    a.drainEvents([]);
+    const before = { cash: a.cash, xp: a.xp, owned: a.data.owned.length, paints: a.data.paints.length, trophies: Object.keys(a.data.trophies).length };
+    s2.setItem(PROGRESS_KEY, JSON.stringify(roundOne(JSON.parse(s2.getItem(PROGRESS_KEY)))));
+    const b = createProgress({ storage: s2, cars: CARS, today: () => '2026-09-23', tokensTotal: 50 });
+    const evb = b.drainEvents([]);
+    check('a v2 save flattened by a round-one build is not paid twice',
+      bought && b.cash === before.cash && b.xp === before.xp && b.data.owned.length === before.owned &&
+      b.data.paints.length === before.paints && b.ownsPaint('lagoon') && Object.keys(b.data.trophies).length === before.trophies &&
+      evb.filter((e) => e.type === 'welcome' || e.type === 'level' || e.type === 'trophy').length === 0,
+      `cash $${before.cash} -> $${b.cash}, XP ${before.xp} -> ${b.xp}, cars ${before.owned} -> ${b.data.owned.length}, ` +
+      `paints ${before.paints} -> ${b.data.paints.length} (Lagoon ${b.ownsPaint('lagoon') ? 'kept' : 'lost'}), ${evb.length} events`);
+
+    // ...and one that has lost rewardLevel (hand-edited, or a future bug),
+    // which used to read as "nothing paid yet" and pay every level again.
+    const noLevel = JSON.parse(s2.getItem(PROGRESS_KEY));
+    noLevel.v = 2;
+    delete noLevel.rewardLevel;
+    const c = createProgress({ storage: memoryStorage({ [PROGRESS_KEY]: JSON.stringify(noLevel) }), cars: CARS, today: () => '2026-09-23', tokensTotal: 50 });
+    const evc = c.drainEvents([]);
+    check('a v2 save that has lost rewardLevel pays no level again',
+      c.cash === b.cash && evc.filter((e) => e.type === 'level' || e.type === 'welcome').length === 0 && c.data.rewardLevel === levelFor(c.xp).level,
+      `cash $${b.cash} -> $${c.cash}, rewardLevel ${c.data.rewardLevel} at level ${levelFor(c.xp).level}, events ${evc.map((e) => e.type).join() || 'none'}`);
+  }
+
   // A fresh v2 round trip with everything in it.
   const f = createProgress({ storage: memoryStorage(), cars: CARS, today: () => '2026-09-23' });
   f.bankChain(20000, 250, 5000);
@@ -513,6 +575,7 @@ console.log('\n-- the real car in real traffic --');
   const heights = (x, z) => ground.heightAt(x, z);
   const counts = {};
   let banked = 0, lost = 0, bankedValue = 0, nan = false, frames = 0, crashes = 0;
+  let wallSlow = 0, cpuSlow = 0, cpuMax = 0;
   const PH = 1 / 120;
   let skillUs = 0;
   const la = {}, np = {};
@@ -550,9 +613,21 @@ console.log('\n-- the real car in real traffic --');
       if (step % 2 === 1) {
         traffic.update(PH * 2, car.x, car.z, car.speed, car.yaw);
         drift.update(PH * 2, car);
+        const c0 = cpuNow();
         const t0 = performance.now();
         sk.update(PH * 2, car, traffic.cars, drift.state, true);
-        skillUs += (performance.now() - t0) * 1000;
+        const fu = (performance.now() - t0) * 1000;
+        const cu = cpuSince(c0);
+        // Every frame counts in the mean, however slow: a stall is exactly
+        // what this is here to find. What the wall clock cannot tell apart is
+        // the core being taken away from a stall in the code, so each frame's
+        // own CPU time is read as well. A preempted frame is long on the wall
+        // and short on the CPU; a stall in the detectors burns CPU for as
+        // long as it lasts. Only the CPU-long ones fail the check below.
+        skillUs += fu;
+        if (fu > 1000) wallSlow++;
+        if (cu > 1000) cpuSlow++;
+        if (cu > cpuMax) cpuMax = cu;
         frames++;
         for (let i = 0; i < sk.eventCount; i++) {
           const ev = sk.event(i);
@@ -577,7 +652,26 @@ console.log('\n-- the real car in real traffic --');
   check('driving the real car earns skills of several kinds', links >= 10 && Object.keys(counts).filter((k) => k !== 'bank' && k !== 'lost').length >= 3,
     `${links} links in ${minutes.toFixed(1)} minutes of a cautious autopilot`);
   check('the chain never goes NaN in real traffic', !nan, 'value, timer and points finite every frame');
-  check('the detectors are cheap in real traffic', skillUs / frames < 30, `${(skillUs / frames).toFixed(1)} us a frame (budget 30 us)`);
+  // Round two's check, exactly: the mean of EVERY frame under 30 us.
+  // Measured 1.9-3.1 us idle, and 7.7-15.0 us with eighteen or nineteen
+  // processes on twelve cores (the wall clock counts the waits), so it has
+  // room to spare on a busy machine without leaving any frame out.
+  const perFrame = skillUs / Math.max(1, frames);
+  check('the detectors are cheap in real traffic', perFrame < 30,
+    `${perFrame.toFixed(1)} us a frame over all ${frames} (budget 30 us)`);
+  // A stall every few seconds hides in a mean: a mutation that spins 5 ms
+  // on every 1,000th update reads 7.1 us above and passes, yet it is a hitch
+  // a kid feels every seventeen seconds. So no frame may spend a millisecond
+  // of CPU in the detectors (that mutation: 42 frames caught). Measured over
+  // thirteen runs, idle and under that load: the longest frame is 0.18-0.49
+  // ms of CPU, none over 1 ms. The wall clock in the loaded runs had 41-113
+  // frames over 1 ms (27 ms the longest), every one of them short on the CPU.
+  // That is why the line is drawn on CPU time: on the wall clock the same
+  // line fails a busy machine, and an allowance of slow frames lets a real
+  // stall through.
+  check('no frame of the detectors stalls', cpuSlow === 0,
+    `${cpuSlow} frames over 1 ms of ${CPU_CLOCK} time (longest ${(cpuMax / 1000).toFixed(2)} ms); ` +
+    `${wallSlow} over 1 ms on the wall clock`);
   // A kid's twenty minutes: skills at this autopilot's rate, plus a medal a
   // few minutes and some tokens, should see several levels from a new save.
   const p = createProgress({ storage: memoryStorage(), cars: CARS, today: () => '2026-09-23' });

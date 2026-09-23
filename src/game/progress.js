@@ -96,6 +96,37 @@ function defaults() {
 
 const num = (v, d = 0) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
 
+// ---- surviving an older build ----------------------------------------------
+// A round-one build that loads a v2 save writes it back as v1 with only the
+// v1 fields — but it keeps every flag that is `true` (up to 64). So a v2 save
+// also carries, as flags: a mark that it has been v2, the level rewards paid
+// so far, and the paints and trophies it owns. migrate() reads them back if a
+// round-one build has flattened the save in between. Twelve paints, 29
+// trophies, the mark and the level come to 43, under the 64 round one keeps.
+const V2_MARK = 'v2';
+
+function flagNumber(flags, prefix) {
+  let n = 0;
+  for (const k of Object.keys(flags)) {
+    if (!k.startsWith(prefix) || flags[k] !== true) continue;
+    const v = parseInt(k.slice(prefix.length), 10);
+    if (v > n) n = v;
+  }
+  return n;
+}
+
+/** Brings the flag mirrors up to date with the save. Cheap when nothing changed. */
+function mirrorFlags(d) {
+  const f = d.flags;
+  f[V2_MARK] = true;
+  if (f[`paid:${d.rewardLevel}`] !== true) {
+    for (const k of Object.keys(f)) if (k.startsWith('paid:')) delete f[k];
+    f[`paid:${d.rewardLevel}`] = true;
+  }
+  for (const p of d.paints) if (f[`paint:${p}`] !== true) f[`paint:${p}`] = true;
+  for (const id of Object.keys(d.trophies)) if (f[`trophy:${id}`] !== true) f[`trophy:${id}`] = true;
+}
+
 /**
  * Cleans a parsed save into the current shape. Never throws.
  *
@@ -135,8 +166,14 @@ export function sanitize(raw) {
   }
 
   // ---- v2 ----
+  // rewardLevel missing from a save that says it is v2 (or newer) means the
+  // field was lost, not that nothing was ever paid: every v2 build writes it.
+  // Defaulting it to 1 there paid every level again on the next load, so it
+  // defaults to the level the XP has reached — pay nothing. Only a genuine
+  // v1 save starts at 1, and migrate() is what decides that.
   const lvl = levelFor(out.xp).level;
-  out.rewardLevel = Math.max(1, Math.min(lvl, Math.floor(num(raw.rewardLevel, 1))));
+  const unpaid = num(raw.v, 1) >= 2 ? lvl : 1;
+  out.rewardLevel = Math.max(1, Math.min(lvl, Math.floor(num(raw.rewardLevel, unpaid))));
   if (Array.isArray(raw.paints)) {
     out.paints = [...new Set(raw.paints.filter((p) => typeof p === 'string' && PAINT_BY_ID[p]))];
   }
@@ -149,7 +186,11 @@ export function sanitize(raw) {
   if (raw.trophies && typeof raw.trophies === 'object') {
     for (const id of Object.keys(raw.trophies).slice(0, 128)) {
       const d = raw.trophies[id];
-      if (TROPHIES.some((t) => t.id === id) && (d === true || parseDay(d))) out.trophies[id] = d === true ? '' : d;
+      // '' is how a trophy with no known date is kept (below, and a trophy
+      // restored by migrate()), so it has to be read back as won too — it
+      // used to be dropped, and the trophy was granted and paid again on
+      // every load after the one that wrote it.
+      if (TROPHIES.some((t) => t.id === id) && (d === true || d === '' || parseDay(d))) out.trophies[id] = d === true ? '' : d;
     }
   }
   const dy = raw.daily;
@@ -185,9 +226,30 @@ export function migrate(raw) {
   const from = raw && typeof raw === 'object' ? Math.max(1, Math.floor(num(raw.v, 1))) : 0;
   const data = sanitize(raw);
   if (from === 1) {
-    data.rewardLevel = 1;
+    // Which kind of v1? Round one's own, or a v2 save that a round-one build
+    // loaded and wrote back. Round one's sanitize drops every v2 field and
+    // writes v:1, so the second kind used to be migrated as if it were the
+    // first — measured with the real round-one module: the $1,900 of level
+    // cash paid again, a second free car and paint, trophy XP again (2,300 ->
+    // 2,775) and the paint the player bought gone. Round one keeps any flag
+    // that is `true`, so the v2 build leaves the facts it needs there (see
+    // mirrorFlags) and they are read back here.
+    if (data.flags[V2_MARK] === true) {
+      const lv = levelFor(data.xp).level;
+      const paid = flagNumber(data.flags, 'paid:');
+      data.rewardLevel = Math.max(1, Math.min(lv, paid || lv));
+      for (const k of Object.keys(data.flags)) {
+        const paint = k.startsWith('paint:') ? k.slice(6) : null;
+        const trophy = k.startsWith('trophy:') ? k.slice(7) : null;
+        if (paint && PAINT_BY_ID[paint] && !data.paints.includes(paint)) data.paints.push(paint);
+        if (trophy && TROPHIES.some((t) => t.id === trophy) && data.trophies[trophy] == null) data.trophies[trophy] = '';
+      }
+    } else {
+      data.rewardLevel = 1;
+    }
     // v1 kept medals per challenge but never counted them, so "Gold Rush"
-    // would have asked a player who already has a gold to win another.
+    // would have asked a player who already has a gold to win another. Both
+    // kinds need it: the flattened v2 save lost its counts too.
     let medals = 0, golds = 0;
     for (const id of Object.keys(data.results)) {
       const m = data.results[id].medal;
@@ -275,13 +337,14 @@ export function createProgress(opts = {}) {
       for (const id of grant) if (id && !d.owned.includes(id)) { d.owned.push(id); granted = true; }
       // Kept at once: unsaved, it would be granted again next visit from
       // whatever car the settings name by then, and this one lost.
-      if (granted) { try { if (storage) storage.setItem(PROGRESS_KEY, JSON.stringify(d)); } catch { /* private mode */ } }
+      if (granted) { mirrorFlags(d); try { if (storage) storage.setItem(PROGRESS_KEY, JSON.stringify(d)); } catch { /* private mode */ } }
     }
     return d;
   }
   /** Writes the save. `quiet` skips the listeners — for stat trickles nobody is looking at. */
   function save(quiet) {
     dirty = false;
+    mirrorFlags(data);
     try { if (storage) storage.setItem(PROGRESS_KEY, JSON.stringify(data)); } catch { /* quota or private mode */ }
     if (quiet) return;
     for (const fn of listeners) { try { fn(api); } catch (err) { console.error('[progress] listener failed', err); } }
@@ -327,14 +390,22 @@ export function createProgress(opts = {}) {
 
   // ---- trophies --------------------------------------------------------------
 
+  // How many kinds of challenge have a medal. checkTrophies() asks on every
+  // stat trickle — once a second while driving — and counting meant an
+  // Object.keys array, a Set and a split() each time, for an answer that
+  // only changes when a result is recorded. So it is counted once per
+  // results object and per recorded result (record() bumps resultsRev).
+  let resultsRev = 0, kindsRev = -1, kindsOf = null, kindsN = 0;
   function kindsWithMedal() {
+    if (kindsRev === resultsRev && kindsOf === data.results) return kindsN;
     const kinds = new Set();
     for (const id of Object.keys(data.results)) {
       if (!(data.results[id].medal > 0)) continue;
       const k = id.startsWith('race-') || id.startsWith('stage-') ? 'race' : id.split('-')[0];
       kinds.add(k);
     }
-    return kinds.size;
+    kindsRev = resultsRev; kindsOf = data.results; kindsN = kinds.size;
+    return kindsN;
   }
   const ctxScratch = { level: 1, cars: 0, carsTotal: 0, paints: 0, tokensTotal: 0, streakBest: 0, kinds: 0 };
   function trophyCtx() {
@@ -506,6 +577,7 @@ export function createProgress(opts = {}) {
     if (newBest && splits) rec.splits = splits.slice(0, 16);
     else if (prev && prev.splits) rec.splits = prev.splits;
     data.results[ch.id] = rec;
+    resultsRev++;
     if (ch.kind === 'race') { data.stats.finishes++; }
     if (ch.kind === 'jump') { data.stats.jumps++; data.stats.bestJump = Math.max(data.stats.bestJump, score); }
     if (ch.kind === 'trap') data.stats.topSpeed = Math.max(data.stats.topSpeed, score);

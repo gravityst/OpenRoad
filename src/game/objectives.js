@@ -24,20 +24,9 @@
 // and those never take focus — a focused button turns the handbrake (Space)
 // into "Race again".
 
-const ICONS = {
-  race: '<svg viewBox="0 0 24 24"><path d="M5 3v18" stroke="currentColor" stroke-width="2" fill="none"/><path d="M6 4h13l-3 4 3 4H6z" fill="currentColor"/><path d="M9 4h3v4H9zM12 8h3v4h-3z" fill="#0b0e13" opacity=".55"/></svg>',
-  trap: '<svg viewBox="0 0 24 24"><path d="M4 16a8 8 0 1 1 16 0" stroke="currentColor" stroke-width="2.2" fill="none"/><path d="M12 16l5-6" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><circle cx="12" cy="16" r="1.8" fill="currentColor"/></svg>',
-  jump: '<svg viewBox="0 0 24 24"><path d="M2 20h9l-7-5z" fill="currentColor"/><path d="M8 13c3-7 9-8 13-4" stroke="currentColor" stroke-width="2" fill="none" stroke-dasharray="2 2.5"/><path d="M21 9l-.5 3.5-3-1.8z" fill="currentColor"/></svg>',
-  drift: '<svg viewBox="0 0 24 24"><path d="M4 18c4 0 5-5 9-5s4 4 7 4" stroke="currentColor" stroke-width="2.2" fill="none" stroke-linecap="round"/><path d="M5 11c3 0 4-4 7-4s3 3 6 3" stroke="currentColor" stroke-width="2" fill="none" opacity=".55" stroke-linecap="round"/></svg>',
-  token: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="currentColor"/><path d="M12 6.5l1.6 3.4 3.7.4-2.8 2.5.8 3.7L12 14.6l-3.3 1.9.8-3.7-2.8-2.5 3.7-.4z" fill="#0b0e13" opacity=".7"/></svg>',
-  level: '<svg viewBox="0 0 24 24"><path d="M12 3l2.6 5.6 6 .7-4.5 4.1 1.2 6L12 16.4 6.7 19.4l1.2-6L3.4 9.3l6-.7z" fill="currentColor"/></svg>',
-  nav: '<svg viewBox="0 0 24 24"><path d="M12 2l7 18-7-4-7 4z" fill="currentColor"/></svg>',
-  trophy: '<svg viewBox="0 0 24 24"><path d="M7 3h10v5a5 5 0 0 1-10 0z" fill="currentColor"/><path d="M7 5H4v2a3 3 0 0 0 3 3M17 5h3v2a3 3 0 0 1-3 3" stroke="currentColor" stroke-width="1.8" fill="none"/><path d="M11 13h2v4h-2zM8 18h8v3H8z" fill="currentColor"/></svg>',
-  daily: '<svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="2.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M3 10h18M8 3v4M16 3v4" stroke="currentColor" stroke-width="2"/><path d="M8 15l2.5 2.5L16 12" stroke="currentColor" stroke-width="2.2" fill="none" stroke-linecap="round"/></svg>',
-  streak: '<svg viewBox="0 0 24 24"><path d="M13 2L4 14h6l-1 8 9-12h-6z" fill="currentColor"/></svg>',
-  car: '<svg viewBox="0 0 24 24"><path d="M3 15l2-5c.4-1 1.3-2 2.6-2h8.8c1.3 0 2.2 1 2.6 2l2 5v3H3z" fill="currentColor"/><circle cx="7.5" cy="18" r="2.2" fill="#0b0e13"/><circle cx="16.5" cy="18" r="2.2" fill="#0b0e13"/></svg>',
-  paint: '<svg viewBox="0 0 24 24"><path d="M4 16c0-4 5-12 8-12s8 8 8 12a8 4 0 0 1-16 0z" fill="currentColor"/></svg>',
-};
+// The glyphs are the game's one icon set (icons.js), so a race flag here is
+// the race flag on the map, the title and the pause card.
+import { icon } from './icons.js';
 const KIND_WORD = { race: 'RACE', trap: 'SPEED TRAP', jump: 'JUMP', drift: 'DRIFT ZONE' };
 const MEDAL_WORD = ['NO MEDAL', 'BRONZE', 'SILVER', 'GOLD'];
 
@@ -98,7 +87,7 @@ export function createObjectives(root, opts = {}) {
       </div>
       <div class="goal__race">
         <div class="goal__timer">0:00.0</div>
-        <div class="goal__raceRow"><span class="goal__cp"></span><span class="goal__delta"></span></div>
+        <div class="goal__raceRow"><span class="goal__delta"></span><span class="goal__tab goal__cp"></span></div>
         <div class="goal__target"><i class="goal__medal"></i><span class="goal__targetText"></span></div>
       </div>
       <div class="goal__zone">
@@ -106,10 +95,10 @@ export function createObjectives(root, opts = {}) {
         <div class="goal__target"><i class="goal__medal"></i><span class="goal__zoneTarget"></span></div>
       </div>
       <div class="goal__hint"></div>
-      <div class="goal__wallet"><i class="goal__coin" aria-hidden="true">${ICONS.token}</i><b class="goal__cash">$0</b><span class="goal__lv">LV 1</span><span class="goal__xp"><i></i></span></div>
+      <div class="goal__wallet"><i class="goal__coin" aria-hidden="true">${icon('token')}</i><b class="goal__cash">$0</b><span class="goal__lv">LV 1</span><span class="goal__xp"><i></i></span></div>
       <div class="goal__next"><u class="goal__nextBar" aria-hidden="true"><i></i></u><span class="goal__nextLv"></span><i class="goal__nextIcon" aria-hidden="true"></i><span class="goal__nextText"></span></div>
       <div class="goal__daily">
-        <div class="goal__dHead"><i class="goal__dIcon" aria-hidden="true">${ICONS.daily}</i><b>DAILY</b><span class="goal__streak"></span></div>
+        <div class="goal__dHead"><b class="goal__tab"><i class="goal__dIcon" aria-hidden="true">${icon('daily')}</i>Daily</b><span class="goal__streak"><i aria-hidden="true">${icon('streak')}</i><span class="goal__streakN"></span></span></div>
         <div class="goal__dRows"></div>
       </div>
     </div>
@@ -126,9 +115,9 @@ export function createObjectives(root, opts = {}) {
     <div class="goal__count" aria-live="assertive"></div>
     <div class="goal__pops" aria-live="polite"></div>
     <div class="goal__result" role="status">
-      <div class="goal__resKind"></div>
+      <div class="goal__tab goal__resKind"></div>
       <div class="goal__resName"></div>
-      <div class="goal__resMedal"><i class="goal__medalBig"></i><b class="goal__resMedalWord"></b></div>
+      <div class="goal__resMedal"><i class="goal__medalBig" aria-hidden="true">${icon('medal')}</i><b class="goal__resMedalWord"></b></div>
       <div class="goal__resScore"></div>
       <div class="goal__resBest"></div>
       <div class="goal__resPay"></div>
@@ -152,7 +141,7 @@ export function createObjectives(root, opts = {}) {
     cash: q('.goal__cash'), lv: q('.goal__lv'), xp: q('.goal__xp i'),
     next: q('.goal__next'), nextLv: q('.goal__nextLv'), nextIcon: q('.goal__nextIcon'), nextText: q('.goal__nextText'),
     nextBar: q('.goal__nextBar i'),
-    daily: q('.goal__daily'), dRows: q('.goal__dRows'), streak: q('.goal__streak'),
+    daily: q('.goal__daily'), dRows: q('.goal__dRows'), streak: q('.goal__streak'), streakN: q('.goal__streakN'),
     chain: q('.goal__chain'), mult: q('.goal__mult'), chainVal: q('.goal__chainVal'), chainBar: q('.goal__chainBar i'),
     chainBest: q('.goal__chainBest'),
     chainEnd: q('.goal__chainEnd'), chainEndB: q('.goal__chainEnd b'), chainEndS: q('.goal__chainEnd span'),
@@ -205,7 +194,7 @@ export function createObjectives(root, opts = {}) {
     if (showObj !== last.showObj) { last.showObj = showObj; E.obj.classList.toggle('is-on', showObj); }
     if (o.kind !== last.kind) {
       last.kind = o.kind;
-      E.icon.innerHTML = ICONS[o.kind] || ICONS.nav;
+      E.icon.innerHTML = icon(o.kind);
       E.obj.dataset.kind = o.kind || 'nav';
     }
     if (o.title !== last.title) {
@@ -288,7 +277,7 @@ export function createObjectives(root, opts = {}) {
       E.next.classList.toggle('is-on', on);
       if (on) {
         E.nextLv.textContent = `NEXT AT LV ${nx.level}`;
-        E.nextIcon.innerHTML = ICONS[REWARD_ICON[nx.type] || 'level'];
+        E.nextIcon.innerHTML = icon(REWARD_ICON[nx.type] || 'level');
         E.nextText.textContent = nx.text;
         E.next.dataset.type = nx.type || '';
       }
@@ -367,6 +356,7 @@ export function createObjectives(root, opts = {}) {
     E.dRows.appendChild(r);
     dRow.push({ el: r, text: r.querySelector('.goal__dText'), num: r.querySelector('.goal__dNum'), bar: r.querySelector('.goal__dBar i') });
   }
+  let lastStreak = -1;
   const oneDp = { km: 1, air: 1, tow: 1 };
   function fmtDaily(metric, v) {
     if (oneDp[metric]) return (Math.floor(v * 10) / 10).toString();
@@ -386,10 +376,14 @@ export function createObjectives(root, opts = {}) {
       const f = d.done ? 1 : Math.max(0, Math.min(1, d.progress / Math.max(1e-6, d.target)));
       r.bar.style.transform = BAR_STR[Math.round(f * BAR_STEPS)];
     }
-    // The streak: how many days, and whether today still needs doing.
+    // The streak: how many days, and whether today still needs doing. The
+    // bolt is in the markup once; only the count's text changes, and only
+    // when it does — this runs on every daily stamp tick, about once a second
+    // while a distance daily is counting, and used to re-parse an SVG each time.
     const due = dv.streak > 0 && !dv.doneToday;
-    E.streak.innerHTML = dv.streak > 0 ? `<i aria-hidden="true">${ICONS.streak}</i>${dv.streak | 0}-DAY STREAK` : '';
-    E.streak.classList.toggle('is-on', dv.streak > 0);
+    const n = dv.streak | 0;
+    if (n !== lastStreak) { lastStreak = n; E.streakN.textContent = n > 0 ? `${n}-DAY STREAK` : ''; }
+    E.streak.classList.toggle('is-on', n > 0);
     E.streak.classList.toggle('is-due', due);
     E.streak.title = due ? 'Finish a daily today to keep your streak' : '';
   }
@@ -408,15 +402,20 @@ export function createObjectives(root, opts = {}) {
     setTimeout(() => p.remove(), 1600);
   }
 
-  // The chain's end: gold for banked, red for lost, with what it paid.
+  // The chain's end: gold for banked, with what it paid; quiet silver for one
+  // that ended in a bump. The kids hated being told off for crashing — the
+  // old card said the points were "gone" in red and shook — so an ended chain
+  // now says what to do next instead of what went wrong, and says it once,
+  // softly. The points really are not paid (skills.js is unchanged): the
+  // card just does not rub it in.
   let endTimer = 0;
   function chainEnd(kind, value, mult, xp, cash, best) {
     clearTimeout(endTimer);
     const bank = kind === 'bank';
-    E.chainEndB.textContent = bank ? `BANKED ${value.toLocaleString('en')}` : 'CHAIN LOST';
+    E.chainEndB.textContent = bank ? `BANKED ${value.toLocaleString('en')}` : 'Chain reset';
     E.chainEndS.textContent = bank
       ? `${best ? 'NEW BEST CHAIN!  ' : ''}+${xp} XP  +$${cash}`
-      : `${value.toLocaleString('en')} gone — don't crash!`;
+      : 'Bumped! Start a new one';
     E.chainEnd.className = 'goal__chainEnd';
     void E.chainEnd.offsetWidth;
     E.chainEnd.className = `goal__chainEnd is-on ${bank ? 'is-bank' : 'is-lost'}${best ? ' is-best' : ''}`;
@@ -441,8 +440,11 @@ export function createObjectives(root, opts = {}) {
       return;
     }
     const b = bannerQ.shift();
-    if (!b) { bannerOn = false; E.banner.classList.remove('is-on'); return; }
+    if (!b) { bannerOn = false; E.banner.classList.remove('is-on'); el.classList.remove('has-moment'); return; }
     bannerOn = true;
+    // The standing column steps back while a moment has the screen: on a
+    // small laptop the banner is wide enough to reach it.
+    el.classList.add('has-moment');
     E.banner.dataset.kind = b.kind;
     E.bTitle.textContent = b.title;
     E.bSub.textContent = b.sub || '';
@@ -473,7 +475,7 @@ export function createObjectives(root, opts = {}) {
   function note(kind, title, text, sub) {
     const n = doc.createElement('div');
     n.className = `goal__note goal__note--${kind}`;
-    n.innerHTML = `<i class="goal__noteIcon">${ICONS[kind] || ICONS.level}</i><div><b></b><span class="goal__noteText"></span><em></em></div>`;
+    n.innerHTML = `<i class="goal__noteIcon">${icon(kind === 'streak' || kind === 'daily' || kind === 'trophy' ? kind : 'level')}</i><div><b></b><span class="goal__noteText"></span><em></em></div>`;
     n.querySelector('b').textContent = title;
     n.querySelector('.goal__noteText').textContent = text || '';
     n.querySelector('em').textContent = sub || '';
@@ -511,7 +513,7 @@ export function createObjectives(root, opts = {}) {
   function popup(kind, title, sub) {
     const p = doc.createElement('div');
     p.className = `goal__pop goal__pop--${kind}`;
-    p.innerHTML = `<i class="goal__popIcon">${ICONS[kind] || ICONS.nav}</i><div><b></b><span></span></div>`;
+    p.innerHTML = `<i class="goal__popIcon">${icon(kind)}</i><div><b></b><span></span></div>`;
     p.querySelector('b').textContent = title;
     p.querySelector('span').textContent = sub || '';
     E.pops.appendChild(p);
@@ -523,11 +525,11 @@ export function createObjectives(root, opts = {}) {
   function result(r) {
     E.res.dataset.medal = String(r.medal);
     E.res.dataset.kind = r.kind;
-    E.resKind.textContent = r.kind === 'race' ? 'FINISH' : KIND_WORD[r.kind] || '';
+    E.resKind.textContent = r.kind === 'race' ? 'Finish' : KIND_WORD[r.kind] || '';
     E.resName.textContent = r.name;
     E.resMedalWord.textContent = MEDAL_WORD[r.medal] || '';
     E.resScore.textContent = r.score;
-    E.resBest.textContent = r.newBest ? `NEW BEST!  was ${r.prevBest}` : r.first ? 'FIRST RUN' : r.best ? `Best ${r.best}` : '';
+    E.resBest.textContent = r.newBest ? `New best  ·  was ${r.prevBest}` : r.first ? 'First run' : r.best ? `Best ${r.best}` : '';
     E.resBest.classList.toggle('is-new', !!r.newBest);
     const pay = [];
     if (r.cash) pay.push(`+${fmtCash(r.cash)}`);
@@ -548,14 +550,26 @@ export function createObjectives(root, opts = {}) {
   function controls(show, touch) {
     clearTimeout(controlsTimer);
     if (!show) { E.controls.classList.remove('is-on'); return; }
+    // A two-column key table: the keys on the left, what they do on the
+    // right, so the eye runs down one column to find a key.
     E.controls.innerHTML = touch
-      ? `<b>How to drive</b>
-         <div class="goal__keys"><span><kbd>Right pedal</kbd> go</span><span><kbd>Left pedal</kbd> brake</span><span><kbd>Wheel</kbd> steer</span></div>
-         <p>Follow the <em>blue arrows</em> to your first race.</p>`
-      : `<b>How to drive</b>
+      ? `<b class="goal__tab">How to drive</b>
          <div class="goal__keys">
-           <span><kbd>W</kbd> go</span><span><kbd>S</kbd> brake</span><span><kbd>A</kbd><kbd>D</kbd> steer</span>
-           <span><kbd>Space</kbd> handbrake</span><span><kbd>R</kbd> back on the road</span><span><kbd>G</kbd> next goal</span><span><kbd>M</kbd> map</span>
+           <span><kbd>Right pad</kbd></span><span>go</span>
+           <span><kbd>Left pad</kbd></span><span>brake</span>
+           <span><kbd>Wheel</kbd></span><span>steer: drag left and right</span>
+           <span><kbd>Road</kbd></span><span>back on the road</span>
+         </div>
+         <p>Follow the <em>blue arrows</em> to your first race.</p>`
+      : `<b class="goal__tab">How to drive</b>
+         <div class="goal__keys">
+           <span><kbd>W</kbd></span><span>go</span>
+           <span><kbd>S</kbd></span><span>brake</span>
+           <span><kbd>A</kbd><kbd>D</kbd></span><span>steer</span>
+           <span><kbd>Space</kbd></span><span>handbrake</span>
+           <span><kbd>R</kbd></span><span>back on the road</span>
+           <span><kbd>G</kbd></span><span>next goal</span>
+           <span><kbd>M</kbd></span><span>map</span>
          </div>
          <p>Follow the <em>blue arrows</em> to your first race.</p>`;
     E.controls.classList.remove('is-on');

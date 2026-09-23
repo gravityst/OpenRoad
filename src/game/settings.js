@@ -38,6 +38,11 @@ export const DEFAULT_SETTINGS = {
   name: '',
   nameTags: true,
   multiplayer: true,
+  // Steps the render resolution and post tier down when the frame rate
+  // cannot hold, and back up when it can (src/core/adaptive.js). On by
+  // default: a kid on a school laptop should get a smooth game without
+  // knowing there is a setting for it.
+  autoQuality: true,
 };
 
 export function loadSettings() {

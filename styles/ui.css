@@ -1,71 +1,151 @@
-/* OPEN ROAD — front end.
+/* OPEN ROAD — the front end, and the design system every screen shares.
  *
- * Everything is scoped under .or-ui so nothing here can reach the game canvas.
+ * ONE DIRECTION: MOTORSPORT BROADCAST GRAPHICS. The on-screen furniture of a
+ * rally or touring-car broadcast — dark slabs with one cut corner, a leaning
+ * coloured tab over each, condensed capitals and precise tabular numbers — set
+ * in the Gravity Studios colours: the studio's deep navy and brushed silver,
+ * its electric blue for anything selected or in progress, and OPEN ROAD's own
+ * signal yellow, which means exactly one thing everywhere: "do this".
  *
- * The palette is sodium-lamp amber over wet-asphalt blue-grey, and every
- * surface is glass rather than paint: main.js keeps rendering the world behind
- * the menu, and an opaque panel would throw that away. Where a panel needs to
- * be readable it earns it with a blur and a gradient, not with opacity 1.
+ * The grammar, used everywhere and nowhere broken:
+ *   - SLABS, not glass. Near-opaque navy with the top-right corner cut at
+ *     45 degrees and a silver hairline across the top. No backdrop blur: it
+ *     re-blurs the live 3D world under every panel on every frame, and a
+ *     frosted card is the most generic thing a web page can show.
+ *   - THE TAB. A label on a parallelogram leaning at the logotype's 12
+ *     degrees. It heads every panel and names every section.
+ *   - PARALLELOGRAM BUTTONS. The shape is a skewed ::before, not a clip-path,
+ *     so its focus ring and its edge follow the lean; the words stay upright.
+ *   - CONDENSED CAPITALS for anything that labels; the body face only for a
+ *     sentence. Numbers always in the DIN face with tabular figures, so a
+ *     ticking value never shuffles its neighbours.
+ *   - MOTION is quick and directional: things slide in from the side they
+ *     belong to, 120-220 ms, and nothing bounces unless it is a reward.
  *
- * Motion is deliberately small — a fade and a few pixels of travel. A menu that
- * animates for 400 ms is a menu you wait for, and this one sits between the
- * player and the car.
+ * The tokens live on :root rather than on .or-ui because hud.css, goals.css
+ * and touch.css read the same ones: the HUD in the corner and the pause card
+ * over it are the same product, so they are drawn from the same palette.
  */
 
+:root {
+  /* ---- ink ---- */
+  --or-night: #04070e;                       /* the splash's background */
+  --or-navy: #0a1122;
+  --or-slab: rgba(7, 11, 22, 0.90);
+  --or-slab-hi: rgba(16, 25, 46, 0.94);
+  --or-slab-lo: rgba(7, 11, 22, 0.66);
+  --or-rule: rgba(148, 170, 205, 0.16);
+  --or-rule-hi: rgba(196, 212, 236, 0.34);
+  --or-sheen: linear-gradient(90deg, rgba(220, 230, 245, 0.55), rgba(220, 230, 245, 0.08) 60%, transparent);
+
+  /* ---- text ---- */
+  --or-text: #eef2f8;
+  --or-text-2: #a9b6c9;                      /* brushed silver */
+  --or-text-3: #6d7c94;
+
+  /* ---- colour that means something ---- */
+  --or-signal: #ffc21f;                      /* act: Play, Buy, Resume */
+  --or-signal-hi: #ffd452;
+  --or-signal-ink: #0b1222;
+  --or-volt: #3c8cff;                        /* the studio blue: selected, in progress */
+  --or-volt-hi: #7db2ff;
+  --or-good: #3ddc84;
+  --or-warn: #ff6b5b;
+  --or-gps: #4fd8f0;                         /* the GPS, same cyan as the arrows on the road */
+  /* Challenge kinds. The same four hues are the gates in the world
+     (render/gates.js), the pins on the map and the bars here. */
+  --or-k-race: #ffb43c;
+  --or-k-trap: #ff5a5a;
+  --or-k-jump: #4fe38a;
+  --or-k-drift: #e45cff;
+  --or-k-token: #ffcf3a;
+  --or-gold: #ffd23f;
+  --or-silver: #dde5ee;
+  --or-bronze: #df9c64;
+
+  /* ---- type ----
+     Condensed faces are system fonts on every platform the kids use: Avenir
+     Next Condensed on Macs and iPads, Bahnschrift on Windows, Roboto
+     Condensed and Android's condensed sans elsewhere. DIN Alternate is the
+     numeral face on Apple hardware; Bahnschrift is DIN-derived on Windows. */
+  --or-f-display: "Avenir Next Condensed", "Bahnschrift SemiCondensed", "Bahnschrift",
+    "DIN Condensed", "Roboto Condensed", "Arial Narrow", sans-serif-condensed, system-ui, sans-serif;
+  --or-f-num: "DIN Alternate", "Bahnschrift", "Roboto Condensed", "Avenir Next Condensed",
+    system-ui, sans-serif;
+  --or-f-body: "Avenir Next", "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
+  /* A 1.2 scale from 11 px. */
+  --or-t-xs: 0.6875rem;
+  --or-t-s: 0.8125rem;
+  --or-t-m: 0.9375rem;
+  --or-t-l: 1.125rem;
+  --or-t-xl: 1.375rem;
+  --or-t-2xl: 1.75rem;
+  --or-t-3xl: 2.25rem;
+  --or-t-4xl: 3rem;
+
+  /* ---- space, shape, motion ---- */
+  --or-s1: 4px;
+  --or-s2: 8px;
+  --or-s3: 12px;
+  --or-s4: 16px;
+  --or-s5: 24px;
+  --or-s6: 32px;
+  --or-s7: 48px;
+  --or-cut: 12px;                            /* the chamfer on every slab */
+  --or-lean: -12deg;                         /* the logotype's lean */
+  --or-ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --or-ease-back: cubic-bezier(0.3, 1.45, 0.5, 1);
+  --or-fast: 120ms;
+  --or-med: 200ms;
+}
+
 .or-ui {
-  --or-amber: #ffb43c;
-  --or-amber-deep: #ff8a3c;
-  --or-cyan: #6fd0e8;
-  --or-danger: #ff6b5e;
-
-  --or-text: #eef2f6;
-  --or-text-2: rgba(238, 242, 246, 0.66);
-  --or-text-3: rgba(238, 242, 246, 0.40);
-
-  --or-glass: rgba(11, 15, 21, 0.58);
-  --or-glass-2: rgba(16, 21, 29, 0.74);
-  --or-line: rgba(255, 255, 255, 0.10);
-  --or-line-hi: rgba(255, 255, 255, 0.22);
-  --or-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
-
-  --or-display: "Helvetica Neue", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
-  --or-body: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  --or-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-
-  --or-r: 14px;
-  --or-pad: clamp(16px, 3vw, 34px);
-  --or-ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --or-pad: clamp(16px, 3.2vw, 40px);
+  --or-pad-t: calc(var(--or-pad) + env(safe-area-inset-top, 0px));
+  --or-pad-r: calc(var(--or-pad) + env(safe-area-inset-right, 0px));
+  --or-pad-b: calc(var(--or-pad) + env(safe-area-inset-bottom, 0px));
+  --or-pad-l: calc(var(--or-pad) + env(safe-area-inset-left, 0px));
 
   position: fixed;
   inset: 0;
   z-index: 40;
-  font-family: var(--or-body);
+  font-family: var(--or-f-body);
   color: var(--or-text);
   pointer-events: none;
   -webkit-font-smoothing: antialiased;
   -webkit-tap-highlight-color: transparent;
+  font-variant-numeric: tabular-nums;
 }
 
 .or-ui *,
 .or-ui *::before,
 .or-ui *::after { box-sizing: border-box; }
+.or-ui svg { display: block; }
+.or-ui [hidden] { display: none !important; }
 
-/* A single vignette shared by every screen, so switching screens does not
-   flash the world darker and lighter. */
+/* One scrim shared by every screen, so moving between screens never flashes
+   the world lighter and darker. The title's is weighted to the left, where the
+   words are, and leaves the car driving past on the right in full colour. */
 .or-wash {
   position: absolute;
   inset: 0;
   background:
-    radial-gradient(120% 90% at 50% 0%, rgba(4, 7, 12, 0.10), rgba(4, 7, 12, 0.62) 100%),
-    linear-gradient(to top, rgba(4, 7, 12, 0.80), rgba(4, 7, 12, 0.10) 55%);
-  opacity: 1;
+    linear-gradient(to top, rgba(4, 7, 14, 0.86), rgba(4, 7, 14, 0.30) 42%, rgba(4, 7, 14, 0.55)),
+    rgba(4, 7, 14, 0.28);
   transition: opacity 0.28s var(--or-ease);
 }
 .or-ui[data-screen=""] .or-wash { opacity: 0; }
 .or-ui[data-screen="title"] .or-wash {
   background:
-    radial-gradient(90% 70% at 78% 22%, rgba(4, 7, 12, 0), rgba(4, 7, 12, 0.55) 100%),
-    linear-gradient(to top, rgba(4, 7, 12, 0.88), rgba(4, 7, 12, 0.05) 62%);
+    linear-gradient(90deg, rgba(4, 7, 14, 0.90) 0%, rgba(4, 7, 14, 0.62) 30%, rgba(4, 7, 14, 0) 58%),
+    linear-gradient(to top, rgba(4, 7, 14, 0.80), rgba(4, 7, 14, 0) 34%),
+    linear-gradient(to bottom, rgba(4, 7, 14, 0.45), rgba(4, 7, 14, 0) 22%);
+}
+/* The garage is about the car: only the edges darken. */
+.or-ui[data-screen="garage"] .or-wash {
+  background:
+    linear-gradient(90deg, rgba(4, 7, 14, 0.78), rgba(4, 7, 14, 0) 26%, rgba(4, 7, 14, 0) 64%, rgba(4, 7, 14, 0.82)),
+    linear-gradient(to top, rgba(4, 7, 14, 0.78), rgba(4, 7, 14, 0) 30%);
 }
 
 /* ---- screens ----------------------------------------------------------- */
@@ -75,182 +155,676 @@
   inset: 0;
   display: flex;
   flex-direction: column;
-  padding: var(--or-pad);
+  padding: var(--or-pad-t) var(--or-pad-r) var(--or-pad-b) var(--or-pad-l);
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
-  transform: translateY(6px);
-  transition: opacity 0.22s var(--or-ease), transform 0.22s var(--or-ease), visibility 0.22s;
+  transform: translateX(-10px);
+  transition: opacity var(--or-med) var(--or-ease), transform var(--or-med) var(--or-ease), visibility 0s linear var(--or-med);
 }
 .or-screen.is-on {
   opacity: 1;
   visibility: visible;
   pointer-events: auto;
   transform: none;
+  transition: opacity var(--or-med) var(--or-ease), transform var(--or-med) var(--or-ease), visibility 0s;
 }
 
-/* ---- type -------------------------------------------------------------- */
+/* ---- type primitives --------------------------------------------------- */
 
-.or-eyebrow {
+/* THE TAB: a leaning label. Yellow by default; --tab and --tab-ink recolour it. */
+.or-tab {
+  --tab: var(--or-signal);
+  --tab-ink: var(--or-signal-ink);
+  position: relative;
+  isolation: isolate;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  justify-self: start;
+  height: 22px;
   margin: 0;
-  font-size: 0.72rem;
-  font-weight: 600;
-  letter-spacing: 0.22em;
+  padding: 0 12px 0 11px;
+  color: var(--tab-ink);
+  font: 700 var(--or-t-xs)/1 var(--or-f-display);
+  letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: var(--or-amber);
+  white-space: nowrap;
 }
+.or-tab::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: var(--tab);
+  transform: skewX(var(--or-lean));
+}
+.or-tab svg { width: 13px; height: 13px; }
+.or-tab--volt { --tab: var(--or-volt); --tab-ink: #fff; }
+.or-tab--dim { --tab: rgba(169, 182, 201, 0.16); --tab-ink: var(--or-text-2); }
+
 .or-screen-title {
   margin: 0;
-  font-family: var(--or-display);
-  font-size: clamp(1.05rem, 2.2vw, 1.5rem);
-  font-weight: 700;
-  letter-spacing: 0.14em;
+  font: italic 800 clamp(1.6rem, 3vw, 2.4rem)/0.95 var(--or-f-display);
+  letter-spacing: 0.01em;
   text-transform: uppercase;
 }
 .or-hint {
   margin: 0;
-  font-size: 0.78rem;
+  font: 500 var(--or-t-s)/1.4 var(--or-f-body);
   color: var(--or-text-3);
 }
 .or-ui kbd {
-  display: inline-block;
-  min-width: 1.55em;
-  padding: 0.16em 0.4em;
+  display: inline-grid;
+  place-items: center;
+  min-width: 1.7em;
+  height: 1.7em;
+  padding: 0 0.4em;
   margin: 0 0.12em;
-  border: 1px solid var(--or-line-hi);
-  border-radius: 5px;
-  background: rgba(255, 255, 255, 0.06);
-  font: 600 0.72rem/1.3 var(--or-mono);
-  text-align: center;
-  color: var(--or-text-2);
+  border: 1px solid var(--or-rule-hi);
+  border-bottom-width: 2px;
+  background: rgba(238, 242, 248, 0.06);
+  color: var(--or-text);
+  font: 700 0.72rem/1 var(--or-f-num);
+  vertical-align: middle;
+}
+.or-num { font-family: var(--or-f-num); font-variant-numeric: tabular-nums; }
+
+/* ---- slabs ------------------------------------------------------------- */
+
+.or-slab,
+.or-carlist-wrap,
+.or-spec,
+.or-card,
+.or-group,
+.or-map-frame,
+.or-career,
+.or-nextup {
+  position: relative;
+  background: var(--or-slab);
+  clip-path: polygon(0 0, calc(100% - var(--or-cut)) 0, 100% var(--or-cut), 100% 100%, 0 100%);
+}
+/* The hairline across the top: brushed metal catching the light from the left. */
+.or-slab::before,
+.or-carlist-wrap::before,
+.or-spec::before,
+.or-card::before,
+.or-group::before,
+.or-map-frame::before,
+.or-career::before,
+.or-nextup::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: var(--or-cut);
+  height: 1px;
+  background: var(--or-sheen);
+  pointer-events: none;
 }
 
 /* ---- buttons ----------------------------------------------------------- */
 
 .or-btn {
+  --face: rgba(238, 242, 248, 0.07);
+  --edge: var(--or-rule-hi);
+  --ink: var(--or-text);
+  position: relative;
+  isolation: isolate;
   appearance: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 0.5em;
+  gap: 10px;
   min-height: 46px;
-  padding: 0 1.5em;
-  border: 1px solid var(--or-line-hi);
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.06);
-  color: var(--or-text);
-  font: 700 0.82rem/1 var(--or-body);
-  letter-spacing: 0.14em;
+  margin: 0 6px;                               /* room for the lean */
+  padding: 0 22px;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  font: 700 var(--or-t-m)/1 var(--or-f-display);
+  letter-spacing: 0.12em;
   text-transform: uppercase;
+  white-space: nowrap;
   cursor: pointer;
-  backdrop-filter: blur(10px);
-  transition: background 0.16s var(--or-ease), border-color 0.16s var(--or-ease),
-              transform 0.12s var(--or-ease), color 0.16s var(--or-ease);
+  transition: color var(--or-fast) var(--or-ease), transform var(--or-fast) var(--or-ease);
 }
-.or-btn:hover { background: rgba(255, 255, 255, 0.13); border-color: rgba(255, 255, 255, 0.34); }
+.or-btn::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: var(--face);
+  box-shadow: inset 0 0 0 1px var(--edge);
+  transform: skewX(var(--or-lean));
+  transition: background var(--or-fast) var(--or-ease), box-shadow var(--or-fast) var(--or-ease);
+}
+.or-btn svg { width: 16px; height: 16px; flex: none; }
+.or-btn:hover { --face: rgba(238, 242, 248, 0.14); --edge: rgba(238, 242, 248, 0.5); }
 .or-btn:active { transform: translateY(1px); }
 
 .or-btn--primary {
-  border-color: transparent;
-  background: linear-gradient(135deg, var(--or-amber), var(--or-amber-deep));
-  color: #17120a;
-  box-shadow: 0 10px 28px rgba(255, 150, 60, 0.26);
-}
-.or-btn--primary:hover {
-  background: linear-gradient(135deg, #ffc45f, #ff9a4f);
-  border-color: transparent;
-}
-.or-btn--xl {
-  min-height: 62px;
-  padding: 0 2.6em;
-  font-size: 1rem;
-  letter-spacing: 0.24em;
-  border-radius: 12px;
-}
-.or-btn--ghost { background: rgba(255, 255, 255, 0.04); }
-.or-btn--quiet {
-  border-color: transparent;
-  background: none;
-  color: var(--or-text-3);
-  backdrop-filter: none;
-}
-.or-btn--quiet:hover { background: rgba(255, 255, 255, 0.07); color: var(--or-text); }
-
-.or-back {
-  appearance: none;
-  width: 44px;
-  height: 44px;
-  flex: 0 0 auto;
-  border: 1px solid var(--or-line);
-  border-radius: 50%;
-  background: var(--or-glass);
-  color: var(--or-text);
-  font-size: 1.1rem;
-  line-height: 1;
-  cursor: pointer;
-  backdrop-filter: blur(10px);
-  transition: background 0.16s var(--or-ease), border-color 0.16s var(--or-ease);
-}
-.or-back:hover { background: rgba(255, 255, 255, 0.14); border-color: var(--or-line-hi); }
-
-/* One focus treatment everywhere: a ring that reads on glass and on amber. */
-.or-ui :focus-visible {
-  outline: 2px solid var(--or-amber);
-  outline-offset: 3px;
-  border-radius: 8px;
-}
-.or-ui :focus:not(:focus-visible) { outline: none; }
-
-/* ---- title ------------------------------------------------------------- */
-
-.or-title { justify-content: flex-end; }
-.or-title-inner { max-width: min(640px, 92%); }
-
-.or-wordmark {
-  margin: 0.28em 0 0;
-  font-family: var(--or-display);
-  font-size: clamp(3.2rem, 12vw, 8.5rem);
+  --face: var(--or-signal);
+  --edge: transparent;
+  --ink: var(--or-signal-ink);
   font-weight: 800;
-  line-height: 0.86;
-  letter-spacing: -0.02em;
-  text-transform: uppercase;
+}
+.or-btn--primary:hover { --face: var(--or-signal-hi); --edge: transparent; }
+.or-btn--ghost { --face: rgba(7, 11, 22, 0.72); }
+.or-btn--quiet { --face: transparent; --edge: transparent; --ink: var(--or-text-2); }
+.or-btn--quiet:hover { --face: rgba(238, 242, 248, 0.08); --edge: transparent; --ink: var(--or-text); }
+/* Quiet at rest — it is not something to press by accident or out of
+   curiosity — and red only under the pointer and once armed. */
+.or-btn--danger:hover { --ink: var(--or-warn); }
+.or-btn--danger.is-armed { --face: var(--or-warn); --edge: transparent; --ink: #fff; }
+.or-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.or-btn[hidden] { display: none; }
+
+/* Back: a leaning square with the chevron in it. */
+.or-back {
+  position: relative;
+  isolation: isolate;
+  appearance: none;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 46px;
+  height: 46px;
+  margin: 0 4px 0 2px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--or-text);
+  cursor: pointer;
+}
+.or-back::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: var(--or-slab);
+  box-shadow: inset 0 0 0 1px var(--or-rule-hi);
+  transform: skewX(var(--or-lean));
+  transition: background var(--or-fast) var(--or-ease);
+}
+.or-back svg { width: 18px; height: 18px; }
+.or-back:hover::before { background: var(--or-slab-hi); }
+
+/* ONE FOCUS TREATMENT. The outline is replaced by a ring on the leaning face,
+   so it follows the shape; for plain elements the outline itself is used. */
+.or-ui :focus-visible { outline: 2px solid var(--or-volt-hi); outline-offset: 3px; }
+.or-ui :focus:not(:focus-visible) { outline: none; }
+.or-btn:focus-visible,
+.or-back:focus-visible,
+.or-navrow:focus-visible,
+.or-play:focus-visible { outline: none; }
+.or-btn:focus-visible::before,
+.or-back:focus-visible::before {
+  box-shadow: inset 0 0 0 1px var(--edge, transparent), 0 0 0 2px var(--or-night), 0 0 0 4px var(--or-volt-hi);
+}
+
+/* ---- the title ---------------------------------------------------------- */
+
+.or-title { padding: 0; }
+
+/* The whole title is one grid, so anything another module inserts into it
+   (the friends-online badge from roster.js, which goes in before the menu)
+   can be placed by name instead of landing wherever it was appended.
+
+   NOTHING ON IT CAN OVERLAP OR FALL OFF. The menu's row never shrinks below
+   its content (min-content, not 0: a zero minimum let PLAY and four rows,
+   262 px, be squeezed into 190 and run under the key strip), and the grid
+   scrolls if a window is shorter than everything on it. The short-window
+   rule below makes that rare; this makes it harmless. uicheck holds every
+   layout of this grid to the same rule. */
+.or-title-inner {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-columns: minmax(300px, 440px) minmax(0, 1fr) minmax(290px, 360px);
+  grid-template-rows: auto auto minmax(min-content, 1fr) auto;
+  grid-template-areas:
+    "brand  .  friends"
+    "next   .  career"
+    "menu   .  career"
+    "foot   foot foot";
+  column-gap: var(--or-s6);
+  padding: var(--or-pad-t) var(--or-pad-r) var(--or-pad-b) var(--or-pad-l);
+  overflow: hidden auto;
+  overscroll-behavior: contain;
+  /* The page is touch-action: none so a thumb never scrolls the game; a
+     list that does scroll has to say so, or on a tablet it cannot. */
+  touch-action: pan-y;
+  scrollbar-width: thin;
+  scrollbar-color: var(--or-rule-hi) transparent;
+  pointer-events: none;
+}
+.or-title-inner > * { pointer-events: auto; }
+
+.or-brand {
+  grid-area: brand;
   display: flex;
   flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: clamp(16px, 3.4vh, 34px);
 }
-.or-word { color: rgba(238, 242, 246, 0.55); }
-.or-word--hi {
-  color: var(--or-text);
-  text-shadow: 0 0 42px rgba(255, 180, 60, 0.35);
-}
-.or-word--hi::after {
-  content: "";
-  display: block;
-  width: 3.2em;
-  height: 3px;
-  margin-top: 0.16em;
-  background: linear-gradient(to right, var(--or-amber), rgba(255, 180, 60, 0));
-}
-
-.or-tagline {
-  margin: 1.1rem 0 0;
-  max-width: 26ch;
-  font-size: clamp(0.95rem, 1.7vw, 1.15rem);
-  line-height: 1.5;
+.or-logo { display: block; overflow: visible; }
+.or-logo__open { fill: var(--or-text); }
+.or-logo__road { fill: var(--or-signal); }
+/* The stacked logotype is sized by the window's height as well as its width.
+   Everything else on the title's left column needs 607 px at 1440 wide
+   (measured: 811 px in all at 801 tall, 204 of it logotype), so the logotype
+   gets what is left, less 13 px, as a width at its 1.62:1 aspect: 330 wide
+   from 824 px tall down, 274 on a MacBook Air's 789. Under 775 px it would
+   be smaller than the one-line cut, and that takes over (below). */
+.or-brand .or-logo { width: clamp(190px, min(26vw, calc((100vh - 620px) * 1.62)), 330px); height: auto; }
+/* Two cuts of the logotype are on the page; a phone on its side, with no
+   height to spare, gets the one-line one. */
+.or-brand .or-logo--line { display: none; }
+.or-strap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  font: 600 var(--or-t-s)/1 var(--or-f-display);
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
   color: var(--or-text-2);
 }
-.or-title-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 12px 16px;
-  margin-top: clamp(20px, 4vh, 40px);
+.or-strap::before {
+  content: "";
+  width: 28px;
+  height: 2px;
+  background: var(--or-signal);
+  transform: skewX(var(--or-lean));
 }
-.or-title-secondary { display: flex; flex-wrap: wrap; gap: 10px; }
-.or-title-foot {
-  margin: clamp(18px, 4vh, 34px) 0 0;
-  font-size: 0.76rem;
+
+/* ---- next up ---- */
+.or-nextup {
+  --k: var(--or-gps);
+  grid-area: next;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto;
+  align-items: center;
+  gap: 10px 14px;
+  margin-bottom: var(--or-s4);
+  padding: 14px 18px 14px 16px;
+  box-shadow: inset 3px 0 0 var(--k);
+}
+.or-nextup[data-kind="race"] { --k: var(--or-k-race); }
+.or-nextup[data-kind="trap"] { --k: var(--or-k-trap); }
+.or-nextup[data-kind="jump"] { --k: var(--or-k-jump); }
+.or-nextup[data-kind="drift"] { --k: var(--or-k-drift); }
+.or-nextup .or-tab { grid-column: 1 / -1; --tab: var(--k); }
+.or-nextup-icon { width: 34px; height: 34px; color: var(--k); }
+.or-nextup-icon svg { width: 100%; height: 100%; }
+.or-nextup-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.or-nextup-name {
+  font: italic 800 var(--or-t-xl)/1 var(--or-f-display);
+  text-transform: uppercase;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.or-nextup-meta {
+  font: 600 var(--or-t-s)/1.2 var(--or-f-display);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--or-text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.or-nextup-goal {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  padding-left: 14px;
+  border-left: 1px solid var(--or-rule);
+}
+.or-nextup-goal small {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font: 700 var(--or-t-xs)/1 var(--or-f-display);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
   color: var(--or-text-3);
 }
+.or-nextup-goal b { font: 700 var(--or-t-xl)/1 var(--or-f-num); color: var(--or-text); }
+
+/* ---- the menu ---- */
+.or-title-actions {
+  grid-area: menu;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  align-self: start;
+}
+
+/* PLAY: the one yellow thing on the screen. */
+.or-play {
+  position: relative;
+  isolation: isolate;
+  appearance: none;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: auto auto;
+  align-items: center;
+  column-gap: 14px;
+  min-height: 74px;
+  margin: 0 10px 8px 8px;
+  padding: 10px 24px 10px 26px;
+  border: 0;
+  background: none;
+  color: var(--or-signal-ink);
+  text-align: left;
+  cursor: pointer;
+  transition: transform var(--or-fast) var(--or-ease);
+}
+.or-play::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: var(--or-signal);
+  transform: skewX(var(--or-lean));
+  transition: background var(--or-fast) var(--or-ease), box-shadow var(--or-fast) var(--or-ease);
+}
+/* A second, darker sliver behind it: the "shadow" of a broadcast bar. */
+.or-play::after {
+  content: "";
+  position: absolute;
+  inset: 6px -8px -6px 8px;
+  z-index: -2;
+  background: rgba(255, 194, 31, 0.26);
+  transform: skewX(var(--or-lean));
+}
+.or-play:hover::before { background: var(--or-signal-hi); }
+.or-play:active { transform: translateY(1px); }
+.or-play:focus-visible::before { box-shadow: 0 0 0 2px var(--or-night), 0 0 0 4px var(--or-volt-hi); }
+.or-play-label {
+  font: italic 800 2.4rem/0.9 var(--or-f-display);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+.or-play-sub {
+  grid-row: 2;
+  margin-top: 4px;
+  font: 700 var(--or-t-s)/1.1 var(--or-f-display);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  opacity: 0.72;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.or-play-sub:empty { display: none; }
+.or-play > svg { grid-row: 1 / 3; grid-column: 2; width: 30px; height: 30px; }
+.or-play:hover > svg { animation: or-nudge 0.6s var(--or-ease) infinite alternate; }
+@keyframes or-nudge { to { transform: translateX(4px); } }
+
+.or-title-menu { display: flex; flex-direction: column; gap: 2px; }
+
+/* A menu row: icon, name, one line of what is behind it, and a chevron. */
+.or-navrow {
+  position: relative;
+  appearance: none;
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  min-height: 52px;
+  padding: 6px 16px 6px 18px;
+  border: 0;
+  background: linear-gradient(90deg, rgba(7, 11, 22, 0.86), rgba(7, 11, 22, 0.62));
+  color: var(--or-text);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--or-fast) var(--or-ease), padding var(--or-fast) var(--or-ease);
+}
+/* The marker on the left edge: silver at rest, yellow and taller on the row
+   you are on — the one place the eye goes when choosing. */
+.or-navrow::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 4px;
+  height: 40%;
+  background: var(--or-text-3);
+  transform: translateY(-50%) skewX(var(--or-lean));
+  transition: height var(--or-fast) var(--or-ease), background var(--or-fast) var(--or-ease);
+}
+.or-navrow > svg:first-child { width: 22px; height: 22px; color: var(--or-text-2); transition: color var(--or-fast) var(--or-ease); }
+.or-navrow > svg:last-child { width: 14px; height: 14px; color: var(--or-text-3); opacity: 0; transform: translateX(-6px); transition: opacity var(--or-fast) var(--or-ease), transform var(--or-fast) var(--or-ease); }
+.or-navrow-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.or-navrow-text b {
+  font: 700 var(--or-t-l)/1 var(--or-f-display);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.or-navrow-text small {
+  font: 500 var(--or-t-xs)/1.2 var(--or-f-display);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--or-text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.or-navrow-text small:empty { display: none; }
+.or-navrow:hover,
+.or-navrow:focus-visible {
+  background: linear-gradient(90deg, rgba(16, 25, 46, 0.96), rgba(16, 25, 46, 0.55));
+  padding-left: 22px;
+}
+.or-navrow:hover::before,
+.or-navrow:focus-visible::before { height: 100%; background: var(--or-signal); }
+.or-navrow:hover > svg:first-child,
+.or-navrow:focus-visible > svg:first-child { color: var(--or-signal); }
+.or-navrow:hover > svg:last-child,
+.or-navrow:focus-visible > svg:last-child { opacity: 1; transform: none; }
+.or-navrow:focus-visible { box-shadow: inset 0 0 0 1px var(--or-volt-hi); }
+.or-navrow[hidden] { display: none; }
+
+.or-title-foot {
+  grid-area: foot;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--or-s4);
+  margin: var(--or-s4) 0 0;
+  font: 600 var(--or-t-xs)/1 var(--or-f-display);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--or-text-3);
+}
+.or-keys { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; }
+.or-keys span { display: inline-flex; align-items: center; gap: 4px; }
+.or-credit { color: var(--or-text-3); letter-spacing: 0.3em; }
+
+/* ---- the career slab ---- */
+.or-career {
+  grid-area: career;
+  align-self: end;
+  display: flex;
+  flex-direction: column;
+  gap: var(--or-s4);
+  padding: 16px 18px 18px;
+  color: var(--or-text);
+}
+.or-career-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.or-career-name {
+  font: 700 var(--or-t-s)/1 var(--or-f-display);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--or-text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.or-career-level {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  align-items: end;
+  column-gap: 14px;
+  row-gap: 7px;
+}
+/* The level number in a leaning plate, like a car's race number. */
+.or-career-lv {
+  grid-row: 1 / 3;
+  position: relative;
+  isolation: isolate;
+  display: grid;
+  place-items: center;
+  min-width: 58px;
+  height: 58px;
+  padding: 0 10px;
+  color: #fff;
+}
+.or-career-lv::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: var(--or-volt);
+  transform: skewX(var(--or-lean));
+}
+.or-career-lv small {
+  position: absolute;
+  top: 5px;
+  left: 0;
+  right: 0;
+  text-align: center;
+  font: 700 9px/1 var(--or-f-display);
+  letter-spacing: 0.2em;
+  opacity: 0.8;
+}
+.or-career-lv b { margin-top: 8px; font: 700 1.9rem/1 var(--or-f-num); }
+.or-career-xpnum {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font: 700 var(--or-t-xs)/1 var(--or-f-display);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--or-text-3);
+}
+.or-career-xpnum b { font: 700 var(--or-t-s)/1 var(--or-f-num); color: var(--or-text); letter-spacing: 0; }
+/* Segmented, like a rev strip: ten cells, each a tenth of the level. */
+.or-meter {
+  --v: 0;
+  position: relative;
+  height: 10px;
+  background:
+    repeating-linear-gradient(90deg, transparent 0 calc(10% - 2px), var(--or-slab) calc(10% - 2px) 10%),
+    linear-gradient(90deg, var(--or-volt) 0 calc(var(--v) * 100%), rgba(238, 242, 248, 0.10) calc(var(--v) * 100%));
+  transform: skewX(var(--or-lean));
+}
+
+.or-career-next {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 2px 12px;
+  margin: 0;
+  padding: 10px 12px;
+  background: rgba(238, 242, 248, 0.05);
+  box-shadow: inset 2px 0 0 var(--or-signal);
+}
+.or-career-next > svg,
+.or-career-next > i { grid-row: 1 / 3; width: 24px; height: 24px; color: var(--or-signal); }
+.or-career-next[data-type="car"] { box-shadow: inset 2px 0 0 var(--or-good); }
+.or-career-next[data-type="car"] > svg { color: var(--or-good); }
+.or-career-next small {
+  font: 700 var(--or-t-xs)/1 var(--or-f-display);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--or-text-3);
+}
+.or-career-next b {
+  font: 700 var(--or-t-m)/1.15 var(--or-f-display);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.or-career-chip {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-right: 6px;
+  vertical-align: -1px;
+  transform: skewX(var(--or-lean));
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.5);
+}
+.or-career-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font: 700 var(--or-t-xs)/1 var(--or-f-display);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--or-text-3);
+}
+.or-career-foot b { font: 700 var(--or-t-s)/1 var(--or-f-num); color: var(--or-gold); letter-spacing: 0; }
+
+/* ---- today's dailies: one list the title and the pause card share ---- */
+.or-daily { display: flex; flex-direction: column; gap: 10px; text-align: left; }
+.or-daily-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0; }
+.or-streak {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font: 700 var(--or-t-xs)/1 var(--or-f-display);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--or-gold);
+}
+.or-streak svg { width: 13px; height: 13px; }
+.or-streak.is-due { animation: or-due 1.6s ease-in-out infinite; }
+@keyframes or-due { 50% { opacity: 0.5; } }
+.or-daily-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.or-daily-item {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 5px 10px;
+  font: 600 var(--or-t-m)/1.2 var(--or-f-display);
+  letter-spacing: 0.02em;
+}
+.or-daily-tick {
+  grid-row: 1 / 3;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  color: transparent;
+  box-shadow: inset 0 0 0 2px var(--tier, rgba(238, 242, 248, 0.3));
+  transform: skewX(var(--or-lean));
+}
+.or-daily-tick svg { width: 12px; height: 12px; transform: skewX(12deg); }
+.or-daily-item[data-tier="1"] { --tier: var(--or-volt); }
+.or-daily-item[data-tier="2"] { --tier: var(--or-k-drift); }
+.or-daily-text { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.or-daily-num { font: 700 var(--or-t-s)/1 var(--or-f-num); font-style: normal; color: var(--or-text-2); }
+.or-daily-bar { grid-column: 2 / 4; display: block; height: 3px; background: rgba(238, 242, 248, 0.10); }
+.or-daily-bar i { display: block; height: 100%; background: var(--tier, var(--or-text-2)); }
+.or-daily-item.is-done .or-daily-tick { background: var(--or-good); box-shadow: none; color: var(--or-signal-ink); }
+.or-daily-item.is-done .or-daily-text { color: var(--or-text-3); }
+.or-daily-item.is-done .or-daily-num { color: var(--or-good); }
+.or-daily-item.is-done .or-daily-bar i { background: var(--or-good); }
+.or-daily-foot { margin: 0; font: 500 var(--or-t-s)/1.35 var(--or-f-body); color: var(--or-text-3); }
 
 /* ---- shared chrome ----------------------------------------------------- */
 
@@ -259,20 +833,22 @@
   align-items: center;
   gap: 14px;
   flex: 0 0 auto;
-  margin-bottom: clamp(12px, 2vh, 22px);
+  margin-bottom: clamp(12px, 2.4vh, 24px);
 }
-
-.or-panel,
-.or-carlist-wrap,
-.or-spec,
-.or-card,
-.or-group,
-.or-map-frame {
-  border: 1px solid var(--or-line);
-  border-radius: var(--or-r);
-  background: var(--or-glass);
-  backdrop-filter: blur(18px) saturate(1.1);
-  box-shadow: var(--or-shadow);
+.or-topbar-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 0 auto;
+  font: 700 var(--or-t-2xl)/1 var(--or-f-num);
+  color: var(--or-gold);
+}
+.or-topbar-meta:not(:empty)::before {
+  content: "Cash";
+  font: 700 var(--or-t-xs)/1 var(--or-f-display);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--or-text-3);
 }
 
 /* ---- garage ------------------------------------------------------------ */
@@ -284,237 +860,231 @@
   flex: 1 1 auto;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(220px, 270px) minmax(0, 1fr) minmax(280px, 340px);
+  grid-template-columns: minmax(230px, 280px) minmax(0, 1fr) minmax(290px, 350px);
   grid-template-areas: "list stage spec";
-  gap: clamp(12px, 1.6vw, 22px);
+  gap: clamp(12px, 1.8vw, 24px);
 }
 
 /* Deliberately empty: the 3D car goes here, and stageRect() reports it. */
 .or-stage { grid-area: stage; pointer-events: none; }
 
-.or-carlist-wrap { grid-area: list; min-width: 0; overflow: hidden; padding: 8px; }
+.or-carlist-wrap { grid-area: list; min-width: 0; overflow: hidden; padding: 10px 6px 10px 0; }
 .or-carlist {
   height: 100%;
   overflow-y: auto;
+  touch-action: pan-y;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
   scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
+  scrollbar-color: rgba(238, 242, 248, 0.2) transparent;
 }
 .or-carlist::-webkit-scrollbar { width: 6px; }
-.or-carlist::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.18); border-radius: 3px; }
+.or-carlist::-webkit-scrollbar-thumb { background: rgba(238, 242, 248, 0.18); }
 
 .or-car {
+  position: relative;
   appearance: none;
-  display: flex;
+  display: grid;
+  grid-template-columns: 6px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   width: 100%;
   min-height: 54px;
-  padding: 8px 12px;
-  border: 1px solid transparent;
-  border-radius: 10px;
+  padding: 7px 12px 7px 0;
+  border: 0;
   background: none;
   color: inherit;
   text-align: left;
   cursor: pointer;
-  transition: background 0.14s var(--or-ease), border-color 0.14s var(--or-ease);
+  transition: background var(--or-fast) var(--or-ease);
 }
-.or-car:hover { background: rgba(255, 255, 255, 0.06); }
-.or-car.is-selected {
-  background: linear-gradient(to right, rgba(255, 180, 60, 0.20), rgba(255, 180, 60, 0.04));
-  border-color: rgba(255, 180, 60, 0.42);
-}
-.or-car-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1 1 auto; }
+.or-car:hover { background: rgba(238, 242, 248, 0.05); }
+.or-car.is-selected { background: linear-gradient(90deg, rgba(60, 140, 255, 0.24), rgba(60, 140, 255, 0.04)); }
+/* The paint chip doubles as the row's marker. */
+.or-car-chip { width: 6px; height: 34px; transform: skewX(var(--or-lean)); }
+.or-car-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .or-car-brand {
-  font-size: 0.66rem;
-  font-weight: 600;
+  font: 700 var(--or-t-xs)/1 var(--or-f-display);
   letter-spacing: 0.16em;
   text-transform: uppercase;
   color: var(--or-text-3);
 }
-.or-car.is-selected .or-car-brand { color: var(--or-amber); }
+.or-car.is-selected .or-car-brand { color: var(--or-volt-hi); }
 .or-car-model {
-  font-size: 0.98rem;
-  font-weight: 600;
-  letter-spacing: 0.01em;
+  font: 700 var(--or-t-l)/1.05 var(--or-f-display);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.or-car-side { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
 .or-car-class {
-  flex: 0 0 auto;
-  font-size: 0.62rem;
-  font-weight: 600;
-  letter-spacing: 0.1em;
+  font: 700 9.5px/1 var(--or-f-display);
+  letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--or-text-3);
 }
-.or-car-chip {
-  flex: 0 0 auto;
-  width: 10px;
-  height: 22px;
-  border-radius: 3px;
-  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.4);
-}
+.or-car-price { display: inline-flex; align-items: center; gap: 4px; font: 700 var(--or-t-s)/1 var(--or-f-num); color: var(--or-gold); }
+.or-car-price svg { width: 11px; height: 11px; }
+.or-car-price:empty { display: none; }
+.or-car.is-locked .or-car-text { opacity: 0.6; }
 
 .or-spec {
   grid-area: spec;
   min-width: 0;
-  padding: clamp(16px, 1.8vw, 24px);
+  padding: clamp(16px, 1.8vw, 22px);
   overflow-y: auto;
+  touch-action: pan-y;
   display: flex;
   flex-direction: column;
   gap: 14px;
 }
-.or-spec-class {
-  margin: 0;
-  font-size: 0.66rem;
-  font-weight: 600;
-  letter-spacing: 0.22em;
-  text-transform: uppercase;
-  color: var(--or-amber);
-}
-.or-spec-name { margin: -6px 0 0; display: flex; flex-direction: column; gap: 2px; }
+.or-spec-class { margin: 0; }
+.or-spec-name { margin: -2px 0 0; display: flex; flex-direction: column; gap: 4px; }
 .or-spec-brand {
-  font-size: 0.78rem;
-  font-weight: 500;
-  letter-spacing: 0.16em;
+  font: 700 var(--or-t-s)/1 var(--or-f-display);
+  letter-spacing: 0.2em;
   text-transform: uppercase;
   color: var(--or-text-2);
 }
 .or-spec-model {
-  font-family: var(--or-display);
-  font-size: clamp(1.5rem, 2.4vw, 2rem);
-  font-weight: 700;
-  line-height: 1.05;
-  letter-spacing: -0.01em;
+  font: italic 800 clamp(1.8rem, 2.8vw, 2.4rem)/0.95 var(--or-f-display);
+  letter-spacing: 0.01em;
+  text-transform: uppercase;
 }
-.or-spec-blurb {
-  margin: 0;
-  font-size: 0.86rem;
-  line-height: 1.55;
-  color: var(--or-text-2);
-}
+.or-spec-blurb { margin: 0; font: 500 var(--or-t-s)/1.5 var(--or-f-body); color: var(--or-text-2); }
 
 /* One grid for all three rows rather than a grid per row, so the labels and
    values line up with each other however long "Top speed" turns out to be. */
 .or-stats {
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 9px 10px;
+  gap: 10px 12px;
+  padding: 12px 0;
+  border-block: 1px solid var(--or-rule);
 }
 .or-stat { display: contents; }
 .or-stat-label {
-  font-size: 0.68rem;
-  font-weight: 600;
-  letter-spacing: 0.1em;
+  font: 700 var(--or-t-xs)/1 var(--or-f-display);
+  letter-spacing: 0.14em;
   text-transform: uppercase;
   white-space: nowrap;
   color: var(--or-text-3);
 }
+/* Twenty cells, like a broadcast's comparison bar. */
 .or-stat-track {
-  height: 6px;
-  border-radius: 3px;
-  background: rgba(255, 255, 255, 0.10);
+  position: relative;
+  height: 10px;
+  background: repeating-linear-gradient(90deg, rgba(238, 242, 248, 0.10) 0 calc(5% - 2px), transparent calc(5% - 2px) 5%);
+  transform: skewX(var(--or-lean));
   overflow: hidden;
 }
 .or-stat-fill {
+  --v: 0;
   display: block;
   height: 100%;
-  border-radius: 3px;
-  background: linear-gradient(to right, var(--or-amber-deep), var(--or-amber));
-  transition: width 0.3s var(--or-ease);
+  background: repeating-linear-gradient(90deg, var(--or-signal) 0 calc(5% - 2px), transparent calc(5% - 2px) 5%);
+  clip-path: inset(0 calc((1 - var(--v)) * 100%) 0 0);
+  transition: clip-path 0.35s var(--or-ease);
 }
-.or-stat-value {
-  font: 600 0.82rem/1 var(--or-mono);
-  text-align: right;
-  color: var(--or-text);
-}
+.or-stat-value { font: 700 var(--or-t-m)/1 var(--or-f-num); text-align: right; color: var(--or-text); white-space: nowrap; }
 
 .or-drive {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding-top: 12px;
-  border-top: 1px solid var(--or-line);
-  font-size: 0.76rem;
+  font: 700 var(--or-t-s)/1 var(--or-f-display);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
   color: var(--or-text-2);
 }
-/* Four dots in the wheel positions; the driven pair lights up. */
-.or-wheels {
-  flex: 0 0 auto;
-  display: grid;
-  grid-template-columns: repeat(2, 8px);
-  gap: 5px 12px;
-}
-.or-wheels i {
-  width: 8px;
-  height: 8px;
-  border-radius: 2px;
-  background: rgba(255, 255, 255, 0.16);
-  transition: background 0.2s var(--or-ease);
-}
-.or-wheels i.is-driven { background: var(--or-amber); }
+/* Four cells in the wheel positions; the driven pair lights. */
+.or-wheels { flex: 0 0 auto; display: grid; grid-template-columns: repeat(2, 7px); gap: 6px 14px; padding: 2px 8px; box-shadow: inset 0 0 0 1px var(--or-rule); }
+.or-wheels i { width: 7px; height: 11px; background: rgba(238, 242, 248, 0.16); transition: background var(--or-med) var(--or-ease); }
+.or-wheels i.is-driven { background: var(--or-signal); }
 
-.or-figures {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 10px;
-  margin: 0;
-}
+.or-figures { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin: 0; }
 .or-figures dt {
-  font-size: 0.62rem;
-  font-weight: 600;
-  letter-spacing: 0.16em;
+  font: 700 var(--or-t-xs)/1 var(--or-f-display);
+  letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--or-text-3);
 }
-.or-figures dd {
-  margin: 2px 0 0;
-  font: 600 0.92rem/1.2 var(--or-body);
-}
+.or-figures dd { margin: 4px 0 0; font: 700 var(--or-t-l)/1.1 var(--or-f-num); }
 
-/* Pushed to the foot of the panel: paint is the one thing here you act on, so
-   it sits apart from the figures rather than trailing off the end of them. */
-.or-swatch-row {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  margin-top: auto;
-  padding-top: 14px;
-  border-top: 1px solid var(--or-line);
-}
+.or-swatch-row { display: flex; align-items: center; gap: 14px; margin-top: auto; padding-top: 12px; border-top: 1px solid var(--or-rule); }
 .or-swatch-label {
-  font-size: 0.66rem;
-  font-weight: 600;
+  font: 700 var(--or-t-xs)/1 var(--or-f-display);
   letter-spacing: 0.16em;
   text-transform: uppercase;
   color: var(--or-text-3);
 }
-.or-swatches { display: flex; gap: 8px; }
+.or-swatches { display: flex; flex-wrap: wrap; gap: 8px; }
+/* Paint chips lean with everything else, and the chosen one gets a yellow
+   underline rather than a ring — a ring around a slanted chip reads as a bug. */
 .or-swatch {
+  position: relative;
   appearance: none;
   width: 30px;
   height: 30px;
   padding: 0;
-  border: 2px solid transparent;
-  border-radius: 50%;
-  background:
-    linear-gradient(var(--c), var(--c)) padding-box,
-    linear-gradient(transparent, transparent) border-box;
-  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.45);
+  border: 0;
+  background: var(--c);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+  transform: skewX(var(--or-lean));
   cursor: pointer;
-  transition: transform 0.14s var(--or-ease), border-color 0.14s var(--or-ease);
+  transition: transform var(--or-fast) var(--or-ease);
 }
-.or-swatch:hover { transform: scale(1.1); }
-.or-swatch[aria-checked="true"] {
-  border-color: var(--or-amber);
-  transform: scale(1.1);
+.or-swatch::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -6px;
+  height: 3px;
+  background: var(--or-signal);
+  opacity: 0;
+  transition: opacity var(--or-fast) var(--or-ease);
 }
+.or-swatch:hover { transform: skewX(var(--or-lean)) translateY(-2px); }
+.or-swatch[aria-checked="true"]::after { opacity: 1; }
+.or-swatch:focus-visible { outline: 2px solid var(--or-volt-hi); outline-offset: 2px; }
+
+.or-paintshop {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--or-rule);
+}
+.or-swatches--shop { gap: 7px; }
+.or-swatch--shop { width: 22px; height: 22px; }
+/* A paint not bought yet is struck through with fine hatching — present,
+   tryable, but plainly not yours. Twelve padlocks in a row were noise. */
+.or-swatch--shop.is-locked {
+  background:
+    repeating-linear-gradient(-45deg, rgba(4, 7, 14, 0.55) 0 2px, transparent 2px 5px),
+    var(--c);
+}
+.or-paint-name { flex-basis: 100%; margin: 0; font: 600 var(--or-t-s)/1.3 var(--or-f-display); letter-spacing: 0.04em; color: var(--or-text-2); }
+
+.or-spec-lock {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin: 0;
+  padding: 10px 12px;
+  background: rgba(255, 210, 63, 0.08);
+  box-shadow: inset 2px 0 0 var(--or-gold);
+  color: var(--or-text);
+  font: 500 var(--or-t-s)/1.45 var(--or-f-body);
+}
+.or-spec-lock svg { flex: none; width: 16px; height: 16px; margin-top: 1px; color: var(--or-gold); }
 
 .or-garage-foot {
   flex: 0 0 auto;
@@ -524,301 +1094,176 @@
   gap: 16px;
   margin-top: clamp(12px, 2vh, 20px);
 }
+.or-garage-foot .or-btn--primary { min-width: 220px; min-height: 54px; font-size: var(--or-t-l); }
+.or-btn.is-nope { animation: or-nope 0.34s var(--or-ease); }
+@keyframes or-nope { 30% { transform: translateX(-5px); } 60% { transform: translateX(4px); } }
+.or-btn.is-bought { animation: or-bought 0.6s var(--or-ease-back); }
+@keyframes or-bought { 40% { transform: scale(1.06); } }
 
 /* ---- settings ---------------------------------------------------------- */
 
 .or-settings { align-items: center; }
 .or-settings .or-topbar,
 .or-settings .or-groups,
-.or-settings .or-settings-foot { width: min(760px, 100%); }
+.or-settings .or-settings-foot { width: min(780px, 100%); }
 
 .or-groups {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
+  touch-action: pan-y;
   display: flex;
   flex-direction: column;
   gap: 14px;
   padding-right: 4px;
   scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
+  scrollbar-color: rgba(238, 242, 248, 0.2) transparent;
   /* Fades the cut edge, so a group sliced off at the bottom reads as "there is
      more below" rather than as a clipping bug. */
-  mask-image: linear-gradient(to bottom, transparent 0, #000 14px,
-                              #000 calc(100% - 22px), transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 0, #000 calc(100% - 24px), transparent 100%);
 }
 .or-groups::-webkit-scrollbar { width: 6px; }
-.or-groups::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.18); border-radius: 3px; }
+.or-groups::-webkit-scrollbar-thumb { background: rgba(238, 242, 248, 0.18); }
 
-.or-group { padding: clamp(14px, 1.8vw, 22px); }
-.or-group-title {
-  margin: 0 0 10px;
-  font-size: 0.68rem;
-  font-weight: 700;
-  letter-spacing: 0.22em;
-  text-transform: uppercase;
-  color: var(--or-amber);
-}
+.or-group { padding: 16px 20px 8px; }
+.or-group-title { margin: 0 0 6px; }
 /* 300px is what the widest segmented control (five weather options) needs to
    stay on one line; below that "Fog" wraps onto a row of its own and the
    control stops reading as a single switch. */
 .or-row {
   display: grid;
-  grid-template-columns: 1fr minmax(180px, 300px);
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 320px);
   align-items: center;
   gap: 16px;
-  padding: 11px 0;
-  border-top: 1px solid var(--or-line);
+  padding: 12px 0;
+  border-top: 1px solid var(--or-rule);
 }
-.or-group .or-row:first-of-type { border-top: none; padding-top: 4px; }
-.or-row-label { font-size: 0.94rem; font-weight: 500; cursor: pointer; }
-.or-row-hint {
-  margin: 3px 0 0;
-  font-size: 0.76rem;
-  line-height: 1.45;
-  color: var(--or-text-3);
+.or-group .or-row:first-of-type { border-top: none; }
+.or-row-label {
+  font: 700 var(--or-t-l)/1.1 var(--or-f-display);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
 }
-.or-control { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
+.or-row-hint { margin: 4px 0 0; font: 500 var(--or-t-s)/1.4 var(--or-f-body); color: var(--or-text-3); }
+.or-control { display: flex; align-items: center; justify-content: flex-end; gap: 12px; }
 
+/* A square switch: a track with a block that slides, yellow when on. */
 .or-switch {
   appearance: none;
-  flex: 0 0 auto;
-  width: 50px;
-  height: 28px;
-  border: 1px solid var(--or-line-hi);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.07);
-  cursor: pointer;
   position: relative;
-  transition: background 0.18s var(--or-ease), border-color 0.18s var(--or-ease);
+  flex: 0 0 auto;
+  width: 54px;
+  height: 28px;
+  margin: 0 4px;
+  border: 0;
+  background: rgba(238, 242, 248, 0.10);
+  box-shadow: inset 0 0 0 1px var(--or-rule-hi);
+  transform: skewX(var(--or-lean));
+  cursor: pointer;
+  transition: background var(--or-fast) var(--or-ease);
 }
 .or-switch::after {
   content: "";
   position: absolute;
-  top: 3px;
-  left: 3px;
+  top: 4px;
+  left: 4px;
   width: 20px;
   height: 20px;
-  border-radius: 50%;
-  background: var(--or-text);
-  transition: transform 0.18s var(--or-ease), background 0.18s var(--or-ease);
+  background: var(--or-text-2);
+  transition: transform var(--or-med) var(--or-ease), background var(--or-fast) var(--or-ease);
 }
-.or-switch:checked {
-  background: linear-gradient(135deg, var(--or-amber), var(--or-amber-deep));
-  border-color: transparent;
-}
-.or-switch:checked::after { transform: translateX(22px); background: #17120a; }
+.or-switch:checked { background: var(--or-signal); box-shadow: none; }
+.or-switch:checked::after { transform: translateX(26px); background: var(--or-signal-ink); }
+.or-switch:focus-visible { outline-offset: 4px; }
 
+/* A fader: a thin track and a tall block of a thumb, the way a mixing desk
+   does it, rather than the browser's round knob. */
 .or-range {
   appearance: none;
   flex: 1 1 auto;
   min-width: 90px;
-  height: 26px;
+  height: 30px;
   background: none;
   cursor: pointer;
 }
 .or-range::-webkit-slider-runnable-track {
-  height: 6px;
-  border-radius: 3px;
-  background: linear-gradient(to right, var(--or-amber) var(--fill, 50%), rgba(255, 255, 255, 0.12) var(--fill, 50%));
+  height: 4px;
+  background: linear-gradient(to right, var(--or-signal) var(--fill, 50%), rgba(238, 242, 248, 0.14) var(--fill, 50%));
 }
-.or-range::-moz-range-track { height: 6px; border-radius: 3px; background: rgba(255, 255, 255, 0.12); }
-.or-range::-moz-range-progress { height: 6px; border-radius: 3px; background: var(--or-amber); }
+.or-range::-moz-range-track { height: 4px; background: rgba(238, 242, 248, 0.14); }
+.or-range::-moz-range-progress { height: 4px; background: var(--or-signal); }
 .or-range::-webkit-slider-thumb {
   appearance: none;
-  width: 18px;
-  height: 18px;
-  margin-top: -6px;
-  border: none;
-  border-radius: 50%;
+  width: 12px;
+  height: 24px;
+  margin-top: -10px;
+  border: 0;
   background: var(--or-text);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 0 0 2px var(--or-night);
+  transform: skewX(var(--or-lean));
 }
 .or-range::-moz-range-thumb {
-  width: 18px;
-  height: 18px;
-  border: none;
-  border-radius: 50%;
+  width: 12px;
+  height: 24px;
+  border: 0;
+  border-radius: 0;
   background: var(--or-text);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 0 0 2px var(--or-night);
 }
 .or-range-value {
   flex: 0 0 auto;
-  min-width: 4.4em;
-  font: 600 0.8rem/1 var(--or-mono);
+  min-width: 4.6em;
+  font: 700 var(--or-t-m)/1 var(--or-f-num);
   text-align: right;
-  color: var(--or-text-2);
+  color: var(--or-text);
 }
 
-.or-seg {
-  display: flex;
-  flex-wrap: wrap;
-  padding: 3px;
-  border: 1px solid var(--or-line);
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.05);
-}
+/* Segmented control: leaning cells side by side. */
+.or-seg { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 5px; }
 /* Kept in the tab order and reachable by arrow keys — only the box is hidden. */
 .or-seg input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 .or-seg-item {
+  position: relative;
+  isolation: isolate;
   flex: 1 1 auto;
-  padding: 7px 8px;
-  border-radius: 7px;
-  font-size: 0.73rem;
-  font-weight: 600;
-  letter-spacing: 0.06em;
+  display: grid;
+  place-items: center;
+  min-height: 36px;
+  padding: 0 10px;
+  font: 700 var(--or-t-s)/1 var(--or-f-display);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
   text-align: center;
   white-space: nowrap;
   color: var(--or-text-2);
   cursor: pointer;
-  transition: background 0.14s var(--or-ease), color 0.14s var(--or-ease);
+  transition: color var(--or-fast) var(--or-ease);
 }
-.or-seg-item:hover { background: rgba(255, 255, 255, 0.08); }
-.or-seg input:checked + .or-seg-item {
-  background: linear-gradient(135deg, var(--or-amber), var(--or-amber-deep));
-  color: #17120a;
+.or-seg-item::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: rgba(238, 242, 248, 0.07);
+  transform: skewX(var(--or-lean));
+  transition: background var(--or-fast) var(--or-ease);
 }
-.or-seg input:focus-visible + .or-seg-item { outline: 2px solid var(--or-amber); outline-offset: 2px; }
+.or-seg-item:hover::before { background: rgba(238, 242, 248, 0.14); }
+.or-seg input:checked + .or-seg-item { color: var(--or-signal-ink); }
+.or-seg input:checked + .or-seg-item::before { background: var(--or-signal); }
+.or-seg input:focus-visible + .or-seg-item::before { box-shadow: 0 0 0 2px var(--or-night), 0 0 0 4px var(--or-volt-hi); }
 
 .or-settings-foot {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  flex-wrap: wrap;
+  gap: 10px 16px;
   margin-top: clamp(12px, 2vh, 18px);
 }
-
-/* ---- pause ------------------------------------------------------------- */
-
-.or-pause { align-items: center; justify-content: center; }
-.or-card {
-  width: min(360px, 100%);
-  padding: clamp(22px, 3vw, 32px);
-  text-align: center;
-}
-.or-card-title {
-  margin: 0.2em 0 1.1em;
-  font-family: var(--or-display);
-  font-size: clamp(1.8rem, 4vw, 2.5rem);
-  font-weight: 800;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-.or-menu-list { display: flex; flex-direction: column; gap: 9px; }
-.or-menu-list .or-btn { width: 100%; }
-
-/* ---- map --------------------------------------------------------------- */
-
-.or-map { align-items: center; }
-.or-map .or-topbar { width: min(1000px, 100%); }
-.or-map-coords {
-  margin: 0 0 0 auto;
-  font: 500 0.78rem/1 var(--or-mono);
-  color: var(--or-text-3);
-}
-/* The world is square, so the panel is too: sizing it by width would leave a
-   wide band of empty glass either side of the map. Height drives the flex, and
-   aspect-ratio derives the width from it. */
-.or-map-frame {
-  flex: 1 1 auto;
-  min-height: 0;
-  aspect-ratio: 1;
-  width: auto;
-  max-width: min(1000px, 100%);
-  margin-inline: auto;
-  display: grid;
-  place-items: center;
-  padding: 10px;
-  overflow: hidden;
-}
-.or-map-canvas {
-  display: block;
-  border-radius: 8px;
-  cursor: crosshair;
-  touch-action: none;
-}
-.or-map-foot {
-  flex: 0 0 auto;
-  width: min(1000px, 100%);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  margin-top: 12px;
-}
-.or-legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 16px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  font-size: 0.74rem;
-  color: var(--or-text-3);
-}
-.or-legend li { display: flex; align-items: center; gap: 7px; }
-.or-legend i { width: 14px; height: 3px; border-radius: 2px; }
-
-/* ---- narrow screens ---------------------------------------------------- */
-
-@media (max-width: 900px) {
-  .or-garage-grid {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(90px, 1fr) auto auto;
-    grid-template-areas: "stage" "spec" "list";
-  }
-  .or-spec { max-height: 46vh; }
-  .or-carlist-wrap { overflow: visible; }
-  .or-carlist {
-    flex-direction: row;
-    overflow-x: auto;
-    overflow-y: hidden;
-    padding-bottom: 4px;
-  }
-  .or-car { width: auto; min-width: 148px; }
-  .or-car-chip { height: 16px; }
-  .or-row { grid-template-columns: 1fr; gap: 10px; }
-  .or-control { justify-content: flex-start; }
-  .or-seg { width: 100%; }
-  /* Portrait has height to spare and none to waste sideways, so the map is
-     sized from its width here instead of from the leftover column height. */
-  .or-map-frame { flex: 0 1 auto; width: 100%; margin-block: auto; }
-}
-
-@media (max-width: 560px) {
-  .or-title-actions { flex-direction: column; align-items: stretch; }
-  .or-title-secondary > .or-btn { flex: 1 1 auto; }
-  .or-garage-foot { flex-direction: column-reverse; align-items: stretch; }
-  .or-garage-foot .or-hint { text-align: center; }
-  .or-map-foot .or-hint { display: none; }
-}
-
-/* Coarse pointers get bigger targets; there is no hover to lean on. And no
-   keyboard, so the key hints are just clutter taking up a row. */
-@media (any-pointer: coarse) {
-  .or-btn { min-height: 52px; }
-  .or-swatch { width: 36px; height: 36px; }
-  .or-car { min-height: 60px; }
-  .or-title-foot,
-  .or-garage-foot .or-hint { display: none; }
-}
-
-/* ---- reduced motion ---------------------------------------------------- */
-
-@media (prefers-reduced-motion: reduce) {
-  .or-ui *,
-  .or-ui *::before,
-  .or-ui *::after {
-    transition-duration: 0.01ms !important;
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-  }
-  .or-screen { transform: none; }
-  .or-btn:active { transform: none; }
-  .or-swatch:hover,
-  .or-swatch[aria-checked="true"] { transform: none; }
-}
+.or-settings-foot > span { display: flex; gap: 6px; flex-wrap: wrap; }
 
 /* ---- driver name field ---------------------------------------------------
    The page sets touch-action:none and user-select:none globally so dragging
@@ -833,28 +1278,463 @@
   touch-action: auto;
   width: 100%;
   min-width: 0;
-  box-sizing: border-box;
-  padding: 8px 11px;
-  font: 500 16px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace;
+  height: 40px;
+  padding: 0 12px;
+  font: 700 16px/1 var(--or-f-display);
+  letter-spacing: 0.06em;
   color: var(--or-text);
-  background: rgba(8, 12, 16, 0.62);
-  border: 1px solid rgba(238, 242, 246, 0.22);
-  border-radius: 7px;
+  background: rgba(4, 7, 14, 0.8);
+  border: 0;
+  border-radius: 0;
+  box-shadow: inset 0 0 0 1px var(--or-rule-hi), inset 0 -2px 0 var(--or-text-3);
   outline: none;
-  transition: border-color 120ms ease, box-shadow 120ms ease;
+  transition: box-shadow var(--or-fast) var(--or-ease);
 }
-.or-text::placeholder { color: rgba(238, 242, 246, 0.34); }
-.or-text:focus {
-  border-color: #7ef29a;
-  box-shadow: 0 0 0 3px rgba(126, 242, 154, 0.16);
+.or-text::placeholder { color: var(--or-text-3); }
+.or-text:focus { box-shadow: inset 0 0 0 1px var(--or-volt-hi), inset 0 -2px 0 var(--or-volt-hi); }
+.or-text--bad,
+.or-text--bad:focus { box-shadow: inset 0 0 0 1px var(--or-warn), inset 0 -2px 0 var(--or-warn); }
+.or-control:has(.or-text) { flex-direction: column; align-items: stretch; gap: 6px; }
+.or-row-note { margin: 0; min-height: 1em; font: 600 var(--or-t-xs)/1.35 var(--or-f-body); color: var(--or-warn); }
+.or-row-note:empty { display: none; }
+
+/* ---- pause ------------------------------------------------------------- */
+
+.or-pause { justify-content: center; }
+.or-pause .or-card {
+  display: grid;
+  grid-template-columns: minmax(250px, 320px) minmax(0, 330px);
+  grid-template-areas:
+    "head  head"
+    "menu  side";
+  gap: 18px 28px;
+  align-self: flex-start;
+  width: auto;
+  max-width: 100%;
+  max-height: 100%;
+  margin-left: clamp(0px, 4vw, 60px);
+  padding: 22px 26px 24px 24px;
+  overflow: auto;
 }
-.or-text--bad {
-  border-color: #ff5a48;
-  box-shadow: 0 0 0 3px rgba(255, 90, 72, 0.14);
+.or-pause .or-card:not(:has(.or-pause-side:not([hidden]))) { grid-template-columns: minmax(250px, 320px); grid-template-areas: "head" "menu"; }
+.or-pause-head { grid-area: head; display: flex; flex-direction: column; gap: 10px; }
+.or-card-title {
+  margin: 0;
+  font: italic 800 clamp(2.4rem, 5vw, 3.4rem)/0.9 var(--or-f-display);
+  letter-spacing: 0.01em;
+  text-transform: uppercase;
 }
-.or-row-note {
-  margin: 5px 0 0;
-  min-height: 1em;
-  font: 500 11.5px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
-  color: #ff8a7a;
+.or-pause-progress {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin: 0;
+  font: 700 var(--or-t-xs)/1.3 var(--or-f-display);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--or-text-3);
+}
+.or-pause-progress b { font: 700 var(--or-t-s)/1 var(--or-f-num); color: var(--or-text); letter-spacing: 0; margin-left: 5px; }
+.or-menu-list { grid-area: menu; display: flex; flex-direction: column; gap: 2px; }
+.or-menu-list .or-btn--primary { margin: 0 6px 8px; min-height: 54px; font-size: var(--or-t-l); justify-content: flex-start; }
+.or-menu-list .or-navrow { min-height: 46px; }
+.or-pause-side { grid-area: side; display: flex; flex-direction: column; gap: 14px; padding-left: 26px; border-left: 1px solid var(--or-rule); }
+
+/* ---- map --------------------------------------------------------------- */
+
+.or-map { align-items: center; }
+.or-map .or-topbar { width: min(1040px, 100%); }
+.or-map-coords { margin: 0 0 0 auto; font: 700 var(--or-t-s)/1 var(--or-f-num); color: var(--or-text-3); }
+/* The world is square, so the panel is too: sizing it by width would leave a
+   wide band of empty slab either side of the map. Height drives the flex, and
+   aspect-ratio derives the width from it. */
+.or-map-frame {
+  flex: 1 1 auto;
+  min-height: 0;
+  aspect-ratio: 1;
+  width: auto;
+  max-width: min(1040px, 100%);
+  margin-inline: auto;
+  display: grid;
+  place-items: center;
+  padding: 10px;
+  overflow: hidden;
+}
+.or-map-canvas { display: block; cursor: crosshair; touch-action: none; }
+.or-map-foot {
+  flex: 0 0 auto;
+  width: min(1040px, 100%);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 12px;
+}
+.or-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font: 700 var(--or-t-xs)/1 var(--or-f-display);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--or-text-3);
+}
+.or-legend li { display: flex; align-items: center; gap: 7px; }
+.or-legend i { width: 16px; height: 4px; transform: skewX(var(--or-lean)); }
+.or-legend i.is-dashed { background: repeating-linear-gradient(90deg, currentColor 0 4px, transparent 4px 7px) !important; color: #9b7a52; }
+
+.or-map-goals {
+  flex: 0 0 auto;
+  width: min(1040px, 100%);
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  touch-action: pan-x;
+  padding: 10px 2px 4px;
+  scrollbar-width: thin;
+}
+.or-map-goal {
+  --k: var(--or-k-race);
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: auto auto;
+  align-items: center;
+  gap: 2px 8px;
+  padding: 8px 14px 8px 12px;
+  border: 0;
+  background: var(--or-slab);
+  box-shadow: inset 0 3px 0 var(--k);
+  color: var(--or-text);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--or-fast) var(--or-ease);
+}
+.or-map-goal:hover { background: var(--or-slab-hi); }
+.or-map-goal.is-target { box-shadow: inset 0 3px 0 var(--k), inset 0 0 0 1px var(--or-gps); }
+.or-map-goal[data-kind="trap"] { --k: var(--or-k-trap); }
+.or-map-goal[data-kind="jump"] { --k: var(--or-k-jump); }
+.or-map-goal[data-kind="drift"] { --k: var(--or-k-drift); }
+.or-map-goal > svg { grid-row: 1 / 3; width: 18px; height: 18px; color: var(--k); }
+.or-map-goal-text { display: flex; flex-direction: column; gap: 3px; }
+.or-map-goal-text b { font: 700 var(--or-t-s)/1.1 var(--or-f-display); letter-spacing: 0.06em; text-transform: uppercase; white-space: nowrap; }
+.or-map-goal-text span { display: flex; align-items: center; gap: 5px; font: 700 var(--or-t-xs)/1 var(--or-f-num); color: var(--or-text-3); }
+
+/* Medal marks: a small leaning plate in the metal, used on the map, the
+   next-up card and the trophies screen. */
+.or-medal-dot {
+  display: inline-block;
+  flex: none;
+  width: 9px;
+  height: 11px;
+  background: rgba(238, 242, 248, 0.16);
+  transform: skewX(var(--or-lean));
+}
+.or-medal-dot[data-medal="1"] { background: var(--or-bronze); }
+.or-medal-dot[data-medal="2"] { background: var(--or-silver); }
+.or-medal-dot[data-medal="3"] { background: var(--or-gold); }
+
+/* ---- trophies ---------------------------------------------------------- */
+
+.or-trophies { align-items: center; }
+.or-trophies .or-topbar { width: min(1040px, 100%); }
+.or-trophy-count { margin: 0 0 0 auto; font: 700 var(--or-t-xl)/1 var(--or-f-num); color: var(--or-gold); }
+.or-trophy-count small { font: 700 var(--or-t-xs)/1 var(--or-f-display); letter-spacing: 0.14em; color: var(--or-text-3); margin-left: 6px; }
+.or-trophy-grid {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: min(1040px, 100%);
+  overflow-y: auto;
+  touch-action: pan-y;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  align-content: start;
+  gap: 6px;
+  padding: 2px;
+}
+.or-trophy {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  background: var(--or-slab);
+  color: var(--or-text-2);
+}
+.or-trophy.is-got { background: linear-gradient(90deg, rgba(255, 210, 63, 0.16), var(--or-slab) 60%); box-shadow: inset 3px 0 0 var(--or-gold); color: var(--or-text); }
+.or-trophy-cup { width: 30px; height: 30px; color: rgba(238, 242, 248, 0.18); }
+.or-trophy-cup svg { width: 100%; height: 100%; }
+.or-trophy.is-got .or-trophy-cup { color: var(--or-gold); }
+.or-trophy-text { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.or-trophy-text b { font: 700 var(--or-t-m)/1.1 var(--or-f-display); letter-spacing: 0.06em; text-transform: uppercase; }
+.or-trophy-text span { font: 500 var(--or-t-s)/1.35 var(--or-f-body); color: var(--or-text-3); }
+.or-trophy.is-got .or-trophy-text span { color: var(--or-text-2); }
+.or-trophy-bar { display: block; height: 3px; margin-top: 3px; background: rgba(238, 242, 248, 0.1); }
+.or-trophy-bar i { display: block; height: 100%; background: var(--or-volt); }
+.or-trophy em { font: 700 var(--or-t-s)/1 var(--or-f-num); font-style: normal; color: var(--or-gold); }
+.or-trophy-foot { flex: 0 0 auto; display: flex; justify-content: flex-end; width: min(1040px, 100%); margin-top: 14px; }
+
+/* ---- the friends-online pieces (src/game/roster.js) ----------------------
+   roster.js ships its own small stylesheet, injected after this one, so
+   these rules carry one more class to win. Only the look changes here —
+   sizes, positions and what is hidden are still roster.js's business. */
+.or-ui .ormp-badge {
+  grid-area: friends;
+  align-self: start;
+  justify-self: stretch;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 var(--or-s4);
+  padding: 14px 16px;
+  background: var(--or-slab);
+  clip-path: polygon(0 0, calc(100% - var(--or-cut)) 0, 100% var(--or-cut), 100% 100%, 0 100%);
+  box-shadow: inset 3px 0 0 var(--or-good);
+}
+.or-ui .ormp-badge-lead { width: 100%; font: 700 var(--or-t-s)/1 var(--or-f-display); letter-spacing: 0.14em; text-transform: uppercase; color: var(--or-good); }
+.or-ui .ormp-pick {
+  min-height: 34px;
+  border: 0;
+  border-radius: 0;
+  background: rgba(238, 242, 248, 0.07);
+  box-shadow: inset 0 0 0 1px var(--or-rule-hi);
+  font: 700 var(--or-t-s)/1 var(--or-f-display);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.or-ui .ormp-pick.is-on { background: rgba(60, 140, 255, 0.24); box-shadow: inset 0 0 0 1px var(--or-volt-hi); }
+.or-ui .ormp-badge-note { font: 500 var(--or-t-s)/1.3 var(--or-f-body); color: var(--or-text-2); }
+.ormp .ormp-chip,
+.ormp .ormp-toast,
+.ormp .ormp-guide,
+.ormp .ormp-panel {
+  border: 0;
+  border-radius: 0;
+  background: var(--or-slab);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: inset 0 1px 0 var(--or-rule-hi);
+  font-family: var(--or-f-display);
+  letter-spacing: 0.04em;
+}
+.ormp .ormp-chip { text-transform: uppercase; letter-spacing: 0.1em; }
+.ormp .ormp-title { font-family: var(--or-f-display); color: var(--or-signal); }
+.ormp .ormp-name { font-family: var(--or-f-display); font-size: 16px; text-transform: uppercase; letter-spacing: 0.04em; }
+.ormp .ormp-btn { border: 0; border-radius: 0; font-family: var(--or-f-display); box-shadow: inset 0 0 0 1px var(--or-rule-hi); }
+.ormp .ormp-btn--go { background: var(--or-signal); color: var(--or-signal-ink); box-shadow: none; }
+.ormp .ormp-btn--go:hover { background: var(--or-signal-hi); }
+.ormp .ormp-row { border-radius: 0; }
+.ormp .ormp-row.is-sel { background: rgba(60, 140, 255, 0.16); border-color: var(--or-volt); }
+.ormp .ormp-where { font-family: var(--or-f-num); }
+.ormp .ormp-pin b { border-radius: 0; font-family: var(--or-f-display); text-transform: uppercase; letter-spacing: 0.06em; }
+.ormp .ormp-pop { border: 0; border-radius: 0; background: var(--or-slab-hi); }
+
+/* ---- narrower screens --------------------------------------------------- */
+
+/* A tablet in portrait and a small laptop window: the career slab moves under
+   the menu instead of floating over the world on the right. */
+@media (max-width: 1000px) {
+  .or-title-inner {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+    grid-template-areas:
+      "brand   brand"
+      "next    friends"
+      "menu    career"
+      ".       ."
+      "foot    foot";
+    align-content: start;
+  }
+  .or-career { align-self: start; }
+  .or-ui .ormp-badge { margin-bottom: var(--or-s4); }
+}
+
+@media (max-width: 900px) {
+  .or-garage-grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(90px, 1fr) auto auto;
+    grid-template-areas: "stage" "spec" "list";
+  }
+  .or-spec { max-height: 46vh; }
+  .or-carlist-wrap { overflow: visible; padding: 4px 0; clip-path: none; background: none; }
+  .or-carlist-wrap::before { display: none; }
+  .or-carlist { flex-direction: row; overflow-x: auto; overflow-y: hidden; padding-bottom: 4px; gap: 4px; touch-action: pan-x; }
+  .or-car { width: auto; min-width: 170px; background: var(--or-slab); padding-left: 10px; }
+  .or-car-chip { height: 28px; }
+  .or-row { grid-template-columns: 1fr; gap: 10px; }
+  .or-control { justify-content: flex-start; }
+  .or-seg { width: 100%; }
+  /* Portrait has height to spare and none to waste sideways, so the map is
+     sized from its width here instead of from the leftover column height. */
+  .or-map-frame { flex: 0 1 auto; width: 100%; margin-block: auto; }
+  .or-pause .or-card { grid-template-columns: minmax(0, 1fr); grid-template-areas: "head" "menu" "side"; margin-left: 0; align-self: stretch; }
+  .or-pause-side { padding-left: 0; padding-top: 14px; border-left: 0; border-top: 1px solid var(--or-rule); }
+}
+
+/* A laptop's browser tab. Chrome leaves a 1366x768 screen 657 px of page, a
+   1280x800 one 712 and a 1536x864 one 730; an iPad on its side in Safari has
+   about 750. Under 775 px the logotype takes its one-line cut (66 px tall at
+   420 wide, against 204 stacked) and the frame's top and bottom follow the
+   height instead of the width. Measured with it: 1366x657 ends the last row
+   at 549 and the key strip starts at 603; 1024x640, 537 and 586. A phone on
+   its side (500 and under) has a layout of its own further down. */
+@media (max-height: 775px) and (min-height: 501px) and (min-width: 621px) {
+  .or-title-inner {
+    --or-pad-t: calc(clamp(16px, 3.6vh, 32px) + env(safe-area-inset-top, 0px));
+    --or-pad-b: calc(clamp(16px, 3.6vh, 32px) + env(safe-area-inset-bottom, 0px));
+  }
+  .or-brand { gap: 8px; margin-bottom: clamp(14px, 3vh, 24px); }
+  .or-brand .or-logo--stacked { display: none; }
+  .or-brand .or-logo--line { display: block; width: clamp(300px, 34vw, 420px); }
+}
+
+/* A narrow window that is short as well — half of a laptop's screen, or an
+   iPad in split view. Stacking the level under the menu, as the tablet layout
+   does, puts 370 px of slab under 298 px of menu; beside it, as on a wide
+   screen, the two share the height instead. */
+@media (max-height: 775px) and (min-height: 501px) and (min-width: 621px) and (max-width: 1000px) {
+  .or-title-inner {
+    grid-template-rows: auto auto minmax(min-content, 1fr) auto;
+    grid-template-areas:
+      "brand  friends"
+      "next   career"
+      "menu   career"
+      "foot   foot";
+    column-gap: var(--or-s5);
+  }
+  .or-career { align-self: start; }
+}
+
+/* Shorter still (a laptop with a docked taskbar, a bookmarks bar and the
+   downloads shelf open): the rows and PLAY give up a little height each —
+   52 to 44 px and 74 to 60 — rather than anything being dropped. */
+@media (max-height: 640px) and (min-height: 501px) and (min-width: 621px) {
+  .or-nextup { margin-bottom: 10px; padding: 10px 16px 10px 14px; }
+  .or-play { min-height: 60px; margin-bottom: 6px; }
+  .or-play-label { font-size: 2.05rem; }
+  .or-navrow { min-height: 44px; }
+  .or-career { gap: var(--or-s3); padding: 12px 16px 14px; }
+}
+/* Under 580 the level slab is the tallest thing on the page (350 px), so its
+   last line goes (the pause card's copy of the list still says it), and the
+   rows give up two more pixels each. 1280x560 then fits; a window shorter
+   than about 540 scrolls the few pixels it is short by. */
+@media (max-height: 580px) and (min-height: 501px) and (min-width: 621px) {
+  .or-career .or-daily-foot { display: none; }
+  .or-brand { margin-bottom: 8px; }
+  .or-navrow { min-height: 42px; }
+  .or-title-foot { margin-top: var(--or-s2); }
+}
+
+/* A phone held upright: one column, top to bottom — the name, what is next,
+   the menu, then the level and today's three. */
+@media (max-width: 620px) {
+  .or-title-inner {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto auto auto auto minmax(0, 1fr);
+    grid-template-areas: "brand" "next" "friends" "menu" "career" "foot";
+    align-content: start;
+    column-gap: 0;
+  }
+  .or-brand { margin-bottom: var(--or-s4); }
+  .or-brand .or-logo { width: min(250px, 64vw); }
+  .or-play { min-height: 64px; }
+  .or-play-label { font-size: 2rem; }
+  .or-navrow { min-height: 48px; }
+  .or-career { margin-top: var(--or-s4); }
+  .or-career .or-daily-foot { display: none; }
+  .or-title-foot { justify-content: center; }
+  .or-garage-foot { flex-direction: column-reverse; align-items: stretch; }
+  .or-garage-foot .or-hint { text-align: center; }
+  .or-map-foot .or-hint { display: none; }
+  .or-nextup-goal { display: none; }
+}
+
+/* A phone on its side: every row of height counts. Two columns — the name and
+   the menu on the left, what is next and the level on the right — and the
+   dailies and key hints go, because the HUD shows the dailies while driving. */
+@media (max-height: 500px) and (min-width: 560px) {
+  .or-title-inner {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-rows: auto auto auto minmax(0, 1fr);
+    /* Next up spans the logotype's row and the one below it, so the one-line
+       logotype sets the first row alone and the menu starts right under it. */
+    grid-template-areas:
+      "brand  next"
+      "menu   next"
+      "menu   friends"
+      "menu   career";
+    column-gap: var(--or-s5);
+    align-content: start;
+  }
+  .or-brand { margin-bottom: 12px; }
+  .or-brand .or-logo--stacked { display: none; }
+  .or-brand .or-logo--line { display: block; width: clamp(200px, 34vw, 300px); }
+  .or-strap { display: none; }
+  .or-play { min-height: 54px; margin-bottom: 4px; }
+  .or-play-label { font-size: 1.7rem; }
+  .or-navrow { min-height: 40px; }
+  .or-navrow-text small { display: none; }
+  .or-career { align-self: start; gap: 10px; padding: 12px 14px; }
+  .or-career .or-daily { display: none; }
+  .or-title-foot { display: none; }
+  .or-nextup { margin-bottom: 10px; padding: 10px 14px; }
+  .or-pause .or-card { grid-template-columns: minmax(230px, 300px) minmax(0, 300px); grid-template-areas: "head head" "menu side"; margin-left: 0; align-self: flex-start; }
+  .or-pause-side { padding-left: 20px; padding-top: 0; border-left: 1px solid var(--or-rule); border-top: 0; }
+  .or-card-title { font-size: 2rem; }
+  .or-menu-list .or-navrow { min-height: 38px; }
+}
+
+/* Coarse pointers get bigger targets; there is no hover to lean on. And no
+   keyboard, so the key hints are just clutter taking up a row. */
+@media (any-pointer: coarse) {
+  .or-btn { min-height: 52px; }
+  .or-swatch { width: 36px; height: 36px; }
+  .or-swatch--shop { width: 30px; height: 30px; }
+  .or-car { min-height: 60px; }
+  .or-keys,
+  .or-garage-foot .or-hint { display: none; }
+  .or-navrow > svg:last-child { opacity: 0.6; transform: none; }
+}
+
+/* ---- the title's entrance -------------------------------------------------
+   Once per showing, the way a broadcast brings its graphics on: the logotype
+   wipes in from the left, then the panels and rows follow 40 ms apart. 520 ms
+   end to end, all of it transform, opacity and one clip — nothing that makes
+   the world behind it relayout — and PLAY is live from the first frame. */
+@keyframes or-wipe { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0 0 0 0); } }
+@keyframes or-in { from { opacity: 0; transform: translateX(-14px); } to { opacity: 1; transform: none; } }
+@keyframes or-in-r { from { opacity: 0; transform: translateX(14px); } to { opacity: 1; transform: none; } }
+.or-title.is-on .or-logo { animation: or-wipe 420ms var(--or-ease) both; }
+.or-title.is-on .or-strap { animation: or-in 300ms var(--or-ease) 160ms both; }
+.or-title.is-on .or-nextup { animation: or-in 300ms var(--or-ease) 120ms both; }
+.or-title.is-on .or-play { animation: or-in 300ms var(--or-ease) 160ms both; }
+.or-title.is-on .or-navrow { animation: or-in 280ms var(--or-ease) both; }
+.or-title.is-on .or-navrow:nth-child(1) { animation-delay: 200ms; }
+.or-title.is-on .or-navrow:nth-child(2) { animation-delay: 240ms; }
+.or-title.is-on .or-navrow:nth-child(3) { animation-delay: 280ms; }
+.or-title.is-on .or-navrow:nth-child(4) { animation-delay: 320ms; }
+.or-title.is-on .or-career,
+.or-title.is-on .ormp-badge { animation: or-in-r 320ms var(--or-ease) 180ms both; }
+
+/* The XP meter fills to its value when it appears, instead of just being
+   there: registering --v lets the gradient stop animate. A browser without
+   @property shows it full-grown at once, which is all it did before. */
+@property --v { syntax: "<number>"; inherits: true; initial-value: 0; }
+@keyframes or-fill { from { --v: 0; } }
+.or-title.is-on .or-meter { animation: or-fill 700ms var(--or-ease) 300ms both; }
+
+/* ---- reduced motion ---------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .or-ui *,
+  .or-ui *::before,
+  .or-ui *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+  .or-screen { transform: none; }
 }

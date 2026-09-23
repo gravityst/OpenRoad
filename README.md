@@ -30,7 +30,7 @@ real server only because ES modules will not load from `file://`.
 | `Space` | handbrake |
 | hold **steer + brake** | drift — builds a slide that recovers on its own |
 | `Q` `E` | shift down / up |
-| `V` | inspect the damage — orbit the car and see what you broke |
+| `V` | look round your car — drag or arrow keys to orbit, `V` to drive |
 | `-` `=` | steering feel, 0.5x to 2.5x |
 | `C` | cycle camera |
 | `B` | look back |
@@ -113,6 +113,8 @@ same code the browser runs.
 | `driftcheck` | the drift scoring pays for angle and punishes a spin |
 | `modelcheck` | imported car models are rigged the way the game assumes |
 | `brandcheck` | every name in the game is invented |
+| `skillscheck` | skill chains add up, dailies are the same for everyone, saves migrate |
+| `uicheck` | every screen builds and focuses its main action, and no screen shows emoji, fire or a real brand |
 
 They are not a substitute for looking at the screen. They passed happily while
 roads rendered from the wrong rows of the texture atlas, and again while traffic

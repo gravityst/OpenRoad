@@ -1,5 +1,9 @@
 /* Touch controls — the on-screen rig built by src/input/touch.js.
 
+   Drawn in the same grammar as every other screen (ui.css): navy slabs with
+   a cut corner, a silver hairline, signal yellow when a control is held, and
+   a glyph from the icon set on every control as well as its word.
+
    Three numbers come in from JS as custom properties on .touch and drive every
    moving part: --s (steering, -1..1), --gas and --brake (0..1). Nothing else is
    animated from script, so the whole overlay stays on the compositor and a
@@ -31,9 +35,18 @@
   --btn: clamp(2.75rem, 8vmin, 3.9rem);
   --edge: calc(0.6rem + var(--gap) * 0.4);
 
-  --face: rgba(14, 17, 22, 0.52);
-  --face-lit: rgba(28, 33, 41, 0.72);
+  --face: rgba(7, 11, 22, 0.58);
+  --face-lit: rgba(16, 25, 46, 0.78);
+  --edge-hi: rgba(196, 212, 236, 0.28);
+  --hot: var(--or-signal, #ffc21f);
+  --hot-ink: var(--or-signal-ink, #0b1222);
+  --cut: 10px;
 }
+
+/* The game is silent (main.js leaves the audio slot empty), so the horn
+   would be a button that does nothing. It stays in the DOM for touch.js,
+   which still reads it, and off the screen. */
+.touch__btn[data-ctl="horn"] { display: none; }
 
 .touch.is-hidden { display: none; }
 
@@ -52,7 +65,9 @@
   outline: none;
 }
 
-/* Anything a thumb has to hit clears 44 px in both directions. */
+/* Anything a thumb has to hit clears 44 px in both directions. The cut
+   corner is a clip-path, which trims the hit area by a 10 px triangle at one
+   corner — nothing a thumb aims for. */
 .touch__btn,
 .touch__hand,
 .touch__pad,
@@ -61,28 +76,33 @@
   min-block-size: 2.75rem;
   display: grid;
   place-items: center;
+  align-content: center;
+  gap: 0.2rem;
   text-align: center;
-  border-radius: var(--round);
-  border: 1px solid var(--panel-edge);
+  border: 0;
+  border-radius: 0;
   /* Deliberately a flat translucent fill and not backdrop-filter: blurring the
      backdrop means reading back the live 3D canvas underneath every control,
      every frame, which is a straight tax on the frame budget the game needs. */
   background: var(--face);
-  color: var(--ink-dim);
-  letter-spacing: 0.09em;
+  box-shadow: inset 0 1px 0 var(--edge-hi), inset 0 0 0 1px rgba(196, 212, 236, 0.12);
+  clip-path: polygon(0 0, calc(100% - var(--cut)) 0, 100% var(--cut), 100% 100%, 0 100%);
+  color: var(--or-text-2, #a9b6c9);
+  font-family: var(--or-f-display, sans-serif);
+  letter-spacing: 0.12em;
   text-transform: uppercase;
   font-weight: 700;
-  line-height: 1.1;
-  transition: transform 0.08s ease, background-color 0.08s ease, color 0.08s ease, border-color 0.08s ease;
+  line-height: 1;
+  transition: transform 0.08s ease, background-color 0.08s ease, color 0.08s ease;
 }
+.touch svg { display: block; inline-size: 1.35rem; block-size: 1.35rem; }
 
 .touch__btn.is-on,
 .touch__hand.is-on,
 .touch__chip.is-on {
   transform: scale(0.94);
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--accent-ink);
+  background: var(--hot);
+  color: var(--hot-ink);
 }
 
 /* ---- steering ----------------------------------------------------------- */
@@ -138,8 +158,8 @@
   border-radius: 50%;
   border: 0.62rem solid var(--face-lit);
   box-shadow:
-    inset 0 0 0 1px var(--panel-edge),
-    0 0 0 1px var(--panel-edge),
+    inset 0 0 0 1px var(--edge-hi),
+    0 0 0 1px var(--edge-hi),
     0 0.4rem 1.4rem rgba(0, 0, 0, 0.35);
 }
 
@@ -153,7 +173,7 @@
   block-size: 0.42rem;
   border-radius: 0.21rem;
   background: var(--face-lit);
-  box-shadow: inset 0 0 0 1px var(--panel-edge);
+  box-shadow: inset 0 0 0 1px var(--edge-hi);
   transform-origin: 0 50%;
 }
 .touch__spoke--l { transform: translate(0, -50%) rotate(180deg); }
@@ -169,7 +189,7 @@
   margin: calc(var(--wheel) * -0.13) 0 0 calc(var(--wheel) * -0.13);
   border-radius: 50%;
   background: var(--face-lit);
-  box-shadow: inset 0 0 0 1px var(--panel-edge);
+  box-shadow: inset 0 0 0 1px var(--edge-hi);
 }
 
 /* Twelve o'clock marker: the only thing that tells you how much lock you have. */
@@ -177,19 +197,17 @@
   position: absolute;
   left: 50%;
   top: 0.28rem;
-  inline-size: 0.34rem;
+  inline-size: 0.4rem;
   block-size: 0.9rem;
-  margin-left: -0.17rem;
-  border-radius: 0.17rem;
-  background: var(--accent);
-  opacity: 0.85;
+  margin-left: -0.2rem;
+  background: var(--hot);
 }
 
 .touch__steer.is-on .touch__rim {
-  border-color: rgba(255, 176, 32, 0.30);
+  border-color: rgba(255, 194, 31, 0.30);
   box-shadow:
-    inset 0 0 0 1px rgba(255, 176, 32, 0.45),
-    0 0 0 1px rgba(255, 176, 32, 0.35),
+    inset 0 0 0 1px rgba(255, 194, 31, 0.5),
+    0 0 0 1px rgba(255, 194, 31, 0.4),
     0 0.4rem 1.6rem rgba(0, 0, 0, 0.4);
 }
 
@@ -208,7 +226,7 @@
   margin-block-start: -0.25rem;
   border-radius: 0.25rem;
   background: var(--face);
-  box-shadow: inset 0 0 0 1px var(--panel-edge);
+  box-shadow: inset 0 0 0 1px var(--edge-hi);
 }
 
 .touch__notch {
@@ -231,7 +249,7 @@
   border-radius: 50%;
   background: var(--face-lit);
   box-shadow:
-    inset 0 0 0 1px var(--panel-edge),
+    inset 0 0 0 1px var(--edge-hi),
     0 0.3rem 1rem rgba(0, 0, 0, 0.35);
   transform: translate(-50%, -50%) translateX(calc(var(--s) * var(--travel)));
   will-change: transform;
@@ -241,11 +259,11 @@
   position: absolute;
   inset: 0.9rem;
   border-radius: 50%;
-  background: var(--accent);
+  background: var(--hot);
   opacity: calc(0.25 + 0.75 * max(var(--s), calc(-1 * var(--s))));
 }
 
-.touch__steer.is-on .touch__knob { box-shadow: inset 0 0 0 1px var(--accent), 0 0.3rem 1rem rgba(0, 0, 0, 0.4); }
+.touch__steer.is-on .touch__knob { box-shadow: inset 0 0 0 1px var(--hot), 0 0.3rem 1rem rgba(0, 0, 0, 0.4); }
 
 /* --- tilt calibration --- */
 
@@ -292,7 +310,11 @@
   block-size: calc(var(--pad) * 1.16);
   overflow: hidden;
   font-size: 0.74rem;
+  /* Both corners cut on the pedals, so they read as pedals and not as two
+     more buttons. */
+  clip-path: polygon(0 0, calc(100% - var(--cut) * 1.4) 0, 100% calc(var(--cut) * 1.4), 100% 100%, calc(var(--cut) * 1.4) 100%, 0 calc(100% - var(--cut) * 1.4));
 }
+.touch__pad svg { position: relative; inline-size: 1.8rem; block-size: 1.8rem; }
 
 /* The fill is how much pedal you actually have on. Sliding a thumb down the
    pad eases off (see featherAt in touch.js), and without a visible level that
@@ -308,13 +330,12 @@
 }
 .touch__pad span { position: relative; }
 
-.touch__pad--gas   { --fill: var(--gas);   --tint: var(--good); }
-.touch__pad--brake { --fill: var(--brake); --tint: var(--bad); }
+.touch__pad--gas   { --fill: var(--gas);   --tint: var(--or-good, #3ddc84); }
+.touch__pad--brake { --fill: var(--brake); --tint: #ff5b4a; }
 
 .touch__pad.is-on {
   transform: scale(0.97);
-  border-color: rgba(255, 255, 255, 0.24);
-  color: var(--ink);
+  color: #fff;
 }
 
 .touch__hand {
@@ -336,7 +357,14 @@
 .touch__btn {
   inline-size: var(--btn);
   block-size: var(--btn);
-  font-size: 0.64rem;
+  font-size: 0.56rem;
+}
+
+/* Back on the road: out of the aux group's flow, just above it. */
+.touch__btn--road {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 0.5rem);
 }
 
 /* ---- shape for small and portrait screens ------------------------------- */
@@ -360,11 +388,18 @@
     block-size: clamp(8rem, 22vh, 12rem);
     inline-size: clamp(9rem, 44vw, 14rem);
   }
+  /* With the horn gone the 2x2 block is placed cell by cell: Cam and Road
+     on top, Look under Cam, and the handbrake (below) in the fourth cell —
+     left to flow, Look slid into the fourth cell and sat under the handbrake. */
   .touch__aux {
     display: grid;
     grid-template-columns: repeat(2, var(--btn));
+    grid-template-rows: repeat(2, var(--btn));
     gap: 0.5rem;
   }
+  .touch__btn[data-ctl="camera"] { grid-area: 1 / 1; }
+  .touch__btn--road { position: static; grid-area: 1 / 2; }
+  .touch__btn[data-ctl="look"] { grid-area: 2 / 1; }
   .touch__hand {
     position: absolute;
     right: 0;

@@ -1880,6 +1880,7 @@ function buildLandmarks(world, ground, clearance, inLot) {
   const inMap = (x, z) => Math.abs(x) < half - 30 && Math.abs(z) < half - 30;
   const g = { y: 0, nx: 0, ny: 1, nz: 0, surface: 'grass', grip: 0, roughness: 0, rolling: 0, dust: 0 };
   const junction = world.nodes.filter((n) => n.edges.length >= 3);
+  const inInfield = (x, z) => (world.circuits || []).some((q) => (q.x - x) ** 2 + (q.z - z) ** 2 < (q.r * 1.3) ** 2);
   const nearJunction = (x, z, d) => junction.some((n) => (n.x - x) ** 2 + (n.z - z) ** 2 < d * d);
 
   // ---- Arches ---------------------------------------------------------------
@@ -1933,7 +1934,7 @@ function buildLandmarks(world, ground, clearance, inLot) {
       const c = clearance(x, z);
       if (c < 45 || c > 260 || bio.relief(x, z) > 2 || inLot(x, z)) continue;
       // Not in a circuit's infield: a kid looks across it to the next corner.
-      if ((world.circuits || []).some((q) => (q.x - x) ** 2 + (q.z - z) ** 2 < (q.r * 1.3) ** 2)) continue;
+      if (inInfield(x, z)) continue;
       if (centres.some((q) => (q[0] - x) ** 2 + (q[1] - z) ** 2 < 260 * 260)) continue;
       if (L.some((q) => (q.x - x) ** 2 + (q.z - z) ** 2 < 120 * 120)) continue;
       centres.push([x, z]);
@@ -1943,7 +1944,7 @@ function buildLandmarks(world, ground, clearance, inLot) {
       for (let k = 0; k < n; k++) {
         const a = r() * 6.28, d = k === 0 ? 0 : 6 + r() * 30;
         const x = cx + Math.cos(a) * d, z = cz + Math.sin(a) * d;
-        if (clearance(x, z) < 22 || inLot(x, z) || !inMap(x, z)) continue;
+        if (clearance(x, z) < 22 || inLot(x, z) || !inMap(x, z) || inInfield(x, z)) continue;
         ground.sample(x, z, g);
         if (g.ny < 0.93 || g.surface === 'water') continue;
         // The tallest in the middle of a stand, the young ones round it.

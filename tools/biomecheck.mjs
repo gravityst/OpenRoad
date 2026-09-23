@@ -20,11 +20,17 @@
 //   PLANTS       cacti in the desert, palms on the coast, nothing in the sea,
 //                nothing on a road.
 //   AIR          each biome has its own air, the snow falls only on the pass,
-//                and nothing the sky does goes non-finite.
+//                leaves only in the woods, heat only in the canyon, and
+//                nothing the sky does goes non-finite.
+//   LANDFORMS    a biome is not a colour swap: the pass runs between
+//                mountains, the canyon between walls, the woods over hills.
+//   LANDMARKS    the arches span their roads with room to drive under, the
+//                hoodoos and the lighthouse stand where they should, the
+//                snow poles line the pass, and every client places the same.
 //   BUDGET       draw calls and triangles at the heart of each biome, per
 //                quality tier — the numbers the frame budget is judged on.
 import * as THREE from 'three';
-import { buildWorld } from '../src/world/layout.js';
+import { buildWorld, pointOnEdge } from '../src/world/layout.js';
 import { createGround } from '../src/world/ground.js';
 import { BIOME, BIOMES, BIOME_COUNT, activeBiomes } from '../src/world/biomes.js';
 import { mulberry } from '../src/world/noise.js';
@@ -77,8 +83,14 @@ const HALF = w.half;
   for (let i = 0; !pd && i < e1.length; i++) {
     if (e1[i].x !== e2[i].x || e1[i].z !== e2[i].z || e1[i].type !== e2[i].type || e1[i].scale !== e2[i].scale) pd++;
   }
-  check('the same seed builds the same biomes, to the bit', diff === 0 && pd === 0 && B2.seaLevel === B.seaLevel,
-    `${diff} differences over 20,000 points (weights, relief, sea, height); ${e1.length} cacti and palms identical: ${pd === 0}`);
+  const L1 = w.landmarks || [], L2 = w2.landmarks || [];
+  let ld = L1.length === L2.length ? 0 : 1;
+  for (let i = 0; !ld && i < L1.length; i++) {
+    const a = L1[i], b = L2[i];
+    if (a.type !== b.type || a.x !== b.x || a.z !== b.z || a.y !== b.y || a.rot !== b.rot || a.scale !== b.scale) ld++;
+  }
+  check('the same seed builds the same biomes, to the bit', diff === 0 && pd === 0 && ld === 0 && B2.seaLevel === B.seaLevel,
+    `${diff} differences over 20,000 points (weights, relief, sea, height); ${e1.length} cacti and palms and ${L1.length} landmarks identical: ${pd === 0 && ld === 0}`);
 
   const w3 = buildWorld(20260821);
   let moved = 0;
@@ -363,6 +375,118 @@ const area = new Array(BIOME_COUNT).fill(0);
     air.map((a) => `${BIOMES[a.b].key}${a.leaves ? ' +leaves' : ''} heat ${a.heat.toFixed(2)}`).join(', '));
   check('the sky reads the world it was built with', activeBiomes() !== null, activeBiomes() ? 'registry set' : 'no field registered');
   sky.dispose();
+}
+
+// ---- Landforms -----------------------------------------------------------------------------
+{
+  // From the road, every 50 m: the highest ground 60 to 250 m off to either
+  // side, above the road itself. Measured on this seed before the landforms
+  // went in: pass median 24 m (21% of samples over 40 m), canyon 26 m, woods
+  // 8 m, farmland 7 m — the pass and the woods were the farmland's ground.
+  const rise = (b) => {
+    const out = [];
+    for (const e of w.edges) {
+      if (e.kind === 'circuit' || e.kind === 'rallyx') continue;
+      for (let s = 10; s < e.length; s += 50) {
+        const p = pointOnEdge(e, s);
+        if (B.weightsAt(p.x, p.z, wq)[b] < 0.9) continue;
+        const y0 = g.heightAt(p.x, p.z);
+        let best = 0;
+        for (const side of [-1, 1]) {
+          for (let d = 60; d <= 250; d += 10) best = Math.max(best, g.heightAt(p.x + p.nx * d * side, p.z + p.nz * d * side) - y0);
+        }
+        out.push(best);
+      }
+    }
+    out.sort((a, c) => a - c);
+    return { n: out.length, med: out[out.length >> 1] || 0, over: (m) => out.filter((v) => v >= m).length / Math.max(1, out.length) };
+  };
+  const farm = rise(BIOME.farm), alp = rise(BIOME.alpine), des = rise(BIOME.desert), aut = rise(BIOME.autumn);
+  check('the pass runs between mountains', alp.med >= 35 && alp.over(40) >= 0.4,
+    `ground beside the pass rises a median ${alp.med.toFixed(0)} m, over 40 m at ${(alp.over(40) * 100).toFixed(0)}% of ${alp.n} road samples (farmland: ${farm.med.toFixed(0)} m)`);
+  check('the canyon runs between walls', des.med >= 18 && des.over(15) >= 0.5,
+    `median ${des.med.toFixed(0)} m, over 15 m at ${(des.over(15) * 100).toFixed(0)}% of ${des.n} road samples`);
+  check('the woods roll over hills of their own', aut.med >= farm.med * 1.6 && aut.over(15) >= 0.35,
+    `median ${aut.med.toFixed(0)} m against the farmland's ${farm.med.toFixed(0)}; over 15 m at ${(aut.over(15) * 100).toFixed(0)}%`);
+
+  // Away from the roads the mountains are mountains: tall, and steep enough
+  // for the rock to come through the snow (the shader shows it from ~29
+  // degrees on a rib).
+  const rnd = mulberry(7011);
+  const o = {};
+  const hs = [];
+  let steep = 0, n = 0;
+  while (n < 20000) {
+    const x = (rnd() * 2 - 1) * HALF, z = -800 - rnd() * (HALF - 800);
+    if (B.weightsAt(x, z, wq)[BIOME.alpine] < 0.9 || B.roadDist(x, z) < 300) continue;
+    const r = g.sample(x, z, o);
+    hs.push(B.relief(x, z));
+    if (r.ny < 0.875) steep++;
+    n++;
+  }
+  hs.sort((a, c) => a - c);
+  check('the mountains stand tall, with rock showing', hs[Math.floor(n * 0.9)] > 200 && steep / n > 0.3,
+    `relief p50 ${hs[n >> 1].toFixed(0)} m, p90 ${hs[Math.floor(n * 0.9)].toFixed(0)} m; ${(steep / n * 100).toFixed(0)}% of the range steeper than 29 degrees`);
+}
+
+// ---- Landmarks ------------------------------------------------------------------------------
+{
+  const L = w.landmarks || [];
+  const of = (t) => L.filter((l) => l.type === t);
+  const arches = of('arch'), hoodoos = of('hoodoo'), lights = of('lighthouse'), poles = of('snowpole');
+  check('every biome that has landmarks has them', arches.length >= 2 && hoodoos.length >= 20 && lights.length === 1 && poles.length >= 100,
+    `${arches.length} arches, ${hoodoos.length} hoodoos, ${lights.length} lighthouse, ${poles.length} snow poles`);
+
+  // An arch must span its road: the road passes under its middle, square to
+  // it, with both feet well off the carriageway and the crown high overhead.
+  const road = {};
+  let badArch = 0;
+  const archNote = [];
+  for (const a of arches) {
+    g.roadAt(a.x, a.z, road);
+    const acrossX = Math.cos(a.rot), acrossZ = -Math.sin(a.rot);
+    const square = road.edge ? Math.abs(road.tx * acrossX + road.tz * acrossZ) : 1;
+    const feet = a.span * 0.5 - (road.width || 0) * 0.5;
+    const clear = a.height - (g.heightAt(a.x, a.z) - a.y);
+    if (!road.edge || road.dist > 3 || square > 0.1 || feet < 10 || clear < 14 || B.weightsAt(a.x, a.z, wq)[BIOME.desert] < 0.9) badArch++;
+    archNote.push(`${feet.toFixed(0)} m to each foot, ${clear.toFixed(0)} m clear`);
+  }
+  check('each arch spans its road, with room to drive under', badArch === 0 && arches.length > 0,
+    `${badArch} wrong; ${archNote.join('; ')}`);
+
+  let badHoodoo = 0;
+  for (const h of hoodoos) {
+    g.roadAt(h.x, h.z, road);
+    const edge = road.edge ? road.dist - road.width * 0.5 : Infinity;
+    const infield = (w.circuits || []).some((c) => (c.x - h.x) ** 2 + (c.z - h.z) ** 2 < (c.r * 1.3) ** 2);
+    if (edge < 18 || infield || B.weightsAt(h.x, h.z, wq)[BIOME.desert] < 0.85 || Math.abs(h.y - g.heightAt(h.x, h.z)) > 0.05) badHoodoo++;
+  }
+  check('hoodoos stand in the canyon, off every road and infield', badHoodoo === 0,
+    `${badHoodoo} of ${hoodoos.length} too near a road, in an infield, outside the canyon or off the ground`);
+
+  let lightNote = 'none';
+  let lightOk = false;
+  for (const l of lights) {
+    let sea = Infinity;
+    for (let k = 0; k < 32; k++) {
+      const a = (k / 32) * Math.PI * 2;
+      for (let d = 10; d <= 200; d += 10) if (B.seaAt(l.x + Math.cos(a) * d, l.z + Math.sin(a) * d) > 0.5) { sea = Math.min(sea, d); break; }
+    }
+    const rd = g.nearestRoad(l.x, l.z, 400);
+    const up = l.y - B.seaLevel;
+    lightOk = sea <= 150 && up >= 7 && rd && rd.dist < 250;
+    lightNote = `sea ${sea} m away, ${up.toFixed(0)} m above it, ${rd ? rd.dist.toFixed(0) : '-'} m from a road`;
+  }
+  check('the lighthouse stands over the sea, in sight of a road', lightOk, lightNote);
+
+  let badPole = 0;
+  for (const p of poles) {
+    g.roadAt(p.x, p.z, road);
+    const edge = road.edge ? road.dist - road.width * 0.5 : Infinity;
+    if (edge < 1.2 || edge > 4 || B.weightsAt(p.x, p.z, wq)[BIOME.alpine] < 0.55) badPole++;
+  }
+  check('snow poles line the pass, off the carriageway', badPole === 0,
+    `${badPole} of ${poles.length} on the road, too far from it, or off the pass`);
 }
 
 // ---- Budget ------------------------------------------------------------------------------

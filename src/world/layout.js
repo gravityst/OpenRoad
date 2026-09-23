@@ -1928,6 +1928,8 @@ function buildLandmarks(world, ground, clearance, inLot) {
   }
 
   // ---- Hoodoos --------------------------------------------------------------
+  // Each stand's tallest chimney and its distance off the road, for the name.
+  const stands = [];
   {
     const centres = [];
     for (let t = 0; t < 20000 && centres.length < 11; t++) {
@@ -1943,6 +1945,7 @@ function buildLandmarks(world, ground, clearance, inLot) {
     }
     for (const [cx, cz] of centres) {
       const n = 4 + Math.floor(r() * 6);
+      let top = null;
       for (let k = 0; k < n; k++) {
         const a = r() * 6.28, d = k === 0 ? 0 : 6 + r() * 30;
         const x = cx + Math.cos(a) * d, z = cz + Math.sin(a) * d;
@@ -1951,8 +1954,11 @@ function buildLandmarks(world, ground, clearance, inLot) {
         if (g.ny < 0.93 || g.surface === 'water') continue;
         // The tallest in the middle of a stand, the young ones round it.
         const h = k === 0 ? 17 + r() * 7 : 8 + r() * 11;
-        L.push({ type: 'hoodoo', x, z, y: g.y, rot: r() * 6.28, scale: h / 18, variant: Math.floor(r() * 4) });
+        const l = { type: 'hoodoo', x, z, y: g.y, rot: r() * 6.28, scale: h / 18, variant: Math.floor(r() * 4) };
+        L.push(l);
+        if (!top || l.scale > top.scale) top = l;
       }
+      if (top) stands.push({ top, off: clearance(top.x, top.z) });
     }
   }
 
@@ -1990,12 +1996,23 @@ function buildLandmarks(world, ground, clearance, inLot) {
   }
 
   // ---- Names -------------------------------------------------------------------------
-  // The arches, the tallest stand of hoodoos and the lighthouse go on the
-  // maps as places, so the minimap labels them as a kid comes near and the
-  // big map shows them as somewhere to drive to — and to meet: "see you at
-  // Keyhole Arch" works when both players can find it by name. Invented
-  // names (tools/brandcheck.mjs).
-  const ARCH_NAMES = ['Keyhole Arch', 'Sundial Arch', 'Hawkeye Arch'];
+  // The arches, one stand of hoodoos and the lighthouse go on the maps as
+  // places, so the minimap labels them as a kid comes near and the big map
+  // shows them as somewhere to drive to — and to meet: "see you at Rustgate
+  // Arch" works when both players can find it by name. Invented names, not
+  // borrowed ones: tools/brandcheck.mjs, and biomecheck's list of real
+  // landmarks and marks the first draft's names collided with.
+  //
+  // Each says its name (main.js districtAt) the first time a car comes within
+  // `r` of it, so `r` has to reach the road: at least 60 m (70 for the
+  // lighthouse), and never less than the landmark's distance off the road
+  // plus 40 m — a carriageway's width and a lane change to spare. The named
+  // stand of hoodoos is the one nearest a road: stands sit 45 to 260 m off
+  // one, and the first stand placed on this seed stood 60 m out with r = 60,
+  // so its name could never be heard from the road, nor after map travel,
+  // which lands on the road.
+  const ARCH_NAMES = ['Rustgate Arch', 'Tumblebow Arch', 'Longstride Arch'];
+  const reach = (l, r0) => Math.max(r0, clearance(l.x, l.z) + 40);
   let ai = 0;
   for (const l of L) {
     let name = null, r0 = 60;
@@ -2004,14 +2021,15 @@ function buildLandmarks(world, ground, clearance, inLot) {
     if (!name) continue;
     world.districts.push({
       id: 'l_' + l.type + ai, name, cx: l.x, cz: l.z, rot: 0,
-      cols: 0, rows: 0, cell: 0, kind: 'landmark', landmark: l.type, r: r0,
+      cols: 0, rows: 0, cell: 0, kind: 'landmark', landmark: l.type, r: reach(l, r0),
     });
   }
-  const firstHoodoo = L.find((l) => l.type === 'hoodoo');
-  if (firstHoodoo) {
+  let near = null;
+  for (const st of stands) if (!near || st.off < near.off) near = st;
+  if (near) {
     world.districts.push({
-      id: 'l_hoodoos', name: 'The Chimneys', cx: firstHoodoo.x, cz: firstHoodoo.z, rot: 0,
-      cols: 0, rows: 0, cell: 0, kind: 'landmark', landmark: 'hoodoo', r: 60,
+      id: 'l_hoodoos', name: 'The Hatstands', cx: near.top.x, cz: near.top.z, rot: 0,
+      cols: 0, rows: 0, cell: 0, kind: 'landmark', landmark: 'hoodoo', r: reach(near.top, 60),
     });
   }
 

@@ -148,6 +148,7 @@ const MIN_LOCK = 0.07;                                    // rad; never less tha
 // input is added on top, so a slide can still be steered. Keyed to the REAR
 // slip, not body slip: at walking pace the body slips 10+ degrees in any tight
 // turn with the tyres not sliding at all.
+//
 // Measured, the rear axle works at 5-6 degrees when the car is cornering at
 // its limit, so the assist stays out of the way of a fast corner and only
 // takes over once the tail is genuinely past its peak.
@@ -207,9 +208,11 @@ export function driveEfficiency(spec, ratio) {
 // 250 km/h across a field — measured, and the reason the roads did not matter.
 // What actually stops a car in a field is the ground's unevenness: every bump
 // is a damper stroke, damper energy per metre rises with speed, so the loss is
-// a force proportional to speed. Tuned so the starter car tops out at roughly
-// half its road speed on grass, which is about what a driver would dare.
-// Gravel and dirt ROADS are graded; they cost a little, not a lot.
+// a force proportional to speed — and more than proportional above ROUGH_KNEE,
+// where the wheels start leaving the ground (see step()). Tuned so the starter
+// car tops out at under half its road speed on grass (122 against 261 km/h),
+// which is about what a driver would dare. Gravel and dirt ROADS are graded;
+// they cost a little, not a lot.
 const ROUGH_DRAG = {
   asphalt: 0, concrete: 0, sidewalk: 0.0004,
   gravel: 0.0010, dirt: 0.0020, rock: 0.0080,
@@ -449,7 +452,7 @@ export function createVehicle(opts = {}) {
     // axle at 95% all the way through a hard launch, and calling that a spin
     // put smoke under every car that was simply accelerating.
     axleOut.spin = cap > 0 ? smoothstep(1.0, 1.35, Math.abs(fx) / cap) : 0;
-    if (need <= cap || cap <= 0) { axleOut.x = fx; axleOut.y = fy; return 0; }
+    if (need <= cap || cap <= 0) { axleOut.x = fx; axleOut.y = fy; return; }
     // Proportional share while the wheels are still rolling...
     const k = cap / need;
     let x = fx * k, y = fy * k;
@@ -463,7 +466,6 @@ export function createVehicle(opts = {}) {
       x = lerp(x, sx, s); y = lerp(y, sy, s);
     }
     axleOut.x = x; axleOut.y = y;
-    return s;
   }
 
   /**
@@ -867,12 +869,13 @@ export function createVehicle(opts = {}) {
     car.yaw += car.yawRate * dt;
 
     car.lonG = aLong / G;
-    // ~60 ms to settle onto the springs: a road car's pitch mode, first order.
-    const kLoad = 1 - Math.exp(-dt / 0.06);
     car.latG = aLat / G;
     // A car held on the brakes is not accelerating, whatever the stop clamp
     // above had to do to keep it that way — and lonG feeds the load transfer.
     if (Math.abs(car.lonG) > 3) car.lonG = Math.sign(car.lonG) * 3;
+    // The weight follows through the springs in ~60 ms: a road car's pitch
+    // mode, first order.
+    const kLoad = 1 - Math.exp(-dt / 0.06);
     car.loadG += (car.lonG - car.loadG) * kLoad;
     car.loadLatG += (car.latG - car.loadLatG) * kLoad;
 

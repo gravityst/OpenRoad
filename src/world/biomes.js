@@ -56,7 +56,7 @@
 // Pure data and arithmetic: no three.js, no DOM. Headless harnesses build the
 // same field the browser does.
 
-import { fbm, ridged, ridgedMF, gradNoise, valueNoise, hash2, smoothstep, clamp, lerp } from './noise.js';
+import { fbm, ridgedMF, gradNoise, valueNoise, hash2, smoothstep, clamp, lerp } from './noise.js';
 
 export const BIOME = { farm: 0, desert: 1, alpine: 2, coast: 3, autumn: 4 };
 export const BIOME_COUNT = 5;

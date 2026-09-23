@@ -884,7 +884,20 @@ function effectsOn(dpr, quality, log = []) {
   const slow144 = probe(() => (1000 / 144) * (rnd() < 0.06 ? 1 : 3) + (rnd() * 2 - 1) * 0.4, 240);
   let strays = 0;
   const cap30 = probe(() => (strays < 3 && rnd() < 0.02 ? (strays++, 17 + rnd() * 3) : doubled(1000 / 30, 1)()), 240);
+  // And a wobble that is a large part of the period. On a 120 Hz laptop this
+  // game's title screen measured rAF intervals of 7.0 / 8.3 / 9.8 ms at the
+  // 10th / 50th / 90th percentiles; centring only within 12% of the 10th
+  // percentile read that as 7.3 ms, and the vsync grid the CPU test rounds
+  // to with it.
+  const wobbly = (ms, j) => () => ms * (rnd() < 0.2 ? 2 : 1) + (rnd() * 2 - 1) * j;
+  const w120 = probe(wobbly(1000 / 120, 1.5), 240), w144 = probe(wobbly(1000 / 144, 1.5), 240);
+  const w60 = probe(wobbly(1000 / 60, 3), 240);
   seed = saved;
+  const within = (v, ms, f) => Math.abs(v - ms) < f * ms;
+  check('...or when the wobble is a fifth of the period',
+    within(w120, 1000 / 120, 0.04) && within(w144, 1000 / 144, 0.04) && within(w60, 1000 / 60, 0.04),
+    `120 Hz +-1.5 ms -> ${w120.toFixed(2)} ms (true 8.33); 144 Hz +-1.5 -> ${w144.toFixed(2)} (6.94); ` +
+    `60 Hz +-3 -> ${w60.toFixed(2)} (16.67)`);
   check('...even when loading kept nearly every frame to two refreshes',
     Math.abs(slow60 - 1000 / 60) < 0.02 * 1000 / 60 && Math.abs(slow144 - 1000 / 144) < 0.02 * 1000 / 144 &&
     Math.abs(cap30 - 1000 / 30) < 0.02 * 1000 / 30,

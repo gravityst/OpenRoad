@@ -540,6 +540,15 @@ function validPeriod(ms) {
  * "unknown": the game assumes 60 Hz exactly as it always did. `raf` is
  * requestAnimationFrame (a parameter so the harness can drive it). stop()
  * ends it and returns the period in ms, or NaN.
+ *
+ * "Mostly idle" is generous: each loading stage is one long task with a
+ * single frame between it and the next. Measured on a 120 Hz laptop, a
+ * 5.5 s load gave 28 callbacks, only 14 of them under 40 ms, so there the
+ * answer is "unknown" — which is safe (see "a screen that is not 60 Hz").
+ * A load that waits more (slow shader compiles, a slow network) gives more,
+ * and a slow machine's waits are where a misreading could come from, hence
+ * the checks in estimateDisplayPeriod. __OPENROAD.autoQuality.probeSamples
+ * says how many it got.
  */
 export function createDisplayProbe(raf) {
   const got = new Float64Array(240);
@@ -587,15 +596,21 @@ export function estimateDisplayPeriod(intervals, count) {
 /**
  * The middle of the cluster of sorted `s` within 12% of `guess`, or NaN if it
  * holds fewer than `need`. rAF timestamps wobble either way, so a percentile
- * sits low in its cluster: centred twice, which takes a 144 Hz screen's
- * estimate from 6.70 ms to 6.86 (true: 6.94).
+ * sits low in its cluster: centred twice within 12%, then twice more within
+ * 25%. The wider passes are for a wobble that is a large part of the period:
+ * this game's title screen on a 120 Hz laptop measured intervals of 7.0 /
+ * 8.3 / 9.8 ms at the 10th / 50th / 90th percentiles, and a 12% window
+ * cannot reach the middle of that — it read 7.3 ms, 12% fast, which puts the
+ * vsync grid the CPU test rounds to in the wrong place. Two refreshes are
+ * +100%, so 25% never reaches the next cluster.
  */
 function clusterAt(s, count, guess, need) {
   let mid = guess;
-  for (let pass = 0; pass < 2; pass++) {
+  for (let pass = 0; pass < 4; pass++) {
+    const w = pass < 2 ? 0.12 : 0.25;
     let a = 0, b = count;
-    while (a < count && s[a] < mid * 0.88) a++;
-    while (b > a && s[b - 1] > mid * 1.12) b--;
+    while (a < count && s[a] < mid * (1 - w)) a++;
+    while (b > a && s[b - 1] > mid * (1 + w)) b--;
     if (b - a < need) return NaN;
     mid = s[(a + b) >> 1];
   }

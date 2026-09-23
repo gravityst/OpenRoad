@@ -57,7 +57,7 @@ import {
   mulberry, clamp, lerp, smoothstep, valueNoise, valueNoise3, tileFbm, tileCells,
 } from '../world/noise.js';
 import {
-  archGeometry, hoodooGeometry, lighthouseGeometry, beamGeometry, snowPoleGeometry,
+  archGeometry, hoodooGeometry, lighthouseGeometry, beamGeometry, snowPoleGeometry, tumbleweedGeometry,
 } from './landmarks.js';
 import {
   paintAtlas, buildSpecies, meshFrom, rasterImpostors, SPECIES, ATLAS_W, ATLAS_H, CELLS,
@@ -1449,6 +1449,81 @@ export function createProps(world, ground, opts = {}) {
     group.add(beam);
     if (!bf) lantern.visible = false;
   }
+  // ---- Tumbleweeds -------------------------------------------------------
+  // Eight of them, only while the camera is in the canyon, rolling downwind
+  // across the flats and the road and bouncing as they go — the one thing
+  // in the desert that moves. Not placed props: each is launched upwind of
+  // the camera, 60-140 m off, and relaunched once it has rolled 160 m away,
+  // so there are always a few about. Cosmetic and local to each player,
+  // like the leaves and the snow. Eight ground lookups a frame.
+  const tumble = (() => {
+    const bio = world.biomes;
+    if (!bio) return null;
+    const N = 8;
+    const geo = tumbleweedGeometry(mulberry((seed | 0) + 9203));
+    const mat = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide });
+    disposables.push(geo, mat);
+    // One slot spare, so a full set never reads as a field out of room.
+    const mesh = new THREE.InstancedMesh(geo, mat, N + 1);
+    mesh.name = 'tumbleweeds';
+    mesh.frustumCulled = false;
+    mesh.castShadow = true;
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    mesh.count = 0;
+    group.add(mesh);
+    const x = new Float64Array(N), z = new Float64Array(N), v = new Float64Array(N);
+    const roll = new Float64Array(N), hop = new Float64Array(N), sc = new Float64Array(N), age = new Float64Array(N);
+    const live = new Uint8Array(N);
+    const w = new Float64Array(5);
+    const q = new THREE.Quaternion(), qr = new THREE.Quaternion(), ax = new THREE.Vector3();
+    const p = new THREE.Vector3(), s3 = new THREE.Vector3(), m = new THREE.Matrix4();
+    let amt = 0, rs = (seed | 0) ^ 0x7b1d;
+    const r = () => { rs = (rs + 0x6D2B79F5) >>> 0; let t = rs; t = Math.imul(t ^ (t >>> 15), 1 | t); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+    function launch(i, cx, cz, wx, wz) {
+      // Upwind of the camera and off to one side or the other.
+      const d = 60 + r() * 80, side = (r() * 2 - 1) * 110;
+      x[i] = cx - wx * d - wz * side; z[i] = cz - wz * d + wx * side;
+      v[i] = 3 + r() * 3.5; roll[i] = r() * 6.28; hop[i] = r() * 6.28; sc[i] = 1.1 + r() * 0.7; age[i] = 0;
+      live[i] = 1;
+    }
+    function update(cx, cz, step) {
+      bio.weightsAt(cx, cz, w);
+      const want = smoothstep(0.5, 0.85, w[1]);
+      amt += (want - amt) * (step > 0 ? Math.min(1, step * 0.8) : 1);
+      if (amt < 0.01) { mesh.count = 0; mesh.visible = false; live.fill(0); return; }
+      mesh.visible = true;
+      const wx = windU.value.x, wz = windU.value.y;
+      let n = 0;
+      for (let i = 0; i < N; i++) {
+        if (!live[i] || (x[i] - cx) ** 2 + (z[i] - cz) ** 2 > 160 * 160) launch(i, cx, cz, wx, wz);
+        // Rolls with the wind, gusting, and slows to a stop in the lee of
+        // nothing: it only ever goes downwind.
+        const gust = 0.7 + 0.3 * Math.sin(windTime * 0.6 + i * 1.7);
+        const sp = v[i] * gust * windU.value.z * 1.4;
+        x[i] += wx * sp * step; z[i] += wz * sp * step;
+        const rad = 0.55 * sc[i];
+        roll[i] += (sp * step) / rad;
+        hop[i] += step * (2.2 + sp * 0.35);
+        const y = ground.heightAt(x[i], z[i]) + rad * 0.92 + Math.abs(Math.sin(hop[i])) * 0.5 * sc[i];
+        // Only on the canyon's own ground, faded in as the canyon is.
+        bio.weightsAt(x[i], z[i], w);
+        age[i] += step;
+        const k = sc[i] * amt * smoothstep(0.4, 0.7, w[1]) * smoothstep(0, 1.5, age[i]);
+        if (k < 0.02) continue;
+        ax.set(wz, 0, -wx);
+        qr.setFromAxisAngle(ax, roll[i]);
+        q.setFromAxisAngle(ax.set(0, 1, 0), i * 2.39).premultiply(qr);
+        p.set(x[i], y, z[i]); s3.set(k, k, k);
+        m.compose(p, q, s3);
+        m.toArray(mesh.instanceMatrix.array, n * 16);
+        n++;
+      }
+      mesh.count = n;
+      mesh.instanceMatrix.needsUpdate = true;
+    }
+    return { update, mesh };
+  })();
+
   stats.landmarks = { arches: archIdx[0].length + archIdx[1].length, hoodoos: hoodooIdx.reduce((a, b) => a + b.length, 0),
     lighthouses: houseIdx.length, snowpoles: poleIdx2.length };
 
@@ -1541,6 +1616,7 @@ export function createProps(world, ground, opts = {}) {
     if (windTime > 3600) windTime -= 3600;
     windU.value.w = windTime;
     if (beam && beam.visible) beam.rotation.y = (windTime * 0.21) % (Math.PI * 2);
+    if (tumble) tumble.update(cx, cz, step);
 
     if (!primed) {
       primed = true;

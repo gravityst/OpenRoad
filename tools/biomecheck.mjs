@@ -547,6 +547,28 @@ const area = new Array(BIOME_COUNT).fill(0);
     }
   }
   console.log('');
+  // Tumbleweeds roll only in the canyon, and never out of bounds or into
+  // the air: after 20 s at each biome's heart, how many are drawn and how
+  // far off the ground the lowest point of any can be.
+  const tw = props.group.children.find((m) => m.name === 'tumbleweeds');
+  const rolling = [];
+  let floating = 0;
+  for (let b = 0; b < BIOME_COUNT; b++) {
+    const [x, z] = BIOMES[b].at;
+    cam.set(x, g.heightAt(x, z) + 2, z);
+    for (let i = 0; i < 1200; i++) props.update(cam, 1 / 60);
+    rolling.push(tw ? tw.count : 0);
+    const a = tw.instanceMatrix.array;
+    for (let i = 0; i < tw.count; i++) {
+      const s0 = Math.hypot(a[i * 16], a[i * 16 + 1], a[i * 16 + 2]);
+      const bottom = a[i * 16 + 13] - 0.55 * s0 * 0.92;
+      const gy = g.heightAt(a[i * 16 + 12], a[i * 16 + 14]);
+      if (!Number.isFinite(bottom) || bottom - gy > 0.5 * s0 + 0.05 || bottom < gy - 0.05) floating++;
+    }
+  }
+  check('tumbleweeds roll in the canyon and nowhere else, on the ground', rolling[BIOME.desert] >= 4 && floating === 0 &&
+    rolling.every((n, b) => b === BIOME.desert || n === 0),
+    BIOMES.map((q, b) => `${q.key} ${rolling[b]}`).join(', ') + `; ${floating} off the ground or airborne past a hop`);
   check('every biome fits the per-tier prop budget at its heart', over === 0,
     `${over} biome-tier cases over ${LIMIT.high}/${LIMIT.medium}/${LIMIT.low} triangles (the nature harness's densest-wood limits)`);
   props.dispose(); terrain.dispose();

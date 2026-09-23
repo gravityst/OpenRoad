@@ -364,3 +364,56 @@ export function snowPoleGeometry() {
   g.computeBoundingSphere();
   return g;
 }
+
+// ---------------------------------------------------------------------------
+// Tumbleweed
+// ---------------------------------------------------------------------------
+
+/**
+ * A tumbleweed: a loose ball of dry twigs, 1.1 m across at scale 1 (props.js
+ * rolls them at 1.1-1.8, big enough to read against the sand from the road). Seventy twigs, each
+ * a thin ribbon along a random arc of the sphere, some bent inward, so it is
+ * see-through the way the real thing is and rolls as a ball. Straw at the
+ * tips, grey-brown at the core. About 560 triangles.
+ */
+export function tumbleweedGeometry(rnd) {
+  const pos = [], col = [], idx = [];
+  const TIP = lin(0.66, 0.54, 0.36), CORE = lin(0.30, 0.24, 0.17);
+  const R = 0.55;
+  for (let t = 0; t < 70; t++) {
+    // A random great-circle arc: an axis, a start angle and a sweep.
+    const u = rnd() * 2 - 1, th = rnd() * Math.PI * 2, s = Math.sqrt(1 - u * u);
+    const ax = [s * Math.cos(th), u, s * Math.sin(th)];
+    // Two vectors perpendicular to the axis span the arc's plane.
+    const tmp = Math.abs(ax[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0];
+    const e1 = [ax[1] * tmp[2] - ax[2] * tmp[1], ax[2] * tmp[0] - ax[0] * tmp[2], ax[0] * tmp[1] - ax[1] * tmp[0]];
+    const l1 = Math.hypot(e1[0], e1[1], e1[2]);
+    e1[0] /= l1; e1[1] /= l1; e1[2] /= l1;
+    const e2 = [ax[1] * e1[2] - ax[2] * e1[1], ax[2] * e1[0] - ax[0] * e1[2], ax[0] * e1[1] - ax[1] * e1[0]];
+    const a0 = rnd() * Math.PI * 2, sweep = 0.8 + rnd() * 1.4;
+    const r0 = R * (0.55 + rnd() * 0.45), w = 0.018 + rnd() * 0.012;
+    const base = pos.length / 3, SEG = 4;
+    for (let k = 0; k <= SEG; k++) {
+      const a = a0 + (k / SEG) * sweep;
+      const rr = r0 * (1 - 0.25 * Math.sin((k / SEG) * Math.PI));
+      const px = (Math.cos(a) * e1[0] + Math.sin(a) * e2[0]) * rr;
+      const py = (Math.cos(a) * e1[1] + Math.sin(a) * e2[1]) * rr;
+      const pz = (Math.cos(a) * e1[2] + Math.sin(a) * e2[2]) * rr;
+      // The ribbon is widened along the arc's axis.
+      pos.push(px - ax[0] * w, py - ax[1] * w, pz - ax[2] * w, px + ax[0] * w, py + ax[1] * w, pz + ax[2] * w);
+      const c = _c.copy(CORE).lerp(TIP, clamp(rr / R, 0, 1));
+      col.push(c.r, c.g, c.b, c.r, c.g, c.b);
+      if (k > 0) {
+        const i0 = base + (k - 1) * 2;
+        idx.push(i0, i0 + 1, i0 + 2, i0 + 1, i0 + 3, i0 + 2);
+      }
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  g.computeBoundingSphere();
+  return g;
+}

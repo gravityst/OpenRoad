@@ -157,12 +157,19 @@ const MUD  = [0.23, 0.175, 0.125];
 // is pulled toward its neighbour's ground where the two meet, so a border is
 // a change of country rather than a seam.
 //
-// Red Canyon: sunburnt hardpan, orange dune sand, rust-red rock, and on the
-// odd patch of grass at its edge, dry red straw.
-const HARDPAN = [0.70, 0.40, 0.24];
-const DUNE = [0.84, 0.54, 0.32];
+// Red Canyon: sunburnt hardpan, pinkish dune sand, rust-red rock, and on
+// the odd patch of grass at its edge, dry red straw. The ground is paler and
+// less saturated than the rock on purpose: in real red-rock country the
+// sand is tan and the cliffs are what burn, and with both at one orange
+// (the first version) nothing stood out from anything.
+const HARDPAN = [0.70, 0.47, 0.33];
+const DUNE = [0.84, 0.62, 0.44];
 const RED_ROCK = [0.66, 0.33, 0.19];
-const SCRUB = [0.60, 0.46, 0.29];
+const SCRUB = [0.58, 0.49, 0.34];
+// Desert pavement, the dark wind-sorted gravel on old flats, and the pale
+// silt of a dry wash.
+const PAVEMENT = [0.52, 0.37, 0.27];
+const SILT = [0.86, 0.74, 0.58];
 // Frostpeak Pass: snow a touch blue in its hollows, grey granite, and a dark
 // meadow green below the snow line. Snow's albedo is really 0.8-0.9, but under
 // this sun (4.6) and tone curve anything past about 0.8 sRGB clips to paper
@@ -183,13 +190,21 @@ const MARRAM = [0.62, 0.58, 0.35];
 const AUT_GRASS = [0.54, 0.46, 0.20];
 const AUT_RUSSET = [0.58, 0.35, 0.15];
 const LITTER = [0.55, 0.29, 0.11];
+// ...which is never one colour: drifts of fresh gold, and older leaves gone
+// dark brown in the damp between them.
+const LITTER_GOLD = [0.68, 0.46, 0.16];
+const LITTER_DARK = [0.34, 0.19, 0.09];
 
 // The per-pixel rock the shader draws on steep ground, as LINEAR colour (the
 // shader's own default, F_MAIN, is the farmland one). Carried per vertex in
 // `rockTint`, doubled so a byte holds 0..0.5 at 0.002 steps.
 const ROCK_L = [0.18, 0.165, 0.145];
 const RED_ROCK_L = [0.27, 0.068, 0.030];
-const GRANITE_L = [0.14, 0.145, 0.155];
+const GRANITE_L = [0.105, 0.105, 0.11];
+// The bay's cliffs: pale, warm sandstone (sRGB about 0.74, 0.66, 0.54), the
+// palest rock on the map — which is how the shader tells it apart and beds
+// it boldly, the way a sea cliff shows its layers.
+const CLIFF_L = [0.50, 0.39, 0.25];
 
 // How much of each packed detail mask a surface shows, in the attribute's own
 // order: (gravel chips, sand ripple, grass blades, soil clods). These do NOT
@@ -204,8 +219,9 @@ const DETAIL = {
   grass:    [0.05, 0.00, 0.95, 0.20],
   sand:     [0.14, 0.95, 0.00, 0.10],
   rock:     [0.90, 0.00, 0.04, 0.16],
-  // Snow takes the sand ripple at low strength: wind-drift, not grain.
-  snow:     [0.04, 0.40, 0.00, 0.04],
+  // Snow takes the sand ripple at low strength: wind-drift, not grain. At
+  // 0.40 it streaked every snowfield like brushed metal out to the fade.
+  snow:     [0.04, 0.18, 0.00, 0.04],
   water:    [0.10, 0.80, 0.00, 0.10],
 };
 
@@ -487,6 +503,33 @@ varying vec4 vOrPos;
 varying vec4 vOrWeight;
 varying vec3 vOrNormal;
 varying vec4 vOrRock;
+uniform float orTime;
+uniform float orHeat;
+uniform float orSeaY;       // sea level, for the tide line on the cliffs
+`;
+
+// The canyon's heat haze, as the one part of it a ground shader can draw: a
+// mirage. On the flat canyon floor, a few hundred metres out, where the eye
+// meets the ground within about three degrees of the horizon, hot air over
+// the sand bends the sky down into it — so the far flats take the horizon's
+// colour in shimmering pools that crawl as you drive. After lighting and
+// before fog, because what it shows is the sky, not a lit surface; the fog
+// colour IS the horizon's colour (sky.js keeps the two identical). Only in
+// daylight: sky.js publishes how dark it is and update() hands it in.
+const MIRAGE = `
+#ifdef USE_FOG
+{
+  vec3 orV = vOrPos.xyz - cameraPosition;
+  float orD = length( orV );
+  float orDesM = clamp( vOrRock.a * 2.0, 0.0, 1.0 ) * ( 1.0 - smoothstep( 0.45, 0.55, vOrRock.a ) );
+  float orMir = orDesM * orHeat
+              * ( 1.0 - smoothstep( 0.01, 0.045, -orV.y / max( orD, 1.0 ) ) )
+              * smoothstep( 150.0, 420.0, orD ) * smoothstep( 0.965, 0.99, normalize( vOrNormal ).y );
+  orMir *= smoothstep( -0.3, 0.9, sin( vOrPos.x * 0.043 + vOrPos.z * 0.031 + orTime * 0.9 ) * sin( vOrPos.x * 0.017 - vOrPos.z * 0.029 - orTime * 0.6 ) + 0.35 )
+         * ( 0.8 + 0.2 * sin( vOrPos.x * 0.35 + vOrPos.z * 0.29 + orTime * 7.0 ) );
+  gl_FragColor.rgb = mix( gl_FragColor.rgb, fogColor * 1.06, clamp( orMir, 0.0, 0.8 ) );
+}
+#endif
 `;
 
 const F_MAIN = `
@@ -519,18 +562,30 @@ const F_MAIN = `
   // the map: how desert the ground is (0..0.5) and how snowy (0.5..1). Snow
   // is carried explicitly because reading it off the colour flipped with
   // each LOD ring's shading and drew a staircase seam across a snowfield.
-  // Snow holds on steeper ground than turf does before the rock shows
-  // through (from ~32 degrees rather than ~29), which leaves a mountainside
-  // white with dark crags rather than grey with white flecks. Per pixel, off
-  // the interpolated slope: an earlier per-VERTEX rock class for the crags
-  // drew its edge as a staircase at the vertex spacing.
+  // Under snow the rock comes through on steep ribs and holds its snow in
+  // the gullies between them, because snow slides off a convex face and the
+  // wind strips a crest, while a couloir fills: rock from about 29 degrees
+  // on a rib, from about 38 in a gully (the vertex's own crest measure,
+  // carried in rockTint.a — see fillRows), jittered by the macro noise so
+  // the line between them is ragged. That contrast — dark rock, white
+  // couloirs, white snowfields below — is what says "mountains" from the
+  // road; held to 43 degrees everywhere (the first version) the range was a
+  // heap of mashed potato with a few grey flecks.
+  // Per pixel, off the interpolated slope: an earlier per-VERTEX rock class
+  // for the crags drew its edge as a staircase at the vertex spacing. (Snow
+  // on ledges, as bands along the contours, was tried and taken out: regular
+  // it striped the range like a zebra, and broken up by noise it drew grey
+  // worms across the snowfields.)
   float orSnowy = smoothstep( 0.55, 0.8, vOrRock.a );
   float orDes = clamp( vOrRock.a * 2.0, 0.0, 1.0 ) * ( 1.0 - smoothstep( 0.45, 0.55, vOrRock.a ) );
   float orBare = smoothstep( 0.075, 0.125, orSl ) * orG;
   // In the canyon country rock shows on gentler ground (from ~23 degrees),
   // because a mesa's flank IS rock; elsewhere turf holds to ~30.
-  float orRock = smoothstep( mix( mix( 0.125, 0.075, orDes ), 0.15, orSnowy ),
-                             mix( mix( 0.19, 0.13, orDes ), 0.27, orSnowy ), orSl );
+  float orRet = clamp( ( vOrRock.a - 0.8 ) * 5.0, 0.0, 1.0 );
+  float orSnowLo = 0.125 + orRet * 0.085 + ( orMa.g - 0.5 ) * 0.06 + ( orMb.r - 0.5 ) * 0.10;
+  float orRock = mix( smoothstep( mix( 0.125, 0.075, orDes ), mix( 0.19, 0.13, orDes ), orSl ),
+                      smoothstep( orSnowLo, orSnowLo + 0.075, orSl ),
+                      orSnowy );
   // Red rock is banded coarsely and boldly, the way sandstone beds are: the
   // stripes are most of what says "canyon" from the road.
   // The fine bedding fades with distance: at 2.3 m a stripe it aliases into
@@ -538,11 +593,48 @@ const F_MAIN = `
   // Granite (the only rock bluer than it is red) is not bedded at all.
   float orStrata = 0.84 + 0.16 * sin( vOrPos.y * 2.7 + orMa.r * 9.0 ) * ( 1.0 - smoothstep( 60.0, 220.0, length( vOrPos.xyz - cameraPosition ) ) )
                  * ( 1.0 - smoothstep( 0.0, 0.004, vOrRock.b - vOrRock.r ) );
-  orStrata = mix( orStrata, 0.74 + 0.26 * sin( vOrPos.y * 0.85 + orMa.r * 4.0 ) * sin( vOrPos.y * 0.31 + 1.3 ), orDes );
+  orStrata = mix( orStrata, 0.86 + 0.14 * sin( vOrPos.y * 0.85 + orMa.r * 4.0 ) * sin( vOrPos.y * 0.31 + 1.3 ), orDes );
+  // Sea cliffs, told apart by how pale their rock is (luminance over 0.3 in
+  // linear light; no other rock on the map is over 0.17): beds a metre or
+  // two thick in three tones, and a dark tide line at their foot. The fine
+  // 2.3 m ribbing everywhere else read on a 60 m cliff as corrugated iron.
+  float orCliff = smoothstep( 0.24, 0.32, dot( vOrRock.rgb * 0.5, vec3( 0.2126, 0.7152, 0.0722 ) ) );
+  float orCb = sin( vOrPos.y * 0.9 + orMa.r * 6.0 + orMb.g * 1.5 ) * 0.5 + 0.5;
+  float orCliffBeds = mix( 0.78, 1.08, smoothstep( 0.2, 0.8, orCb ) ) * mix( 1.0, 0.82, smoothstep( 0.55, 0.9, sin( vOrPos.y * 0.37 + 2.0 ) ) )
+                    * mix( 0.62, 1.0, smoothstep( orSeaY + 1.3, orSeaY + 3.3, vOrPos.y ) );
+  orStrata = mix( orStrata, orCliffBeds, orCliff );
+  // Granite is not bedded; it weathers in patches, lighter where a face
+  // has freshly spalled and darker where lichen and meltwater have been.
+  // (Jointing drawn as a sine across the face, the first try, striped every
+  // mountain like a tiger.)
+  orStrata *= mix( 1.0, 0.72 + 0.42 * orMb.g + ( orMa.r - 0.5 ) * 0.3, orSnowy );
   vec3 orBareCol = mix( vec3( 0.095, 0.055, 0.024 ), vec3( 0.24, 0.085, 0.034 ), orDes );
   diffuseColor.rgb = mix( diffuseColor.rgb, orBareCol * ( 0.85 + orMb.b * 0.3 ), orBare );
+
+  // ---- Red rock: the canyon's layer cake. ---------------------------------
+  // Sandstone lies in beds laid flat over the whole region, so the bands are
+  // keyed to absolute height and every mesa and wall in the canyon shows the
+  // same sequence at the same level, the way the real ones do: deep red and
+  // orange beds, a pale cream caprock band 3-4 m thick every 23 m, and thin
+  // chocolate seams every 7 m that fade out before they can alias. Each bed
+  // wanders a few metres with the macro noise, so no band is a ruled line.
+  // Desert varnish, the dark streaks where water has run down a cliff for a
+  // few thousand years, only on faces steep enough to have them: one tap of
+  // the macro map stretched 600:1 down the slope. All LINEAR colour. One
+  // colour on every wall (the first version) read as orange plastic.
+  float orYb = vOrPos.y + ( orMa.r - 0.5 ) * 9.0 + ( orMb.g - 0.5 ) * 2.5;
+  float orPh = fract( orYb * ( 1.0 / 23.0 ) );
+  float orCapBand = smoothstep( 0.70, 0.74, orPh ) * ( 1.0 - smoothstep( 0.86, 0.90, orPh ) );
+  float orPh2 = fract( orYb * ( 1.0 / 7.3 ) );
+  float orSeam = smoothstep( 0.40, 0.46, orPh2 ) * ( 1.0 - smoothstep( 0.54, 0.60, orPh2 ) )
+               * ( 1.0 - smoothstep( 250.0, 600.0, length( vOrPos.xyz - cameraPosition ) ) );
+  vec3 orRed = mix( vec3( 0.30, 0.074, 0.033 ), vec3( 0.42, 0.14, 0.055 ), smoothstep( 0.2, 0.8, sin( orYb * 0.37 ) * 0.5 + 0.5 ) );
+  orRed = mix( orRed, vec3( 0.60, 0.45, 0.31 ), orCapBand * 0.85 );
+  orRed = mix( orRed, vec3( 0.16, 0.06, 0.03 ), orSeam * 0.5 );
+  float orVarnish = smoothstep( 0.5, 0.8, texture2D( orMacro, vec2( ( vOrPos.x + vOrPos.z ) * 0.019, vOrPos.y * 0.0016 ) ).b );
+  orRed *= 1.0 - orVarnish * 0.4 * smoothstep( 0.2, 0.45, orSl );
   // rockTint is stored doubled (0..0.5 across a byte), so it is halved here.
-  diffuseColor.rgb = mix( diffuseColor.rgb, vOrRock.rgb * 0.5 * orStrata, orRock );
+  diffuseColor.rgb = mix( diffuseColor.rgb, mix( vOrRock.rgb * 0.5, orRed, orDes ) * orStrata, orRock );
   orW = vec4( orW.x + orRock * 0.9, orW.y, orW.z * ( 1.0 - max( orBare, orRock ) ), orW.w + orBare * 0.8 );
   // ^4 rather than ^2, so the crossfade between projections is confined to
   // genuinely steep ground: at 20 degrees of slope the up plane still holds 98%
@@ -709,6 +801,11 @@ export function createTerrain(world, ground, opts = {}) {
       orWarmth: { value: opts.warmth ?? 0.10 },
       orMacro: { value: detail.macro },
       orMacroTile: { value: new THREE.Vector2(1 / 310, 1 / 53) },
+      // The mirage (MIRAGE below): seconds, and how much sun there is to
+      // make one, 0 at night.
+      orTime: { value: 0 },
+      orHeat: { value: 1 },
+      orSeaY: { value: world.biomes ? world.biomes.seaLevel : -1e4 },
     };
 
     const prevCompile = material.onBeforeCompile;
@@ -725,7 +822,8 @@ export function createTerrain(world, ground, opts = {}) {
         .replace('#include <project_vertex>', `#include <project_vertex>\n${V_MAIN}`);
       shader.fragmentShader = f
         .replace('#include <common>', `#include <common>\n${F_PARS}`)
-        .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>\n${F_MAIN}`);
+        .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>\n${F_MAIN}`)
+        .replace('#include <fog_fragment>', `${MIRAGE}\n#include <fog_fragment>`);
     };
     // Every parameter three hashes into a program key is identical between this
     // material and any other vertex-coloured Lambert in the scene, so without a
@@ -777,6 +875,20 @@ export function createTerrain(world, ground, opts = {}) {
   const seaLevel = bio ? bio.seaLevel : -Infinity;
   const bw = new Float64Array(5);
   bw[BIOME.farm] = 1;
+
+  /**
+   * A dusting of snow on bare ground near the pass — the canyon's sand and
+   * hardpan where the two meet — rising to meet the snow proper, as the
+   * grass already had. Without it the sand ran straight into white along a
+   * line, the one border on the map that still looked like a seam.
+   */
+  function dust(x, z, y, wA, out) {
+    if (wA <= 0.02) return;
+    const k = smoothstep(0.12, 0.5, bio.snowAt(x, z, y, wA)) * 0.7;
+    if (k <= 0) return;
+    out[0] = lerp(out[0], SNOW[0], k); out[1] = lerp(out[1], SNOW[1], k); out[2] = lerp(out[2], SNOW[2], k);
+    if (k > palSnow) palSnow = k;
+  }
 
   function palette(surface, x, z, ny, y, crest, out, fine = 1) {
     palWood = 0;
@@ -859,7 +971,15 @@ export function createTerrain(world, ground, opts = {}) {
       palWood = smoothstep(0.15, 0.3, woodland(x, z, terrain.seed ?? 0));
       if (palWood > 0) {
         const k = palWood * 0.72;
-        const fr = lerp(FLOOR[0], LITTER[0], wU), fg = lerp(FLOOR[1], LITTER[1], wU), fb = lerp(FLOOR[2], LITTER[2], wU);
+        let lr = LITTER[0], lg = LITTER[1], lb = LITTER[2];
+        if (wU > 0.02) {
+          const n = valueNoise(x / 7.5, z / 7.5, tintSeed + 161) + valueNoise(x / 31, z / 31, tintSeed + 162) * 0.7;
+          const gold = smoothstep(0.25, 0.9, n) * 0.7, dark = smoothstep(-0.25, -0.9, n) * 0.6;
+          lr = lerp(lerp(lr, LITTER_GOLD[0], gold), LITTER_DARK[0], dark);
+          lg = lerp(lerp(lg, LITTER_GOLD[1], gold), LITTER_DARK[1], dark);
+          lb = lerp(lerp(lb, LITTER_GOLD[2], gold), LITTER_DARK[2], dark);
+        }
+        const fr = lerp(FLOOR[0], lr, wU), fg = lerp(FLOOR[1], lg, wU), fb = lerp(FLOOR[2], lb, wU);
         out[0] = lerp(out[0], fr, k); out[1] = lerp(out[1], fg, k); out[2] = lerp(out[2], fb, k);
       }
       out[0] = lerp(out[0], SOIL[0], bare); out[1] = lerp(out[1], SOIL[1], bare); out[2] = lerp(out[2], SOIL[2], bare);
@@ -891,11 +1011,15 @@ export function createTerrain(world, ground, opts = {}) {
       // The farmland's river wash, the canyon's orange dunes and the bay's
       // pale beach, by weight; darker where the sea has just been.
       const wash = 1 - wD - wC;
-      out[0] = WASH[0] * wash + DUNE[0] * wD + BEACH[0] * wC;
-      out[1] = WASH[1] * wash + DUNE[1] * wD + BEACH[1] * wC;
-      out[2] = WASH[2] * wash + DUNE[2] * wD + BEACH[2] * wC;
+      // The canyon's sand drifts between pink-tan and the pale silt the
+      // wind sorts out of it, in patches a few dozen metres across.
+      const silt = wD > 0 ? smoothstep(-0.15, 0.65, valueNoise(x / 61, z / 61, tintSeed + 151)) * 0.45 : 0;
+      out[0] = WASH[0] * wash + lerp(DUNE[0], SILT[0], silt) * wD + BEACH[0] * wC;
+      out[1] = WASH[1] * wash + lerp(DUNE[1], SILT[1], silt) * wD + BEACH[1] * wC;
+      out[2] = WASH[2] * wash + lerp(DUNE[2], SILT[2], silt) * wD + BEACH[2] * wC;
       const wet = surface === 'water' ? 1 : smoothstep(seaLevel + 1.0, seaLevel + 0.1, y);
       if (wet > 0) { out[0] = lerp(out[0], WET_SAND[0], wet); out[1] = lerp(out[1], WET_SAND[1], wet); out[2] = lerp(out[2], WET_SAND[2], wet); }
+      dust(x, z, y, wA, out);
       return;
     }
     const hex = (SURFACES[surface] || SURFACES.grass).colour;
@@ -910,10 +1034,14 @@ export function createTerrain(world, ground, opts = {}) {
       out[1] = lerp(out[1], HARDPAN[1] * wD + SNOW[1] * wA + out[1] * wG, k);
       out[2] = lerp(out[2], HARDPAN[2] * wD + SNOW[2] * wA + out[2] * wG, k);
     } else if (surface === 'dirt' && wD > 0) {
-      // Hardpan, in sun-baked plates of slightly different red.
+      // Hardpan, in sun-baked plates of slightly different red, and on the
+      // old flats dark desert pavement in broad patches.
       const k = 1 + valueNoise(x / 23, z / 23, tintSeed + 141) * 0.1 * wD;
-      out[0] = lerp(out[0], HARDPAN[0], wD) * k; out[1] = lerp(out[1], HARDPAN[1], wD) * k;
-      out[2] = lerp(out[2], HARDPAN[2], wD) * k;
+      const pv = smoothstep(0.1, 0.5, fbm(x / 140, z / 140, tintSeed + 143, 2)) * 0.6;
+      out[0] = lerp(out[0], lerp(HARDPAN[0], PAVEMENT[0], pv), wD) * k;
+      out[1] = lerp(out[1], lerp(HARDPAN[1], PAVEMENT[1], pv), wD) * k;
+      out[2] = lerp(out[2], lerp(HARDPAN[2], PAVEMENT[2], pv), wD) * k;
+      dust(x, z, y, wA, out);
     } else if (surface === 'rock' && wD + wA > 0) {
       const base = 1 - wD - wA;
       out[0] = out[0] * base + RED_ROCK[0] * wD + GRANITE[0] * wA;
@@ -1151,7 +1279,7 @@ export function createTerrain(world, ground, opts = {}) {
         // into a brow, more means it is steepening into a gully. Measured this
         // way the answer is a pure function of (x,z), so it cannot disagree
         // across a chunk border the way anything read off the local grid would.
-        const hl = Math.hypot(nx, nz);
+        const hl = Math.sqrt(nx * nx + nz * nz);
         let crest = 0;
         if (hl > 1e-5) {
           const inv = 1 / hl;
@@ -1164,11 +1292,17 @@ export function createTerrain(world, ground, opts = {}) {
         if (dtl) weigh(surface, ny, v * 4, dtl);
         if (rkt) {
           // bw still holds this vertex's weights: tint() just asked palette().
-          const wD = bw[BIOME.desert], wA = bw[BIOME.alpine], wR = 1 - wD - wA, o4 = v * 4;
-          rkt[o4] = (ROCK_L[0] * wR + RED_ROCK_L[0] * wD + GRANITE_L[0] * wA) * 510;
-          rkt[o4 + 1] = (ROCK_L[1] * wR + RED_ROCK_L[1] * wD + GRANITE_L[1] * wA) * 510;
-          rkt[o4 + 2] = (ROCK_L[2] * wR + RED_ROCK_L[2] * wD + GRANITE_L[2] * wA) * 510;
-          rkt[o4 + 3] = (palSnow > 0.05 ? 0.5 + 0.5 * palSnow : Math.min(0.5, wD * 0.5)) * 255;
+          const wD = bw[BIOME.desert], wA = bw[BIOME.alpine], wC = bw[BIOME.coast];
+          const wR = 1 - wD - wA - wC, o4 = v * 4;
+          rkt[o4] = (ROCK_L[0] * wR + RED_ROCK_L[0] * wD + GRANITE_L[0] * wA + CLIFF_L[0] * wC) * 510;
+          rkt[o4 + 1] = (ROCK_L[1] * wR + RED_ROCK_L[1] * wD + GRANITE_L[1] * wA + CLIFF_L[1] * wC) * 510;
+          rkt[o4 + 2] = (ROCK_L[2] * wR + RED_ROCK_L[2] * wD + GRANITE_L[2] * wA + CLIFF_L[2] * wC) * 510;
+          // Snow country also carries how well the ground holds its snow:
+          // a gully fills and a rib is stripped (the shader reads it as the
+          // steepness the rock shows through at). 0.8..1 in the heart of the
+          // snow, so the snow flag itself is unchanged there.
+          const ret = crest < -0.55 ? 1 : crest > 0.55 ? 0 : 0.5 - crest * 0.9;
+          rkt[o4 + 3] = (palSnow > 0.05 ? 0.5 + 0.5 * palSnow * (0.6 + 0.4 * ret) : Math.min(0.5, wD * 0.5)) * 255;
         }
         // Verge wear. The strip of grass just past a road's shoulder is where
         // wheels drop off, walkers walk and the mower scalps, so it is shorter,
@@ -1717,13 +1851,14 @@ normal = normalize( ( viewMatrix * vec4( orNW, 0.0 ) ).xyz );
     group.add(mesh);
 
     let time = 0;
-    const coast = bio.seaBounds.zMin + 380;   // no sea north of here
     function update(cameraPos, dt) {
       time += dt > 0 && dt < 0.25 ? dt : 0;
       if (time > 3600) time -= 3600;
       uniforms.orWTime.value = time;
       const R = stats.viewDistance + 300;
-      mesh.visible = cameraPos.z + R > coast;
+      // Drawn only with open water within a view distance: the plane itself
+      // is cheap, but a call and a screen of discarded fragments are not free.
+      mesh.visible = bio.seaDistAt(cameraPos.x, cameraPos.z) < stats.viewDistance + 100;
       if (!mesh.visible) return;
       // Snapped, so the plane's own vertices never swim; everything drawn on
       // it is in world coordinates anyway.
@@ -1855,6 +1990,12 @@ normal = normalize( ( viewMatrix * vec4( orNW, 0.0 ) ).xyz );
     // Streaming stutter is exactly what you notice from a moving car, so frames
     // that are already late get less of the budget, not the same amount.
     const step = dt === undefined ? 1 / 60 : dt;
+    if (detail) {
+      const u = detail.uniforms;
+      u.orTime.value = (u.orTime.value + (step > 0 && step < 0.25 ? step : 0)) % 3600;
+      const sky = group.parent && group.parent.userData ? group.parent.userData.sky : null;
+      u.orHeat.value = sky ? 1 - sky.night : 1;
+    }
     const k = step > 0.026 ? 0.4 : step < 0.015 ? 1.5 : 1;
     const spent = drain(budgetMs * k);
     if (water) water.update(cameraPos, step);

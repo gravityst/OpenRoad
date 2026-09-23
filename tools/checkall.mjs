@@ -31,6 +31,7 @@ const CHECKS = [
   ['calm', 'a crash is a solid, harmless bump: nothing burns, breaks or slows down'],
   ['net', 'remote cars move smoothly, and old and new pages can both still play'],
   ['ui', 'every screen builds and focuses its action; no emoji, no fire, no scolding'],
+  ['biome', 'five places a kid can name, one world for every player, and no seams'],
 ];
 
 const results = [];

@@ -267,15 +267,23 @@ export function createGround(world, opts = {}) {
     const c = solve[n];
     if (Wt[c] > 0) delta[c] = Tg[c] / Wt[c];   // start close to the answer
   }
+  // Solved in a Float64 copy and written back once: rounding every store to
+  // float32 cost 15% of the solve, which is most of this layer's boot time.
+  // 120 sweeps, not 160: measured against 600 (converged), 160 left under
+  // 0.1 mm and 120 leaves 0.34 mm at the worst cell anywhere on the map, for
+  // a quarter less of the loading bar (1.2 s -> 0.8 s for the whole layer).
   const OMEGA = 1.86;
-  for (let it = 0; it < 160; it++) {
+  const SWEEPS = 120;
+  const D64 = Float64Array.from(delta);
+  for (let it = 0; it < SWEEPS; it++) {
     for (let n = 0; n < solve.length; n++) {
       const c = solve[n];
-      const avg = 0.25 * (delta[c - 1] + delta[c + 1] + delta[c - N] + delta[c + N]);
+      const avg = 0.25 * (D64[c - 1] + D64[c + 1] + D64[c - N] + D64[c + N]);
       const w = Wt[c];
-      delta[c] += OMEGA * ((w > 0 ? (avg + Tg[c]) / (1 + w) : avg) - delta[c]);
+      D64[c] += OMEGA * ((w > 0 ? (avg + Tg[c]) / (1 + w) : avg) - D64[c]);
     }
   }
+  for (let n = 0; n < solve.length; n++) delta[solve[n]] = D64[solve[n]];
 
   let pinnedCells = 0;
   for (let c = 0; c < Wt.length; c++) if (Wt[c] > 0) pinnedCells++;
@@ -318,13 +326,13 @@ export function createGround(world, opts = {}) {
     return dOut;
   }
 
-  function materialAt(x, z, ny) {
+  function materialAt(x, z, ny, h) {
     const i = Math.round((x + half) / RES), j = Math.round((z + half) / RES);
     if (i >= 0 && j >= 0 && i < N && j < N) {
       const m = mat[idx(i, j)];
       if (m !== MAT_NONE) return MAT_NAMES[m];
     }
-    return terrain.cover(x, z, ny);
+    return terrain.cover(x, z, ny, h);
   }
 
   function blank() {
@@ -339,15 +347,18 @@ export function createGround(world, opts = {}) {
   function sample(x, z, out) {
     const r = out || result;
     const d = sampleDelta(x, z);
-    r.y = terrain.height(x, z) + d.v;
+    const h0 = terrain.height(x, z);
+    r.y = h0 + d.v;
 
     const e = 1.5;
     const gx = (terrain.height(x + e, z) - terrain.height(x - e, z)) / (2 * e) + d.dx;
     const gz = (terrain.height(x, z + e) - terrain.height(x, z - e)) / (2 * e) + d.dz;
-    const inv = 1 / Math.hypot(gx, 1, gz);
+    // sqrt, not Math.hypot: the builtin returns a boxed number every call,
+    // and this is every wheel, every step, and every terrain vertex.
+    const inv = 1 / Math.sqrt(gx * gx + 1 + gz * gz);
     r.nx = -gx * inv; r.ny = inv; r.nz = -gz * inv;
 
-    const m = materialAt(x, z, r.ny);
+    const m = materialAt(x, z, r.ny, h0);
     const sp = SURFACES[m] || SURFACES.grass;
     r.surface = m; r.grip = sp.grip; r.roughness = sp.roughness;
     r.rolling = sp.rolling; r.dust = sp.dust;
@@ -376,7 +387,8 @@ export function createGround(world, opts = {}) {
       const len2 = dx * dx + dz * dz;
       let t = len2 > 1e-9 ? ((x - ax) * dx + (z - az) * dz) / len2 : 0;
       t = t < 0 ? 0 : t > 1 ? 1 : t;
-      const d = Math.hypot(x - (ax + dx * t), z - (az + dz * t)) / (seg[o + 6] || 1);
+      const ex = x - (ax + dx * t), ez = z - (az + dz * t);
+      const d = Math.sqrt(ex * ex + ez * ez) / (seg[o + 6] || 1);
       if (d < bd) { bd = d; bi = i; bt = t; }
     }
     if (bi < 0) {
@@ -387,8 +399,9 @@ export function createGround(world, opts = {}) {
     const o = bi * STRIDE;
     const ax = seg[o], az = seg[o + 1];
     const dx = seg[o + 3] - ax, dz = seg[o + 4] - az;
-    const invL = 1 / Math.max(1e-6, Math.hypot(dx, dz));
-    r.dist = Math.hypot(x - (ax + dx * bt), z - (az + dz * bt));
+    const invL = 1 / Math.max(1e-6, Math.sqrt(dx * dx + dz * dz));
+    const ex = x - (ax + dx * bt), ez = z - (az + dz * bt);
+    r.dist = Math.sqrt(ex * ex + ez * ez);
     r.onRoad = r.dist <= seg[o + 6];
     r.edge = meta[bi].edge;
     r.s = seg[o + 10] + bt * seg[o + 11];
@@ -415,9 +428,9 @@ export function createGround(world, opts = {}) {
           let t = len2 > 1e-9 ? ((x - ax) * dx + (z - az) * dz) / len2 : 0;
           t = t < 0 ? 0 : t > 1 ? 1 : t;
           const px = ax + dx * t, pz = az + dz * t;
-          const d = Math.hypot(x - px, z - pz);
+          const d = Math.sqrt((x - px) * (x - px) + (z - pz) * (z - pz));
           if (d < bd) {
-            const inv = 1 / Math.max(1e-6, Math.hypot(dx, dz));
+            const inv = 1 / Math.max(1e-6, Math.sqrt(dx * dx + dz * dz));
             bd = d;
             best = {
               x: px, z: pz, y: hermite(o, t), dist: d, edge: meta[i].edge,

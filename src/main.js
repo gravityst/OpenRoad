@@ -1737,6 +1737,9 @@ async function boot() {
       if (d.biome !== undefined) continue;
       const dist = Math.hypot(d.cx - x, d.cz - z);
       if (dist < d.r + 120 && dist < bd) { bd = dist; best = d.name; }
+      // A landmark (an arch, the lighthouse) says its name the first time a
+      // kid gets close to it, once a session: finding one is the point.
+      if (d.landmark && !d.found && dist < d.r) { d.found = true; hud.toast(d.name, 2.4); }
     }
     if (best) return best;
     for (const v of world.villages) {

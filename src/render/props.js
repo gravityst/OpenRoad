@@ -57,6 +57,9 @@ import {
   mulberry, clamp, lerp, smoothstep, valueNoise, valueNoise3, tileFbm, tileCells,
 } from '../world/noise.js';
 import {
+  archGeometry, hoodooGeometry, lighthouseGeometry, beamGeometry, snowPoleGeometry, tumbleweedGeometry,
+} from './landmarks.js';
+import {
   paintAtlas, buildSpecies, meshFrom, rasterImpostors, SPECIES, ATLAS_W, ATLAS_H, CELLS,
 } from './foliage.js';
 
@@ -210,10 +213,26 @@ vec3 orBiomeLeaf( vec3 c ) {
   c = mix( c, vec3( lum * 1.3, lum * 1.18, lum * 0.78 ), vOrBio.r * leaf * 0.8 );
   return c;
 }
-vec3 orBiomeSnow( vec3 c, float up ) {
-  // Only what faces well up holds snow, and never all of it: a conifer's
-  // crown normals all lean upward, and from 0.1 up the whole tree went white.
-  return mix( c, vec3( 0.50, 0.55, 0.63 ), vOrBio.g * smoothstep( 0.45, 0.85, up ) * 0.8 );
+// The card's UV, for the snow clumps. A macro, because this block is
+// injected ahead of three's own declaration of vMapUv and only expands where
+// it is used, which is after it.
+#ifdef USE_MAP
+#define OR_UV vMapUv
+#else
+#define OR_UV vec2( 0.5 )
+#endif
+vec3 orBiomeSnow( vec3 c, float up, vec2 uv ) {
+  // Snow lies along the tops of the branches, in clumps, and the needles
+  // under it stay dark — a winter spruce is darker and bluer than a summer
+  // one, which is what makes the white on it read as snow. A crown's normals
+  // all lean upward, so facing up alone is not enough to decide: whitening
+  // everything above 0.45 turned whole forests into white combs from the
+  // road. The clumps are a pattern in the leaf card's own UVs, so they stay
+  // put on the branch as the tree sways; trunks (red over green) take none.
+  float leaf = smoothstep( 0.0, 0.03, c.g - c.r );
+  float clump = smoothstep( -0.1, 0.6, sin( uv.x * 41.0 + vOrHue * 6.28 ) * sin( uv.y * 33.0 + vOrHue * 3.1 ) + ( up - 0.75 ) * 1.5 );
+  c = mix( c, c * vec3( 0.70, 0.78, 0.82 ), vOrBio.g * leaf );
+  return mix( c, vec3( 0.50, 0.55, 0.63 ), vOrBio.g * leaf * smoothstep( 0.5, 0.9, up ) * ( 0.15 + 0.85 * clump ) * 0.85 );
 }
 `;
 
@@ -395,7 +414,7 @@ function inject(material, kind, uniforms) {
         .replace('#include <worldpos_vertex>', WORLDPOS_WIND);
       f = f.replace('#include <common>', `#include <common>\n${LOD_FRAG_PARS}\n${BIO_FRAG_PARS}`)
         .replace('#include <map_fragment>', `#include <map_fragment>\n${LOD_FRAG}\n${ALPHA_MIP}`)
-        .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.rgb = orBiomeSnow( orBiomeLeaf( diffuseColor.rgb ), vOrUp );')
+        .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.rgb = orBiomeSnow( orBiomeLeaf( diffuseColor.rgb ), vOrUp, OR_UV );')
         // The canopy normal is the normal of the crown, not of the card, so it
         // must not flip with the side of the card that happens to face us.
         .replace('#include <normal_fragment_begin>', '#include <normal_fragment_begin>\n#ifdef DOUBLE_SIDED\nnormal *= faceDirection;\n#endif')
@@ -430,7 +449,7 @@ ${LOD_COLLAPSE}`);
   vec3 orNT = texture2D( orNormalMap, vMapUv ).xyz * 2.0 - 1.0;
   vec3 orNW = orNT.x * vOrRight + vec3( 0.0, orNT.y, 0.0 ) + orNT.z * vOrFwd;
   normal = normalize( ( viewMatrix * vec4( orNW, 0.0 ) ).xyz );
-  diffuseColor.rgb = orBiomeSnow( diffuseColor.rgb, normalize( orNW ).y );
+  diffuseColor.rgb = orBiomeSnow( diffuseColor.rgb, normalize( orNW ).y, OR_UV );
 }`)
         .replace('#include <lights_lambert_pars_fragment>', canopyLambert());
     } else {
@@ -814,12 +833,12 @@ export function createProps(world, ground, opts = {}) {
    * the placed position — a lamp pool sits a couple of metres off its pole,
    * which is nothing against a 32 m cell.
    */
-  function makeStore(indices, place, tint) {
+  function makeStore(indices, place, tint, list = world.props) {
     const n = indices.length;
     if (n === 0) return null;
     const start = new Int32Array(G * G + 1);
     for (let k = 0; k < n; k++) {
-      const p = world.props[indices[k]];
+      const p = list[indices[k]];
       start[cellOf(p.x, p.z) + 1]++;
     }
     for (let c = 0; c < G * G; c++) start[c + 1] += start[c];
@@ -827,7 +846,7 @@ export function createProps(world, ground, opts = {}) {
     const srcM = new Float32Array(n * 16);
     const srcC = tint ? new Float32Array(n * 3) : null;
     for (let k = 0; k < n; k++) {
-      const p = world.props[indices[k]];
+      const p = list[indices[k]];
       out.lx = 0; out.lz = 0;
       place(p, out);
       const slot = cursor[cellOf(p.x, p.z)]++;
@@ -901,8 +920,13 @@ export function createProps(world, ground, opts = {}) {
     if (!store) return null;
     const { name, geometry, material, maxRadius } = spec;
     const reach = maxRadius * range * (1 + BAND * 0.5) + REBUILD_STEP;
-    const cap = capacityFor(store, reach + CELL);
-    if (cap === 0) return null;
+    // A store small enough to be reached whole (a lighthouse, the arches)
+    // gets one slot more than it has instances: a full buffer is how
+    // tools/naturecheck.mjs sees a field that has run out of room, and one
+    // that holds every instance there is has not.
+    const need = capacityFor(store, reach + CELL);
+    if (need === 0) return null;
+    const cap = need === store.n ? need + 1 : need;
     const offs = offsetsFor(Math.ceil(reach / CELL) + 1);
 
     const mesh = new THREE.InstancedMesh(geometry, material, cap);
@@ -1107,6 +1131,7 @@ export function createProps(world, ground, opts = {}) {
     near: lodU(-2, -1, 1e6, 2e6), mid: lodU(-2, -1, 1e6, 2e6), far: lodU(-2, -1, 1e6, 2e6),
     bushNear: lodU(-2, -1, 1e6, 2e6), bushMid: lodU(-2, -1, 1e6, 2e6), bushFar: lodU(-2, -1, 1e6, 2e6),
     rockNear: lodU(-2, -1, 1e6, 2e6), rockFar: lodU(-2, -1, 1e6, 2e6), stone: lodU(-2, -1, 1e6, 2e6),
+    landmark: lodU(-2, -1, 1e6, 2e6),
   };
 
   // The biome field over the map, for the canopy, impostor and rock shaders
@@ -1145,6 +1170,10 @@ export function createProps(world, ground, opts = {}) {
     near: canopyMat(U.near), mid: canopyMat(U.mid), far: impostorMat(U.far),
     bushNear: canopyMat(U.bushNear), bushMid: canopyMat(U.bushMid), bushFar: impostorMat(U.bushFar),
     rockNear: rockMat(U.rockNear), rockFar: rockMat(U.rockFar), stone: rockMat(U.stone),
+    // The landmarks' rock carries its own bed colours (landmarks.js), so the
+    // biome map does not redden it a second time.
+    landmark: inject(new THREE.MeshLambertMaterial({ vertexColors: true }), 'rock',
+      { orLod: U.landmark, orFocus: focusU, orRockTex: { value: rockTex }, orBiome: bioU, orBiomeK: bioOff }),
     // Palms and cacti share the trees' distances but not their recolouring:
     // a cactus is green BECAUSE it is in the desert.
     exNear: canopyMat(U.near, bioOff), exMid: canopyMat(U.mid, bioOff), exFar: impostorMat(U.far, bioOff),
@@ -1353,6 +1382,151 @@ export function createProps(world, ground, opts = {}) {
   }, false), { name: 'lightpools', geometry: decalGeo, material: poolMat, ...fixed(260), renderOrder: 3 });
   if (poolField) poolField.mesh.visible = false;
 
+  // ---- Landmarks (render/landmarks.js, placed by world/layout.js) ---------
+  // A few big shapes seen from a kilometre, streamed and dithered out at the
+  // far edge like everything else; arches and hoodoos cast shadows, because
+  // driving through an arch's shadow is half of driving under it.
+  const LM = world.landmarks || [];
+  const archIdx = [[], []], hoodooIdx = [[], [], [], []], houseIdx = [], poleIdx2 = [];
+  for (let i = 0; i < LM.length; i++) {
+    const l = LM[i];
+    if (l.type === 'arch') archIdx[(l.variant | 0) % 2].push(i);
+    else if (l.type === 'hoodoo') hoodooIdx[(l.variant | 0) % 4].push(i);
+    else if (l.type === 'lighthouse') houseIdx.push(i);
+    else if (l.type === 'snowpole') poleIdx2.push(i);
+  }
+  const lmr = mulberry((seed | 0) + 9107);
+  const ARCH_SPAN = 33.5, ARCH_H = 20;
+  const lmPlace = (p, o) => {
+    o.x = p.x; o.z = p.z; o.y = p.y; o.rot = p.rot || 0;
+    const sc = p.scale || 1;
+    o.sx = o.sz = o.sy = sc;
+    if (p.type === 'arch') { o.sx = (p.span || ARCH_SPAN) / ARCH_SPAN; o.sy = (p.height || ARCH_H) / ARCH_H; o.sz = 1; }
+  };
+  const landmarkFields = [];
+  const lmField = (idx, name, geo, mat, radius, shadow) => {
+    if (!idx.length) return null;
+    disposables.push(geo);
+    const f = makeField(makeStore(idx, lmPlace, false, LM), { name, geometry: geo, material: mat, maxRadius: radius });
+    if (f && shadow) { f.mesh.castShadow = true; f.mesh.receiveShadow = true; }
+    if (f) landmarkFields.push(f);
+    return f;
+  };
+  for (let v = 0; v < 2; v++) lmField(archIdx[v], 'arch' + v, archGeometry(lmr, ARCH_SPAN, ARCH_H), mats.landmark, 1050, true);
+  for (let v = 0; v < 4; v++) lmField(hoodooIdx[v], 'hoodoo' + v, hoodooGeometry(lmr, 18), mats.landmark, 1050, true);
+  lmField(poleIdx2, 'snowpoles', snowPoleGeometry(), poleMat, 240, false);
+  // The lighthouse: body, a lantern that glows at dusk, and a beam that
+  // sweeps round twice a minute after dark — the one moving light on the
+  // coast, visible from across the bay.
+  let lantern = null, beam = null, beamMat = null, lanternMat = null;
+  if (houseIdx.length) {
+    const lh = lighthouseGeometry(mergeGeometries);
+    const bodyMat = new THREE.MeshLambertMaterial({ vertexColors: true });
+    lanternMat = new THREE.MeshBasicMaterial({ color: 0x9fb7c2, toneMapped: false, side: THREE.DoubleSide });
+    disposables.push(bodyMat, lanternMat, lh.lamp);
+    const bf = lmField(houseIdx, 'lighthouse', lh.body, bodyMat, 1050, true);
+    const L0 = LM[houseIdx[0]];
+    lantern = new THREE.Mesh(lh.lamp, lanternMat);
+    lantern.name = 'lighthouse.lantern';
+    lantern.position.set(L0.x, L0.y, L0.z);
+    lantern.matrixAutoUpdate = false;
+    lantern.updateMatrix();
+    group.add(lantern);
+    const bg = beamGeometry();
+    beamMat = new THREE.ShaderMaterial({
+      uniforms: { uOpacity: { value: 0 } },
+      vertexShader: 'attribute float fade; varying float vF; void main() { vF = fade; gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 ); }',
+      fragmentShader: 'uniform float uOpacity; varying float vF; void main() { gl_FragColor = vec4( vec3( 1.0, 0.93, 0.78 ) * vF * vF * uOpacity, 1.0 ); }',
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+    });
+    disposables.push(bg, beamMat);
+    beam = new THREE.Mesh(bg, beamMat);
+    beam.name = 'lighthouse.beam';
+    beam.position.set(L0.x, L0.y, L0.z);
+    beam.frustumCulled = false;
+    beam.renderOrder = 7;
+    beam.visible = false;
+    group.add(beam);
+    if (!bf) lantern.visible = false;
+  }
+  // ---- Tumbleweeds -------------------------------------------------------
+  // Eight of them, only while the camera is in the canyon, rolling downwind
+  // across the flats and the road and bouncing as they go — the one thing
+  // in the desert that moves. Not placed props: each is launched upwind of
+  // the camera, 60-140 m off, and relaunched once it has rolled 160 m away,
+  // so there are always a few about. Cosmetic and local to each player,
+  // like the leaves and the snow. Eight ground lookups a frame.
+  const tumble = (() => {
+    const bio = world.biomes;
+    if (!bio) return null;
+    const N = 8;
+    const geo = tumbleweedGeometry(mulberry((seed | 0) + 9203));
+    const mat = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide });
+    disposables.push(geo, mat);
+    // One slot spare, so a full set never reads as a field out of room.
+    const mesh = new THREE.InstancedMesh(geo, mat, N + 1);
+    mesh.name = 'tumbleweeds';
+    mesh.frustumCulled = false;
+    mesh.castShadow = true;
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    mesh.count = 0;
+    group.add(mesh);
+    const x = new Float64Array(N), z = new Float64Array(N), v = new Float64Array(N);
+    const roll = new Float64Array(N), hop = new Float64Array(N), sc = new Float64Array(N), age = new Float64Array(N);
+    const live = new Uint8Array(N);
+    const w = new Float64Array(5);
+    const q = new THREE.Quaternion(), qr = new THREE.Quaternion(), ax = new THREE.Vector3();
+    const p = new THREE.Vector3(), s3 = new THREE.Vector3(), m = new THREE.Matrix4();
+    let amt = 0, rs = (seed | 0) ^ 0x7b1d;
+    const r = () => { rs = (rs + 0x6D2B79F5) >>> 0; let t = rs; t = Math.imul(t ^ (t >>> 15), 1 | t); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+    function launch(i, cx, cz, wx, wz) {
+      // Upwind of the camera and off to one side or the other.
+      const d = 60 + r() * 80, side = (r() * 2 - 1) * 110;
+      x[i] = cx - wx * d - wz * side; z[i] = cz - wz * d + wx * side;
+      v[i] = 3 + r() * 3.5; roll[i] = r() * 6.28; hop[i] = r() * 6.28; sc[i] = 1.1 + r() * 0.7; age[i] = 0;
+      live[i] = 1;
+    }
+    function update(cx, cz, step) {
+      bio.weightsAt(cx, cz, w);
+      const want = smoothstep(0.5, 0.85, w[1]);
+      amt += (want - amt) * (step > 0 ? Math.min(1, step * 0.8) : 1);
+      if (amt < 0.01) { mesh.count = 0; mesh.visible = false; live.fill(0); return; }
+      mesh.visible = true;
+      const wx = windU.value.x, wz = windU.value.y;
+      let n = 0;
+      for (let i = 0; i < N; i++) {
+        if (!live[i] || (x[i] - cx) ** 2 + (z[i] - cz) ** 2 > 160 * 160) launch(i, cx, cz, wx, wz);
+        // Rolls with the wind, gusting, and slows to a stop in the lee of
+        // nothing: it only ever goes downwind.
+        const gust = 0.7 + 0.3 * Math.sin(windTime * 0.6 + i * 1.7);
+        const sp = v[i] * gust * windU.value.z * 1.4;
+        x[i] += wx * sp * step; z[i] += wz * sp * step;
+        const rad = 0.55 * sc[i];
+        roll[i] += (sp * step) / rad;
+        hop[i] += step * (2.2 + sp * 0.35);
+        const y = ground.heightAt(x[i], z[i]) + rad * 0.92 + Math.abs(Math.sin(hop[i])) * 0.5 * sc[i];
+        // Only on the canyon's own ground, faded in as the canyon is.
+        bio.weightsAt(x[i], z[i], w);
+        age[i] += step;
+        const k = sc[i] * amt * smoothstep(0.4, 0.7, w[1]) * smoothstep(0, 1.5, age[i]);
+        if (k < 0.02) continue;
+        ax.set(wz, 0, -wx);
+        qr.setFromAxisAngle(ax, roll[i]);
+        q.setFromAxisAngle(ax.set(0, 1, 0), i * 2.39).premultiply(qr);
+        p.set(x[i], y, z[i]); s3.set(k, k, k);
+        m.compose(p, q, s3);
+        m.toArray(mesh.instanceMatrix.array, n * 16);
+        n++;
+      }
+      mesh.count = n;
+      mesh.instanceMatrix.needsUpdate = true;
+    }
+    return { update, mesh };
+  })();
+
+  stats.landmarks = { arches: archIdx[0].length + archIdx[1].length, hoodoos: hoodooIdx.reduce((a, b) => a + b.length, 0),
+    lighthouses: houseIdx.length, snowpoles: poleIdx2.length };
+
   let shadeField = null;
   if (wantShade) {
     shadeField = makeField(makeStore(shadeIdx, (p, o) => {
@@ -1388,6 +1562,8 @@ export function createProps(world, ground, opts = {}) {
     band(U.bushNear, 0, n); band(U.bushMid, n, m); band(U.bushFar, m, bf);
     band(U.rockNear, 0, T.rockNear * range); band(U.rockFar, T.rockNear * range, T.rockFar * range);
     band(U.stone, 0, T.stone * range);
+    // The landmarks fade out just inside the far edge of their field.
+    band(U.landmark, 0, T.far * range * 0.98);
     // A field keeps everything out to the far side of its outer band.
     const reach = (x) => x * (1 + BAND * 0.5);
     for (const f2 of fields) {
@@ -1439,6 +1615,8 @@ export function createProps(world, ground, opts = {}) {
     // Wrapped well before float precision matters to a sine in the shader.
     if (windTime > 3600) windTime -= 3600;
     windU.value.w = windTime;
+    if (beam && beam.visible) beam.rotation.y = (windTime * 0.21) % (Math.PI * 2);
+    if (tumble) tumble.update(cx, cz, step);
 
     if (!primed) {
       primed = true;
@@ -1474,6 +1652,12 @@ export function createProps(world, ground, opts = {}) {
     night = clamp(t, 0, 1);
     const lit = smoothstep(0.18, 0.72, night);
     lampMat.emissiveIntensity = lit * 2.6;
+    if (lanternMat) {
+      // Pale glass by day, the lamp by night (unlit, so it reads as a light).
+      lanternMat.color.setRGB(lerp(0.62, 4.0, lit), lerp(0.72, 3.4, lit), lerp(0.76, 2.2, lit));
+      beamMat.uniforms.uOpacity.value = smoothstep(0.35, 0.8, night) * 0.16;
+      beam.visible = beamMat.uniforms.uOpacity.value > 0.002;
+    }
     if (poolField) {
       poolMat.opacity = lit * 0.85;
       const on = poolMat.opacity > 0.01;

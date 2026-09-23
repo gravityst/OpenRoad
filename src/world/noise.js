@@ -73,6 +73,60 @@ export function ridged(x, z, seed, octaves = 4) {
   return (sum / norm) * 2 - 1;
 }
 
+// ---------------------------------------------------------------------------
+// Gradient noise, for mountains
+// ---------------------------------------------------------------------------
+// Value noise is flat at every lattice point (the quintic's derivative is zero
+// there), so a ridged sum of it draws a grid of little plateaus joined by
+// ridges that run along the axes — from above, the rounded squares in the
+// farmland's hills. Fine for rolling country; a mountain range made of it
+// reads as a quilt. Gradient noise is zero at the lattice points with a slope
+// through them instead, and a ridged multifractal of it, rotated between
+// octaves, gives crests that branch and wander like eroded ones.
+//
+// Eight gradients, a hash picks one; everything is multiply and add, and the
+// octave rotation is the 3-4-5 triangle (cos 0.8, sin 0.6), exact in binary,
+// so every browser builds the same mountains to the bit.
+const GRAD_X = [1, -1, 0, 0, 0.7071067811865476, -0.7071067811865476, 0.7071067811865476, -0.7071067811865476];
+const GRAD_Z = [0, 0, 1, -1, 0.7071067811865476, 0.7071067811865476, -0.7071067811865476, -0.7071067811865476];
+
+/** Gradient noise, about [-1,1], zero at every lattice point, C2 like valueNoise. */
+export function gradNoise(x, z, seed) {
+  const x0 = Math.floor(x), z0 = Math.floor(z);
+  const fx = x - x0, fz = z - z0;
+  const u = quintic(fx), v = quintic(fz);
+  const h00 = (hash2(x0, z0, seed) * 8) | 0, h10 = (hash2(x0 + 1, z0, seed) * 8) | 0;
+  const h01 = (hash2(x0, z0 + 1, seed) * 8) | 0, h11 = (hash2(x0 + 1, z0 + 1, seed) * 8) | 0;
+  const a = fx * GRAD_X[h00] + fz * GRAD_Z[h00];
+  const b = (fx - 1) * GRAD_X[h10] + fz * GRAD_Z[h10];
+  const c = fx * GRAD_X[h01] + (fz - 1) * GRAD_Z[h01];
+  const d = (fx - 1) * GRAD_X[h11] + (fz - 1) * GRAD_Z[h11];
+  const top = a + (b - a) * u, bot = c + (d - c) * u;
+  return (top + (bot - top) * v) * 1.4142135623730951;
+}
+
+/**
+ * Ridged multifractal (Musgrave), 0..1, 1 on the sharpest crests. Each octave
+ * is weighted by the one before it, so detail piles up on the ridges and the
+ * valleys between stay smooth — which is what erosion does to real ones.
+ */
+export function ridgedMF(x, z, seed, octaves = 4) {
+  let sum = 0, amp = 1, norm = 0, weight = 1, px = x, pz = z;
+  for (let o = 0; o < octaves; o++) {
+    let n = 1 - Math.abs(gradNoise(px, pz, seed + o * 7717));
+    n *= n;
+    n *= weight;
+    weight = n * 1.8;
+    if (weight > 1) weight = 1;
+    sum += n * amp;
+    norm += amp;
+    amp *= 0.5;
+    const rx = (px * 0.8 - pz * 0.6) * 2 + 17.25, rz = (px * 0.6 + pz * 0.8) * 2 + 9.125;
+    px = rx; pz = rz;
+  }
+  return sum / norm;
+}
+
 function hash3(ix, iy, iz, seed) {
   let h = (ix | 0) * 374761393 + (iy | 0) * 668265263 + (iz | 0) * 2147483647 + (seed | 0) * 1274126177;
   h = (h ^ (h >>> 13)) * 1274126177;

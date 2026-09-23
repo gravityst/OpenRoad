@@ -220,6 +220,61 @@ void main() {
 }
 `;
 
+// Birds: the life in the sky that says what country this is before any
+// sign does. Gulls wheel low over the bay; a raptor circles high on the
+// thermals over the canyon and the pass, mostly gliding; a skein of geese
+// crosses the autumn woods and the farmland in a V. Thirty birds, one draw
+// call, placed and flown entirely in the vertex shader — every bird's
+// circle (or the skein's line) is anchored in a 520 m box that wraps round
+// the camera like the snow's, so there are always birds about and never a
+// per-frame JavaScript cost. Lit like everything else (Lambert, fog), and
+// double-sided, so a bird seen from below is the dark silhouette against
+// the sky it really is. They roost at night.
+const BIRD_BEGIN = `
+vec3 transformed = vec3( position );
+{
+  float bKind = bB.w;
+  float bAmt = bKind < 0.5 ? uBirdAmt.x : bKind < 1.5 ? uBirdAmt.y : uBirdAmt.z;
+  vec2 c = mod( bA.xy - uBirdCam.xz + 260.0, 520.0 ) + uBirdCam.xz - 260.0;
+  // Near the box's edge the anchor is about to wrap to the far side, which
+  // would carry a whole skein across the sky in one frame: it fades first.
+  vec2 anc = abs( c - uBirdCam.xz );
+  float fadeA = 1.0 - smoothstep( 190.0, 250.0, max( anc.x, anc.y ) );
+  vec3 p; vec2 dir;
+  float t = uBirdT;
+  if ( bKind < 1.5 ) {
+    float a = bB.y + t * bB.x / bA.z;
+    p = vec3( c.x + cos( a ) * bA.z, uBirdCam.y + bA.w + sin( t * 0.31 + bB.y ) * 2.5, c.y + sin( a ) * bA.z );
+    dir = vec2( -sin( a ), cos( a ) );
+  } else {
+    // The skein: its leader flies a straight line through the box, and each
+    // goose keeps its place in the V behind and to one side.
+    dir = vec2( cos( bB.y ), sin( bB.y ) );
+    vec2 lead = c + dir * ( mod( t * bB.x, 1200.0 ) - 600.0 );
+    float k = bA.z;
+    vec2 side = vec2( -dir.y, dir.x );
+    vec2 q = lead - dir * abs( k ) * 4.2 + side * k * 3.6;
+    p = vec3( q.x, uBirdCam.y + bA.w + sin( t * 0.5 + k ) * 0.6, q.y );
+    c = lead;
+  }
+  // Out at the edge of the box a bird shrinks to nothing instead of popping.
+  vec2 off = abs( c - uBirdCam.xz );
+  float fade = 1.0 - smoothstep( 190.0, 250.0, max( off.x, off.y ) );
+  float sz = bB.z * bAmt * fade * fadeA;
+  // Wingbeat: gulls and geese flap steadily; a raptor holds its wings out
+  // and gives a few beats every so often.
+  float beat = bKind > 0.5 && bKind < 1.5
+    ? sin( t * 7.0 + bB.y ) * smoothstep( 0.85, 1.0, sin( t * 0.35 + bB.y * 3.0 ) )
+    : sin( t * ( bKind < 0.5 ? 6.0 : 4.6 ) + bB.y * 5.0 );
+  vec3 lp = position;
+  lp.y += abs( wing ) * beat * 0.55 + abs( wing ) * 0.12;
+  lp *= sz;
+  vec3 fwd = vec3( dir.x, 0.0, dir.y );
+  vec3 rgt = vec3( -dir.y, 0.0, dir.x );
+  transformed = p + rgt * lp.x + vec3( 0.0, lp.y, 0.0 ) + fwd * lp.z;
+}
+`;
+
 const TAU = Math.PI * 2;
 const DEG = Math.PI / 180;
 
@@ -1186,7 +1241,8 @@ export function createSky(scene, renderer, opts = {}) {
 
   // ---- biome air -----------------------------------------------------------
   const bioW = new Float64Array(5);
-  const air = { turb: 1, vis: 1, sun: [1, 1, 1], fog: [1, 1, 1], bounce: [1, 1, 1], snow: 0, leaves: 0, heat: 0, primed: false };
+  const air = { turb: 1, vis: 1, sun: [1, 1, 1], fog: [1, 1, 1], bounce: [1, 1, 1], snow: 0, leaves: 0, heat: 0,
+    gulls: 0, raptors: 0, geese: 0, primed: false };
   state.biome = air;
   function biomeAir(cameraPos, step) {
     const field = activeBiomes();
@@ -1201,6 +1257,9 @@ export function createSky(scene, renderer, opts = {}) {
     }
     const snow = smoothstep(0.35, 0.8, bioW[BIOME.alpine]);
     const leaves = smoothstep(0.35, 0.8, bioW[BIOME.autumn]);
+    const gulls = smoothstep(0.3, 0.8, bioW[BIOME.coast]);
+    const raptors = smoothstep(0.3, 0.8, bioW[BIOME.desert] + bioW[BIOME.alpine]);
+    const geese = smoothstep(0.3, 0.8, bioW[BIOME.autumn] + bioW[BIOME.farm] * 0.6);
     const heat = smoothstep(0.35, 0.8, bioW[BIOME.desert]);
     const k = air.primed ? 1 - Math.exp(-step / 1.5) : 1;
     air.primed = true;
@@ -1208,6 +1267,9 @@ export function createSky(scene, renderer, opts = {}) {
     air.vis += (vis - air.vis) * k;
     air.snow += (snow - air.snow) * k;
     air.leaves += (leaves - air.leaves) * k;
+    air.gulls += (gulls - air.gulls) * k;
+    air.raptors += (raptors - air.raptors) * k;
+    air.geese += (geese - air.geese) * k;
     air.heat += (heat - air.heat) * k;
     for (let c = 0; c < 3; c++) {
       air.sun[c] += (sun[c] - air.sun[c]) * k;
@@ -1269,6 +1331,69 @@ export function createSky(scene, renderer, opts = {}) {
   leafPts.visible = false;
   scene.add(leafPts);
   let leafT = 0;
+
+  // ---- birds ------------------------------------------------------------------
+  const birds = (() => {
+    // One bird, nose along +Z: a slim body and two wings whose tips carry
+    // wing = +-1 for the wingbeat. Normals up; the material is two-sided.
+    const pos = [0, 0, 0.55, 0.07, 0, -0.1, 0, 0, -0.6, -0.07, 0, -0.1,
+      0.06, 0, 0.22, 1.0, 0, -0.05, 0.06, 0, -0.18,
+      -0.06, 0, 0.22, -1.0, 0, -0.05, -0.06, 0, -0.18];
+    const wing = [0, 0, 0, 0, 0, 1, 0, 0, -1, 0];
+    const idx = [0, 1, 2, 0, 2, 3, 4, 5, 6, 7, 9, 8];
+    const g = new THREE.InstancedBufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute('normal', new THREE.Float32BufferAttribute(new Array(10).fill([0, 1, 0]).flat(), 3));
+    g.setAttribute('wing', new THREE.Float32BufferAttribute(wing, 1));
+    g.setIndex(idx);
+    // Thirty birds: 12 gulls, 8 raptors (one to a circle), 10 geese in a V.
+    const N = 30, A = new Float32Array(N * 4), Bv = new Float32Array(N * 4), C = new Float32Array(N * 3);
+    let st = 0x2545f491;
+    const r = () => { st = (st + 0x6D2B79F5) >>> 0; let t = st; t = Math.imul(t ^ (t >>> 15), 1 | t); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+    const skein = r() * 6.28, ox = r() * 520, oz = r() * 520;
+    // Gulls wheel in three flocks of four round a shared point, each bird on
+    // its own circle; scattered one to a circle over the box they averaged
+    // one in four hectares, and a kid never saw one.
+    const flocks = [[r() * 520, r() * 520], [r() * 520, r() * 520], [r() * 520, r() * 520]];
+    for (let i = 0; i < N; i++) {
+      const o = i * 4, c = i * 3;
+      if (i < 12) {            // gulls: low, tight, quick circles, white and grey
+        const f = flocks[i % 3];
+        A.set([f[0] + r() * 30, f[1] + r() * 30, 18 + r() * 30, 12 + r() * 22], o);
+        Bv.set([9 + r() * 4, r() * 6.28, 0.78 + r() * 0.14, 0], o);
+        C.set([0.86, 0.87, 0.88], c);
+      } else if (i < 20) {     // raptors: in pairs, high, wide, slow
+        const f = flocks[(i >> 1) % 3];
+        A.set([(f[0] + 260 + r() * 60) % 520, (f[1] + 260 + r() * 60) % 520, 45 + r() * 50, 45 + r() * 45], o);
+        Bv.set([7 + r() * 3, r() * 6.28, 1.2 + r() * 0.2, 1], o);
+        C.set([0.22, 0.16, 0.11], c);
+      } else {                 // geese: one skein of ten
+        const k = (i - 20) - 4.5;
+        A.set([ox, oz, k, 70], o);
+        Bv.set([13, skein, 0.95, 2], o);
+        C.set([0.34, 0.31, 0.27], c);
+      }
+    }
+    g.setAttribute('bA', new THREE.InstancedBufferAttribute(A, 4));
+    g.setAttribute('bB', new THREE.InstancedBufferAttribute(Bv, 4));
+    g.setAttribute('color', new THREE.InstancedBufferAttribute(C, 3));
+    g.instanceCount = N;
+    const U = { uBirdT: { value: 0 }, uBirdCam: { value: new THREE.Vector3() }, uBirdAmt: { value: new THREE.Vector3() } };
+    const mat = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide });
+    mat.onBeforeCompile = (sh) => {
+      Object.assign(sh.uniforms, U);
+      sh.vertexShader = sh.vertexShader
+        .replace('#include <common>', '#include <common>\nattribute float wing;\nattribute vec4 bA;\nattribute vec4 bB;\nuniform float uBirdT;\nuniform vec3 uBirdCam;\nuniform vec3 uBirdAmt;')
+        .replace('#include <begin_vertex>', BIRD_BEGIN);
+    };
+    mat.customProgramCacheKey = () => 'openroad-birds';
+    const mesh = new THREE.Mesh(g, mat);
+    mesh.name = 'birds';
+    mesh.frustumCulled = false;
+    mesh.visible = false;
+    scene.add(mesh);
+    return { mesh, g, mat, U, t: 0 };
+  })();
 
   function setTime(h) {
     hours = ((h % 24) + 24) % 24;
@@ -1584,6 +1709,19 @@ export function createSky(scene, renderer, opts = {}) {
       const ll = 0.12 + 1.35 * daylight * now.light;
       leafU.uLight.value.setRGB(ll, ll, ll);
     }
+    // Birds by day, fewer in rain, none in the dark.
+    {
+      const day = daylight * (1 - now.rain * 0.7);
+      const U = birds.U;
+      U.uBirdAmt.value.set(air.gulls * day, air.raptors * day, air.geese * day);
+      const any = U.uBirdAmt.value.x + U.uBirdAmt.value.y + U.uBirdAmt.value.z;
+      birds.mesh.visible = any > 0.02 && !!cameraPos;
+      if (birds.mesh.visible) {
+        birds.t = (birds.t + step) % 3600;
+        U.uBirdT.value = birds.t;
+        U.uBirdCam.value.copy(cameraPos);
+      }
+    }
     // How much heat shimmer the air should have: the canyon, in daylight,
     // and less the more cloud. For a post pass to read (state.biome.heat);
     // nothing here draws it.
@@ -1608,6 +1746,9 @@ export function createSky(scene, renderer, opts = {}) {
     scene.remove(leafPts);
     leafGeo.dispose();
     leafMat.dispose();
+    scene.remove(birds.mesh);
+    birds.g.dispose();
+    birds.mat.dispose();
     scene.remove(mesh);
     scene.remove(sun);
     scene.remove(sun.target);

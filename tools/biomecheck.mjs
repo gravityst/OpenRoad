@@ -358,7 +358,9 @@ const area = new Array(BIOME_COUNT).fill(0);
     const st = sky.state;
     const snowing = scene.children.some((c) => c.name === 'snowfall' && c.visible);
     const leaves = scene.children.some((c) => c.name === 'leaffall' && c.visible);
-    air.push({ b, turb: st.turbidity, vis: st.visibility, snowing, leaves, heat: st.heatHaze || 0 });
+    const bm = scene.children.find((c) => c.name === 'birds');
+    air.push({ b, turb: st.turbidity, vis: st.visibility, snowing, leaves, heat: st.heatHaze || 0,
+      birds: bm && bm.visible, gulls: st.biome.gulls, raptors: st.biome.raptors, geese: st.biome.geese });
     for (const v of [st.turbidity, st.visibility, st.fogColour.r, st.fogColour.g, st.fogColour.b, sky.sun.intensity]) {
       if (!Number.isFinite(v) || v < 0) bad++;
     }
@@ -373,6 +375,19 @@ const area = new Array(BIOME_COUNT).fill(0);
     `; ${bad} non-finite`);
   check('leaves fall only in the woods, heat shimmers only in the canyon', leavesOnly && heatOnly,
     air.map((a) => `${BIOMES[a.b].key}${a.leaves ? ' +leaves' : ''} heat ${a.heat.toFixed(2)}`).join(', '));
+  // Birds: gulls over the bay, raptors over the canyon and the pass, geese
+  // over the woods (and, fewer, the farmland), and none after dark.
+  const bird = (b, k) => air[b][k];
+  const birdsRight = bird(BIOME.coast, 'gulls') > 0.9 && bird(BIOME.desert, 'raptors') > 0.9 && bird(BIOME.alpine, 'raptors') > 0.9 &&
+    bird(BIOME.autumn, 'geese') > 0.9 && bird(BIOME.farm, 'gulls') < 0.05 && bird(BIOME.coast, 'raptors') < 0.05 &&
+    bird(BIOME.desert, 'geese') < 0.05 && air.every((a) => a.birds);
+  cam.set(BIOMES[BIOME.coast].at[0], 0, BIOMES[BIOME.coast].at[1]);
+  sky.setTime(1);
+  for (let i = 0; i < 60; i++) sky.update(1 / 60, cam);
+  const roost = !scene.children.find((c) => c.name === 'birds').visible;
+  sky.setTime(11);
+  check('birds of the right kind fly by day, and roost at night', birdsRight && roost,
+    air.map((a) => `${BIOMES[a.b].key} ${['gulls', 'raptors', 'geese'].filter((k) => a[k] > 0.5).join('+') || '-'}`).join(', ') + `; at 01:00 ${roost ? 'none' : 'STILL FLYING'}`);
   check('the sky reads the world it was built with', activeBiomes() !== null, activeBiomes() ? 'registry set' : 'no field registered');
   sky.dispose();
 }

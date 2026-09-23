@@ -1836,6 +1836,13 @@ async function boot() {
     setTime: (h) => { clockHours = h % 24; settings.time = clockHours; sky.setTime(clockHours); },
     setWeather: (w) => { settings.weather = w; sky.setWeather(w, 0); },
     fps: () => Math.round(fpsSmooth),
+    /**
+     * Where the player's car is DRAWN this frame: x, y, z, yaw, pitch, roll,
+     * steer, spin. Anything fastened to the car on screen (a marker over it, a
+     * glow under it) should follow this, not `car`, which is up to one physics
+     * step ahead — 37 cm at 160 km/h, and it would slide against the car.
+     */
+    get pose() { return pose; },
     /** The automatic quality: where it is and why. force(n) pins a level for a look. */
     get autoQuality() {
       const r = auto.rung;

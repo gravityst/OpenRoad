@@ -140,12 +140,16 @@ void main() {
   p.y -= uT * 1.15;
   p.x += uT * 0.55 + sin( uT * 0.9 + position.y * 1.3 ) * 0.45;
   p.z += uT * 0.30 + cos( uT * 0.7 + position.x * 1.1 ) * 0.45;
-  p = mod( p - uCam + uBox * 0.5, uBox ) + uCam - uBox * 0.5;
+  // The box rides a third of its height above the camera, as the leaves'
+  // does: flakes below the road were half the snow, falling where nobody
+  // could see it.
+  vec3 orC = uCam + vec3( 0.0, uBox * 0.3, 0.0 );
+  p = mod( p - orC + uBox * 0.5, uBox ) + orC - uBox * 0.5;
   vec4 mv = modelViewMatrix * vec4( p, 1.0 );
   gl_Position = projectionMatrix * mv;
   float d = max( -mv.z, 0.5 );
-  gl_PointSize = clamp( 0.075 * uScale / d, 1.0, 14.0 );
-  vec3 q = abs( p - uCam ) / ( uBox * 0.5 );
+  gl_PointSize = clamp( 0.085 * uScale / d, 1.0, 16.0 );
+  vec3 q = abs( p - orC ) / ( uBox * 0.5 );
   vA = uAmt * ( 1.0 - smoothstep( 0.65, 1.0, max( q.x, max( q.y, q.z ) ) ) ) * smoothstep( 0.6, 2.5, d );
   // Thinner snow shows fewer flakes rather than fainter ones.
   if ( fract( position.x * 7.13 + position.z * 3.71 ) > uAmt ) vA = 0.0;
@@ -1279,7 +1283,10 @@ export function createSky(scene, renderer, opts = {}) {
   }
 
   // ---- falling snow -----------------------------------------------------------
-  const SNOW_N = 2600, SNOW_BOX = 64;
+  // 5,200 flakes in a 56 m box: about one in 30 cubic metres, a gentle
+  // fall. At 2,600 in 64 m (one in 100, half of them underground) the pass
+  // was snowing and nobody could tell.
+  const SNOW_N = 5200, SNOW_BOX = 56;
   const snowPos = new Float32Array(SNOW_N * 3);
   {
     let a = 0x9e3779b9;

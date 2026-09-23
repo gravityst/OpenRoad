@@ -705,6 +705,70 @@ function busSign(i) {
 }
 
 // ---------------------------------------------------------------------------
+// The far liveries: every operator's flank, small, in one canvas
+// ---------------------------------------------------------------------------
+//
+// Past its near radius the fleet draws every lorry as ONE instanced mesh with
+// ONE material, baked to vertex colour, so the box came out plain white at
+// 46 m and the company name came back at 45: the most visible thing on the
+// new traffic, switching on and off as it passed the near/far line. The bus
+// lost its operator stripe the same way. This packs every livery, downsized,
+// into one 1024 x 384 canvas (1.5 MB with mips); the fleet gives each far
+// instance the rect of its own livery, and its far material samples it.
+//
+//   y   0 .. 128   lorry boxes 0-3, 256 x 128 (the canvas is 1024 x 512, 2:1)
+//   y 128 .. 256   lorry boxes 4-5, and the tractor's bonnet stripe
+//   y 256 .. 384   the four bus flanks, 512 x 64 (the canvas is 2048 x 256, 8:1)
+//
+// Each image is drawn twice: stretched over its whole slot, then inset by
+// FAR_LIVERY_PAD on top. The rect is the inset one, so a far car that
+// samples a small mip, where one texel covers 8 px of the original, blends
+// into its own livery's colours and not into a neighbour's.
+
+const FAR_LIVERY_PAD = 6;
+let farLivery;                          // undefined: not built yet; null: no canvas
+
+/**
+ * { texture, rectOf(body, livery) -> [u0, v0, du, dv] | null }, or null
+ * headless. Built once, on first use; rects are for a flipY upload.
+ */
+export function farLiveryAtlas() {
+  if (farLivery !== undefined) return farLivery;
+  farLivery = null;
+  const W = 1024, H = 384;
+  const c = canvasOf(W, H);
+  if (!c) return null;
+  const g = c.getContext('2d');
+  if (!g) return null;
+  const rects = new Map();
+  const put = (key, tex, x, y, w, h) => {
+    const img = tex && tex.image;
+    if (!img) return;
+    const p = FAR_LIVERY_PAD;
+    g.drawImage(img, x, y, w, h);
+    g.clearRect(x + p, y + p, w - 2 * p, h - 2 * p);
+    g.drawImage(img, x + p, y + p, w - 2 * p, h - 2 * p);
+    rects.set(key, [(x + p) / W, 1 - (y + h - p) / H, (w - 2 * p) / W, (h - 2 * p) / H]);
+  };
+  for (let i = 0; i < LIVERIES.length; i++) put(`box${i}`, boxLivery(i), (i % 4) * 256, Math.floor(i / 4) * 128, 256, 128);
+  put('tractor', tractorDecal(), 512, 128, 256, 48);
+  for (let i = 0; i < 4; i++) put(`bus${i}`, busLivery(i), (i % 2) * 512, 256 + Math.floor(i / 2) * 64, 512, 64);
+  const texture = new THREE.CanvasTexture(c);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.anisotropy = 4;
+  farLivery = {
+    texture, rects,
+    /** The rect a far `body` wearing `livery` samples, as the near model draws it. */
+    rectOf(body, livery = 0) {
+      const i = livery | 0;
+      const key = body === 'box' ? `box${i % LIVERIES.length}` : body === 'bus' ? `bus${i % 4}` : body === 'tractor' ? 'tractor' : '';
+      return rects.get(key) || null;
+    },
+  };
+  return farLivery;
+}
+
+// ---------------------------------------------------------------------------
 // Assembly
 // ---------------------------------------------------------------------------
 

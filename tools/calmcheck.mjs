@@ -305,9 +305,16 @@ function crash(car) {
     // slows for the give-way junction ahead of it has driven on. With DAMAGE
     // on it would be capped at 0, 2 or 8 m/s (0.36 of 22), which this still
     // fails; so does a car that never pulls away at all.
+    // The peak alone would pass a car that pulled away and then stalled again,
+    // so where it ends up counts too: at the twelfth second it is moving, or
+    // it is standing at the stop line its lane ends at, as traffic does.
     const peak = Math.max(...trace.map(Number));
-    check('and it drives on', same && peak > vBefore * 0.5,
-      `${same ? 'same car' : 'recycled'}, ${vBefore.toFixed(1)} m/s before, back to ${peak.toFixed(1)}; each second after: ${trace.join(' ')}`);
+    const slot = t.route && t.route[0];
+    const toNode = slot ? slot.len - t.s : Infinity;
+    const endOk = t.speed > 1 || toNode < 25;
+    check('and it drives on', same && peak > vBefore * 0.5 && endOk,
+      `${same ? 'same car' : 'recycled'}, ${vBefore.toFixed(1)} m/s before, back to ${peak.toFixed(1)}, ` +
+      `${t.speed.toFixed(1)} m/s at the end ${toNode.toFixed(0)} m from its junction; each second after: ${trace.join(' ')}`);
   }
 }
 

@@ -28,6 +28,8 @@
 // Headless, so it cannot see the paint. What to LOOK at is listed at the end.
 import * as THREE from 'three';
 import { readFileSync } from 'node:fs';
+import { setFlagsFromString } from 'node:v8';
+import { runInNewContext } from 'node:vm';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildWorld, pointOnEdge, woodland } from '../src/world/layout.js';
@@ -42,6 +44,9 @@ import { drawnSize, SOLID_FRACTION } from '../src/render/city.js';
 import { planRoadside, createRoadside, createRoads } from '../src/render/roads.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+// A full collection on demand, for measuring what a frame allocates.
+setFlagsFromString('--expose-gc');
+const gc = runInNewContext('gc');
 const read = (f) => readFileSync(resolve(ROOT, f), 'utf8');
 
 let fail = 0;
@@ -174,8 +179,16 @@ function overlapDepth(a, b) {
   // (the SAT test createCarCollision already uses, and the model's own
   // extents) — see the round-three realism notes. Until then this is a
   // regression bound on what city.js controls, not a claim it is solved.
-  check('a building corner never buries more than a bumper', worst.depth < 1.1,
-    `worst ${worst.depth.toFixed(2)} m (${worst.at}), was ${worstFull.toFixed(2)} m`);
+  // Named for what it bounds. 'Never more than a bumper' was the old name,
+  // over a 1.1 m bound that measured 0.98 m: that is a bonnet, and oblique
+  // runs reach 0.94 m too. Square-on is the case city.js solves (the check
+  // above); corners and angles wait on the collision.js change.
+  const p90 = (a) => a.slice().sort((x, y) => x - y)[Math.floor(a.length * 0.9)];
+  check('at a corner or an angle, the car sinks under 1.1 m into a wall', worst.depth < 1.1,
+    `worst ${worst.depth.toFixed(2)} m (${worst.at}), was ${worstFull.toFixed(2)} m; ` +
+    `corners worst ${Math.max(...byKind.corner).toFixed(2)} p90 ${p90(byKind.corner).toFixed(2)}, ` +
+    `oblique worst ${Math.max(...byKind.oblique).toFixed(2)} p90 ${p90(byKind.oblique).toFixed(2)}, ` +
+    `${over(results.drawn, 0.3)} of ${runs} runs past 0.3 m`);
   check('city.js and collision.js agree on the solid fraction',
     SOLID_FRACTION === 0.94 && /lot\.w \* 0\.5 \* 0\.94/.test(read('src/physics/collision.js')),
     `${SOLID_FRACTION} of the lot`);
@@ -221,7 +234,47 @@ function overlapDepth(a, b) {
   // player detail, 12 at 'low' — whether it was 20 m away or 300.
   check('the whole traffic pool costs fewer draw calls than two near cars did', calls <= 2 * 26 + 12,
     `${calls} calls for ${active} cars (was ${active} x 26 = ${active * 26} before frustum culling)`);
-  check('near cars are capped by the tier', st.near <= 10, `${st.near} near (medium caps at 10)`);
+
+  // That view has no car inside the near radius, so it proves nothing about
+  // the near path. Now a queue beside the camera: 16 cars, both lanes, within
+  // 36 m, against medium's cap of 10 near and its 46 m radius.
+  {
+    const r0 = ground.nearestRoad(px, pz, 300);
+    const e = r0.edge;
+    const s0 = Math.min(Math.max(r0.s, 40), e.length - 40);
+    let placed = 0;
+    for (let q = 0; q < traffic.cars.length && placed < 16; q++) {
+      // Eight a lane, 6 m apart; `travel` runs from the end a car starts at.
+      const at = s0 + ((placed >> 1) - 4) * 6, dir = placed % 2 ? 1 : -1;
+      if (traffic.spawnAt(q, e.i, dir, dir > 0 ? at : e.length - at, 0)) placed++;
+    }
+    const mid = pointOnEdge(e, s0);
+    camera.position.set(mid.x - mid.tz * 4, ground.heightAt(mid.x, mid.z) + 2.6, mid.z + mid.tx * 4);
+    camera.lookAt(mid.x + mid.tx * 20, ground.heightAt(mid.x, mid.z) + 1, mid.z + mid.tz * 20);
+    camera.updateMatrixWorld(true);
+    let inR = 0;
+    for (const c of traffic.cars) if (c.active && camera.position.distanceTo(new THREE.Vector3(c.x, c.y, c.z)) < fleet.tune.near) inR++;
+    fleet.sync(traffic.cars, camera, 0);
+    let qCalls = 0, qCasters = 0;
+    fleet.group.traverseVisible((o) => {
+      if (!o.isMesh) return;
+      if (o.isInstancedMesh && o.count === 0) return;
+      if (o.geometry && o.geometry.isInstancedBufferGeometry && o.geometry.instanceCount === 0) return;
+      qCalls++;
+      if (o.castShadow) qCasters++;
+    });
+    const qs = fleet.stats;
+    // A near car is its real model at 'low' detail: 12-15 calls each measured
+    // (section 3), so the cap bounds the cost of any jam. The browser, fleet
+    // group toggled, measured 125 calls with 10 near; the old per-slot path
+    // drew 498 for the same 62 cars.
+    const budget = fleet.tune.maxNear * 15 + qs.kinds + 2;
+    console.log(`  a queue by the camera: ${inR} cars inside ${fleet.tune.near} m, ${qs.near} drawn near, ${qs.far} far; ${qCalls} fleet draw calls, ${qCasters} shadow casters`);
+    check('a queue beside the camera is capped at the tier\'s near count', inR > fleet.tune.maxNear && qs.near === fleet.tune.maxNear,
+      `${qs.near} near of ${inR} inside the radius (medium caps at ${fleet.tune.maxNear})`);
+    check('and the whole pool then costs at most the cap\'s worth of models', qCalls <= budget,
+      `${qCalls} calls, budget ${budget} (${fleet.tune.maxNear} near x 15 + ${qs.kinds} far models + shadows + flares)`);
+  }
 
   // Lamps survive the trip to the far side: a braking far car has its brake
   // value set on its instance.
@@ -240,18 +293,57 @@ function overlapDepth(a, b) {
   }
   check('a far car still brakes, indicates and runs its lamps', lampOk, lampOk ? 'brake value reached its instance' : 'no far car had its brake lamp');
 
-  // Next to nothing allocated per frame, and nothing kept: 2000 syncs, day
-  // and night alternating (the flares run at night). Measured 3.1 KB a frame
-  // by day and 7.7 KB at night with --expose-gc: short-lived number boxes,
-  // against the 845 KB a frame the terrain streams at speed.
+  // Cheap, and next to nothing allocated per frame: 2000 syncs timed, day and
+  // night alternating (the flares run at night), with the queue above still
+  // standing by the camera, so ten of them are near. Allocation is then read
+  // between two full collections over 300 frames, few enough that the young
+  // generation cannot fill and collect in the middle (a bare heapUsed
+  // difference over 2000 came out at -26 KB a frame). Measured 3.9 KB a
+  // frame: short-lived number boxes, against the 845 KB a frame the terrain
+  // streams at speed.
   for (let i = 0; i < 200; i++) fleet.sync(traffic.cars, camera, i % 2 ? 0.8 : 0);
-  const heap0 = process.memoryUsage().heapUsed;
   const t0 = performance.now();
   for (let i = 0; i < 2000; i++) fleet.sync(traffic.cars, camera, i % 2 ? 0.8 : 0);
   const ms = (performance.now() - t0) / 2000;
-  const perFrame = (process.memoryUsage().heapUsed - heap0) / 2000;
+  gc();
+  const heap0 = process.memoryUsage().heapUsed;
+  for (let i = 0; i < 300; i++) fleet.sync(traffic.cars, camera, i % 2 ? 0.8 : 0);
+  const perFrame = (process.memoryUsage().heapUsed - heap0) / 300;
   check('fleet.sync is cheap: well under a tenth of a millisecond, a few KB', ms < 0.1 && perFrame < 12000,
     `${(ms * 1000).toFixed(0)} us and ${(perFrame / 1024).toFixed(1)} KB a frame for ${active} cars`);
+
+  // A model that throws costs its own cars and nothing else. fleet.sync runs
+  // every frame from main.js's stepFrame, so an exception out of it stops the
+  // game. Two faults, by a livery that cannot be read as a number (heavy.js
+  // does `spec.livery | 0`): every lorry, so the lorry model cannot even be
+  // baked, and one bus that is not the first, so the bus model bakes and only
+  // that bus's own near model fails, in the middle of the queue.
+  {
+    const sc2 = new THREE.Scene();
+    const f2 = createFleet(sc2, { quality: 'medium' });
+    const cars = traffic.cars.map((c) => ({ ...c, spec: { ...c.spec } }));
+    for (const c of cars) if (c.body === 'box') c.spec.livery = Symbol('unreadable');
+    const buses = cars.map((c, i) => (c.body === 'bus' ? i : -1)).filter((i) => i >= 0);
+    const bad = buses[1];
+    // Nearest of all to the camera, so it is certainly among the ten near.
+    const cx = camera.position.x, cz = camera.position.z;
+    Object.assign(cars[bad], { active: true, x: cx + 2, y: ground.heightAt(cx + 2, cz + 2), z: cz + 2 });
+    cars[bad].spec.livery = Symbol('unreadable');
+    const errors = [];
+    const logged = console.error;
+    console.error = (...a) => errors.push(a.map(String).join(' '));
+    let threw = null;
+    try { for (let i = 0; i < 30; i++) f2.sync(cars, camera, i % 2 ? 0.8 : 0); } catch (err) { threw = err; }
+    console.error = logged;
+    const lorries = cars.filter((c) => c.body === 'box').length;
+    const kindsOk = f2.stats.kinds === st.kinds - 1;
+    const nearFailed = errors.some((e) => /failed near/.test(e));
+    check('a model that throws costs its own cars, never the frame', !threw && kindsOk && nearFailed && !f2.model(bad) && f2.stats.near > 0,
+      threw ? `sync threw: ${threw.message}` :
+        `${lorries} lorries dropped with their model (${f2.stats.kinds} of ${st.kinds} kinds), the bad bus drawn far ` +
+        `(its near build ${nearFailed ? 'threw and was caught' : 'was never tried'}), ${f2.stats.near} near and ${f2.stats.far} far still drawn, ${errors.length} errors logged`);
+    f2.dispose();
+  }
   fleet.dispose();
 }
 
@@ -428,16 +520,27 @@ function overlapDepth(a, b) {
   const names = new Set([...(world.garages || []).map((g) => g.name), ...(world.circuits || []).map((c) => c.name),
     ...(world.districts || []).filter((d) => d.biome !== undefined).map((d) => d.name)]);
   let facing = 0, named = 0, distinct = 0;
+  let offRoad = 0;
   for (const sg of plan.signs) {
-    const r = ground.nearestRoad(sg.x, sg.z, 20);
+    // The road it serves, which at a shallow junction is not always the
+    // nearest one (two of today's 127 stand nearer a side road). It has to be
+    // beside that road, on the verge, for the claim to mean anything.
+    const e = world.edges[sg.edge];
+    const r = e ? pointOnEdge(e, sg.s) : null;
+    const lat = r ? (sg.x - r.x) * -r.tz + (sg.z - r.z) * r.tx : Infinity;
+    if (!r || Math.abs(lat) > e.width * 0.5 + 4 || Math.hypot(sg.x - r.x, sg.z - r.z) > e.width * 0.5 + 4) { offRoad++; continue; }
     const fx = Math.sin(sg.yaw), fz = Math.cos(sg.yaw);
-    if (Math.abs(fx * r.tx + fz * r.tz) > 0.9) facing++;
+    // Signed, not abs(): traffic keeps right, so the traffic a sign serves
+    // passes it on the right and comes along +t if the sign stands right of
+    // the road's +t, along -t if left. The face must look back at it — a sign
+    // turned away from its traffic along the same line would pass abs().
+    if ((fx * r.tx + fz * r.tz) * Math.sign(lat) < -0.9) facing++;
     if (sg.lines.every((l) => names.has(l.name) && l.km > 0 && l.km < 6)) named++;
     if (new Set(sg.lines.map((l) => l.name)).size === sg.lines.length) distinct++;
   }
-  check('direction signs face the road and name real places, once each',
-    facing === plan.signs.length && named === plan.signs.length && distinct === plan.signs.length,
-    `${facing} face along the road, ${named} name places on the map, ${distinct} list each once (of ${plan.signs.length})`);
+  check('direction signs face their oncoming traffic and name real places, once each',
+    offRoad === 0 && facing === plan.signs.length && named === plan.signs.length && distinct === plan.signs.length,
+    `${facing} face their traffic, ${offRoad} not beside their road, ${named} name places on the map, ${distinct} list each once (of ${plan.signs.length})`);
   let byStop = 0;
   // Within the stagger, the search along the verge (12 m) and the set-back.
   for (const sh of plan.shelters) if (stops.some((st) => Math.hypot(st.x - sh.x, st.z - sh.z) < STAGGER + 12 + 10)) byStop++;
@@ -448,6 +551,38 @@ function overlapDepth(a, b) {
   const scene = new THREE.Scene();
   const rs = createRoadside(plan, { quality: 'medium' });
   scene.add(rs.group);
+
+  // The sign atlas. Headless there is no canvas to paint, but the layout is
+  // the same code the browser runs, and it is what went wrong: the atlas held
+  // 125 faces for 127 signs, and a one- or two-line face's UVs sampled the
+  // grey under its paint (117 of 127 boards blank). Every sign must own a box
+  // of its own height, inside the canvas, overlapping nothing, and its UVs
+  // must cover that box and nothing else.
+  {
+    const A = rs.atlas, all = [...Object.values(A.fixed), ...A.boxes.filter(Boolean)];
+    let noRect = 0, outside = 0, overlaps = 0, wrongUv = 0, wrongH = 0;
+    for (const b of all) if (b.x < 0 || b.y < 0 || b.x + b.w > A.w || b.y + b.h > A.h) outside++;
+    for (let i = 0; i < all.length; i++) for (let j = i + 1; j < all.length; j++) {
+      const a = all[i], b = all[j];
+      if (a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h) overlaps++;
+    }
+    plan.signs.forEach((sg, i) => {
+      const b = A.boxes[i];
+      if (!sg.rect || !b) { noRect++; return; }
+      // The panel is 0.34 m plus 0.24 m a line, 1.7 m wide: its box keeps that shape.
+      const want = (0.34 + 0.24 * (sg.lines.length - 1)) / 1.7;
+      if (Math.abs(b.h / b.w - want) > 0.03) wrongH++;
+      // flipY: canvas row y is v = 1 - y / h. The rect may lose its 2 px inset, no more.
+      const [u0, v0, du, dv] = sg.rect;
+      const top = (1 - (v0 + dv)) * A.h, bottom = (1 - v0) * A.h, left = u0 * A.w, right = (u0 + du) * A.w;
+      const px = 2.01;
+      if (top < b.y || bottom > b.y + b.h || left < b.x || right > b.x + b.w ||
+        top - b.y > px || b.y + b.h - bottom > px || left - b.x > px || b.x + b.w - right > px) wrongUv++;
+    });
+    check('every sign face has its own place in the atlas, and samples it', noRect === 0 && outside === 0 && overlaps === 0 && wrongUv === 0 && wrongH === 0,
+      `${plan.signs.length - noRect} of ${plan.signs.length} placed in ${A.w}x${A.h}; ${overlaps} overlaps, ${outside} outside, ` +
+      `${wrongUv} sampling outside their box, ${wrongH} the wrong shape`);
+  }
   const post = plan.posts[40];
   const cam = new THREE.Vector3(post.x, post.y + 3, post.z + 8);
   rs.update(cam, 1 / 60, null);
@@ -502,6 +637,17 @@ function overlapDepth(a, b) {
   check('ground decals are pulled toward the eye exactly as the road is', ok,
     m ? `road ${m[1]}/${m[2]}, decals ${ROAD_PULL.join('/')}` : 'uPull not found in roads.js');
 }
+
+// What only eyes can check, in the browser (?nosplash, medium, 1024 x 768).
+console.log(`
+  LOOK
+  - a one-line and a two-line direction sign at noon: white, bordered, text
+    and arrows legible from 20 m (a blank grey board is the old UV bug)
+  - the same signs at 23:00 from 15-30 m: bright but lettered, not a white slab;
+    post reflectors hard points, not orbs; cat's eyes glinting down the middle
+  - a chevron board: two whole arrows, centred
+  - a lorry, a bus and a tractor driving away past 46 m: the company name,
+    the bus's band and the tractor's stripe stay on as they go far`);
 
 console.log(fail === 0 ? '\nThe world is drawn where it is solid, and lived in.' : `\n${fail} CHECK(S) FAILED`);
 process.exit(fail ? 1 : 0);

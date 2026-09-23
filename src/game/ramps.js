@@ -11,14 +11,15 @@
 //
 // So a jump is built: a kicker ramp standing on the road.
 //
-// HOW IT LAUNCHES. It is not a velocity hack. The ramp is added to the ground
-// query itself — ground.sample and ground.heightAt report it — so the wheels
-// drive up it like any other surface. While grounded, vehicle.js runs the
-// chassis height as a spring toward the road and heightVel is the chassis's
-// real vertical velocity; at the lip the ground falls away, the existing
-// airborne test fires (a 0.42 m drop at speed), and the car leaves with the
-// vertical speed the ramp gave it. The flight, the landing and the springs
-// are all the vehicle's own.
+// HOW IT LAUNCHES. The ramp is put into the ground query itself, so the wheels
+// drive up the face like any other surface and the car pitches with it. What
+// the face cannot do on its own is throw the car: vehicle.js clamps a grounded
+// chassis to within 0.30 m of the road, which caps the vertical speed its
+// springs can build at about 1.5 m/s (measured: glued to the deck at every
+// speed to 100 km/h). So at the lip, kickRamps() hands the car the vertical
+// speed the face would have given it — v * sin(lip angle), less 15% — and
+// from there the flight, the landing and the springs are the vehicle's own.
+// The real car then flies 9.6 m at 40 km/h, 27 m at 80 and 38 m at 100.
 //
 // The profile is concave — a quadratic from flat at the toe to 16 degrees at
 // the lip — because a ramp that starts at its full angle is a kerb, and the
@@ -26,17 +27,17 @@
 // the lip is a short back slope rather than a wall, so a car that arrives the
 // wrong way climbs over it instead of hitting a 1.4 m step.
 //
-// OFF THE FOOTPRINTS NOTHING CHANGES. Outside a ramp's rectangle the wrapped
-// query returns exactly what the original did, bit for bit; the harness
-// checks that across the map. A ramp is 4.2 m wide and sits on the crown of
-// the road, so a traffic car in its lane (centred 2.4 m out on a 9.5 m lane)
-// passes beside it.
+// ONLY THE PLAYER'S WHEELS SEE IT. The overlay is switched on for the length
+// of car.step() and off again (see createRampOverlay), so the terrain and road
+// meshes, the traffic and the camera all see the ground exactly as before.
+// A ramp is 3.4 m wide on the crown of the road, so a traffic car in its lane
+// (centred 2.4 m out on a 9.5 m road) passes beside it.
 
 export const RAMP = {
   length: 11,       // toe to lip, metres
   height: 1.45,     // lip above the road
   back: 3.2,        // back slope, lip to ground
-  width: 4.2,
+  width: 3.4,
 };
 
 /**
@@ -79,17 +80,25 @@ function rampSlope(r, u, v) {
 }
 
 /**
- * Adds `ramps` to the ground query. Returns an uninstall function.
+ * The ramps as ground, switched on only while the player's car is stepping.
  *
- * Wraps the two calls anything asks the ground for a height through —
- * sample() for the vehicle's wheels and heightAt() for the camera, traffic
- * and debris — and leaves every other method alone.
+ * WHY NOT ALWAYS ON. The ground object is shared. terrain.js builds every
+ * streamed chunk from ground.sample(), and roads.js builds its ribbon from
+ * ground.heightAt(). Wrapped permanently, any chunk streamed in after boot
+ * would grow a grass-and-asphalt hump under each ramp, poking through the
+ * ramp's own mesh. So main.js brackets car.step() with enable() and
+ * disable() (goals.preStep and goals.step), and for the rest of the frame the
+ * ground is exactly what it always was. Outside that window nothing anywhere
+ * can see a ramp except the ramp's mesh; inside it, only the wheels ask.
+ *
+ * Inside the window, off the footprints, the wrapped query returns exactly
+ * what the original did, bit for bit — tools/goalscheck.mjs checks both.
  */
-export function installRamps(ground, ramps) {
-  if (!ground || !ramps || !ramps.length || ground.__ramps) return () => {};
-  const list = ramps;
+export function createRampOverlay(ground, ramps) {
+  const list = ramps || [];
   const origSample = ground.sample;
   const origHeight = ground.heightAt;
+  let on = false;
 
   // Index of the ramp containing (x, z), or -1. Six ramps, bounding circles
   // first: four wheels at 120 Hz is under 3000 of these a second.
@@ -104,6 +113,15 @@ export function installRamps(ground, ramps) {
       if (u > 0 && u < r.L + r.B && v > -r.halfW && v < r.halfW) return i;
     }
     return -1;
+  }
+
+  /** Ramp height above the road at (x, z); 0 off every ramp. */
+  function delta(x, z) {
+    const i = find(x, z);
+    if (i < 0) return 0;
+    const r = list[i];
+    const ox = x - r.x, oz = z - r.z;
+    return rampProfile(r, ox * r.tx + oz * r.tz, ox * r.nx + oz * r.nz);
   }
 
   function sample(x, z, out) {
@@ -128,22 +146,25 @@ export function installRamps(ground, ramps) {
     return res;
   }
 
-  function heightAt(x, z) {
-    const y = origHeight.call(ground, x, z);
-    const i = find(x, z);
-    if (i < 0) return y;
-    const r = list[i];
-    const ox = x - r.x, oz = z - r.z;
-    return y + rampProfile(r, ox * r.tx + oz * r.tz, ox * r.nx + oz * r.nz);
-  }
+  function heightAt(x, z) { return origHeight.call(ground, x, z) + delta(x, z); }
 
-  ground.sample = sample;
-  ground.heightAt = heightAt;
-  ground.__ramps = list;
-  return function uninstall() {
-    if (ground.sample === sample) ground.sample = origSample;
-    if (ground.heightAt === heightAt) ground.heightAt = origHeight;
-    delete ground.__ramps;
+  return {
+    enable() {
+      if (on || !list.length) return;
+      ground.sample = sample;
+      ground.heightAt = heightAt;
+      on = true;
+    },
+    disable() {
+      if (!on) return;
+      if (ground.sample === sample) ground.sample = origSample;
+      if (ground.heightAt === heightAt) ground.heightAt = origHeight;
+      on = false;
+    },
+    /** Road height with the ramps included, for anything drawn on top of them. */
+    heightAt,
+    delta,
+    get on() { return on; },
   };
 }
 
@@ -167,7 +188,7 @@ export function installRamps(ground, ramps) {
  *
  * `state` is a small per-car scratch object ({ onFace: -1 }).
  */
-export function kickRamps(car, ramps, state, ground) {
+export function kickRamps(car, ramps, state) {
   if (!ramps || !ramps.length || !car) return -1;
   if (car.airborne) { state.onFace = -1; return -1; }
   let hit = -1;
@@ -189,10 +210,10 @@ export function kickRamps(car, ramps, state, ground) {
       car.airTime = 0;
       car.vy = Math.max(car.vy || 0, vy);
       // Lift the chassis back to deck height if a substep already carried it
-      // a few centimetres down the back slope.
-      if (ground) {
-        const lipY = ground.heightAt(r.lipX, r.lipZ);
-        const want = lipY + (car.spec ? car.spec.rideHeight : 0.3);
+      // a few centimetres down the back slope. r.lipY is the road under the
+      // lip plus the ramp, set when the ramp was sited.
+      if (r.lipY != null) {
+        const want = r.lipY + (car.spec ? car.spec.rideHeight : 0.3);
         if (car.y < want) car.y = want;
       }
       hit = i;

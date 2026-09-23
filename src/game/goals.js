@@ -36,7 +36,7 @@ import {
   generateChallenges, raceMedal, scoreMedal, formatTime,
   MEDAL_NAMES, MEDAL_NONE, MEDAL_BRONZE, MEDAL_GOLD,
 } from './challenges.js';
-import { makeRamp, installRamps, kickRamps } from './ramps.js';
+import { makeRamp, createRampOverlay, kickRamps } from './ramps.js';
 import { createProgress, levelFor } from './progress.js';
 import { createSfx } from './sfx.js';
 
@@ -98,10 +98,12 @@ export function createGoals(opts) {
     const r = makeRamp(c.ramp);
     r.id = c.id;
     r.baseY = baseHeight(c.ramp.x, c.ramp.z);
+    r.lipY = baseHeight(r.lipX, r.lipZ) + r.H;
     c.rampIndex = ramps.length;
     ramps.push(r);
   }
-  const uninstallRamps = installRamps(ground, ramps);
+  // Switched on around car.step() only — see createRampOverlay.
+  const rampGround = createRampOverlay(ground, ramps);
   const kickState = { onFace: -1 };
 
   for (const c of list) {
@@ -122,7 +124,7 @@ export function createGoals(opts) {
   let view = null;
   if (opts.createView && opts.scene) {
     try {
-      view = opts.createView(opts.scene, { baseHeight, quality: settings.quality || 'medium' });
+      view = opts.createView(opts.scene, { baseHeight, heightAt: rampGround.heightAt, quality: settings.quality || 'medium' });
       view.build({ challenges: list, tokens, ramps, taken: tokenTaken() });
     } catch (err) { console.error('[goals] world markers unavailable:', err); view = null; }
   }
@@ -696,6 +698,9 @@ export function createGoals(opts) {
   // ---- the frame ------------------------------------------------------------------------
 
   function update(dt, ctx) {
+    // Belt and braces: whatever happened in the physics loop, the ramps are
+    // never left in the ground for the renderers to stream into chunks.
+    rampGround.disable();
     clock += dt;
     driving = !!(ctx && ctx.driving);
     vs.time = clock;
@@ -771,9 +776,13 @@ export function createGoals(opts) {
     prevX = car.x; prevZ = car.z; prevValid = true;
   }
 
-  /** Once per physics step, after car.step(): the ramp lips. */
+  /** Once per physics step, BEFORE car.step(): the ramps become ground. */
+  function preStep() { rampGround.enable(); }
+
+  /** Once per physics step, after car.step(): the ramp lips, then the ramps go. */
   function step() {
-    const hit = kickRamps(car, ramps, kickState, ground);
+    rampGround.disable();
+    const hit = kickRamps(car, ramps, kickState);
     if (hit >= 0 && !jump) {
       jump = { c: byId[ramps[hit].id], t: clock };
       play('launch');
@@ -852,7 +861,7 @@ export function createGoals(opts) {
 
   function dispose() {
     if (typeof window !== 'undefined') window.removeEventListener('keydown', onKey);
-    uninstallRamps();
+    rampGround.disable();
     if (view) view.dispose();
     if (overlay) overlay.dispose();
     if (sfx) sfx.dispose();
@@ -868,7 +877,7 @@ export function createGoals(opts) {
     get nav() { return hudNav; },
     get ui() { return ui; },
     get sfx() { return sfx; },
-    update, step, placeInitial, onDrive, respawn, travelTo, restart,
+    update, preStep, step, placeInitial, onDrive, respawn, travelTo, restart,
     abandon: () => { abandonRace('Race abandoned'); endZone(false); lastResult = null; if (overlay) overlay.hideResult(); },
     setTarget: (id) => { const c = byId[id]; if (c) setTarget(c, true); return !!c; },
     cycleTarget, recommend: () => recommend(null),

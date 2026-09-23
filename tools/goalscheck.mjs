@@ -268,16 +268,28 @@ console.log('\n-- the economy --');
 // ---------------------------------------------------------------------------
 console.log('\n-- ramps --');
 {
-  let diffs = 0;
+  // Outside car.step() the ground is the ground: what the terrain and road
+  // meshes stream from must never see a ramp.
+  let idle = 0;
+  for (const [x, z, y] of probes) if (ground.heightAt(x, z) !== y) idle++;
+  const idleFns = ground.heightAt === origHeight && ground.sample === origSample;
+  // Inside it, only the footprints change.
+  goals.preStep();
+  let diffs = 0, inside = 0;
   for (const [x, z, y] of probes) {
-    let inside = false;
+    let on = false;
     for (const r of goals.ramps) {
       const ox = x - r.x, oz = z - r.z;
-      if (rampProfile(r, ox * r.tx + oz * r.tz, ox * r.nx + oz * r.nz) > 0) inside = true;
+      if (rampProfile(r, ox * r.tx + oz * r.tz, ox * r.nx + oz * r.nz) > 0) on = true;
     }
-    if (!inside && ground.heightAt(x, z) !== y) diffs++;
+    if (on) inside++;
+    else if (ground.heightAt(x, z) !== y) diffs++;
   }
-  check('off the ramps the ground is untouched', diffs === 0, `${diffs} of ${probes.length} samples differ, bit for bit`);
+  const r0 = goals.ramps[0];
+  const lipH = r0 ? ground.heightAt(r0.x + r0.tx * (r0.L - 0.01), r0.z + r0.tz * (r0.L - 0.01)) - origHeight(r0.x + r0.tx * (r0.L - 0.01), r0.z + r0.tz * (r0.L - 0.01)) : 0;
+  goals.step(1 / 120);
+  check('between physics steps the ground has no ramps in it', idle === 0 && idleFns, `${idle} of ${probes.length} samples differ, original functions ${idleFns ? 'in place' : 'REPLACED'}`);
+  check('during a step, only the ramp footprints change', diffs === 0 && lipH > 1.3, `${diffs} samples off the ramps differ, bit for bit; the lip stands ${lipH.toFixed(2)} m proud`);
 }
 
 // ---------------------------------------------------------------------------
@@ -336,6 +348,7 @@ console.log('\n-- the real car, through the real runtime --');
         if (r) pilotStep(c, r, gpsProf, 0.5, pr, la, np, 12);
       }
       const x0 = car.x, z0 = car.z;
+      goals.preStep();
       car.step(PH);
       goals.step(PH);
       if (goals.hold) crept = Math.max(crept, Math.hypot(car.x - x0, car.z - z0) / PH);
@@ -371,6 +384,7 @@ console.log('\n-- jumps, flown by the real car --');
       const r = goals.ramps[c.rampIndex];
       while (steps < 120 * 60) {
         pilotStep(c, route, prof, 1.0, pr, la, np, kmh / 3.6);
+        goals.preStep();
         car.step(1 / 120);
         goals.step(1 / 120);
         if (steps % 2 === 0) goals.update(1 / 60, { driving: true });

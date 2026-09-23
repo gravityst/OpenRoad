@@ -319,8 +319,24 @@ export function createMenus(root, opts = {}) {
     document.head.appendChild(link);
   }
 
+  // The challenge strip, map list and garage prices are styled in goals.css,
+  // which the objectives overlay also links; whichever loads first wins.
+  if (opts.stylesheet !== false && !document.querySelector('link[data-openroad-goals]')) {
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.dataset.openroadGoals = '';
+    link.href = new URL('../../styles/goals.css', import.meta.url).href;
+    document.head.appendChild(link);
+  }
+
   // ---- state --------------------------------------------------------------
   const settings = { ...loadSettings(), ...(opts.settings || {}) };
+  // The goals layer, once main.js hands it over. Null means free-roam: every
+  // car is free and none of the challenge UI is shown.
+  let goals = null;
+  // The car actually being driven, so browsing the garage and backing out
+  // puts the right body back on the car.
+  let drivingId = settings.car && CAR_BY_ID[settings.car] ? settings.car : STARTER;
   const handlers = new Map();
   let current = null;          // null means "closed, the player is driving"
   let backTo = 'title';        // where Escape goes from a sub-screen
@@ -358,11 +374,13 @@ export function createMenus(root, opts = {}) {
 
     <section class="or-screen or-title" data-screen="title" role="dialog" aria-modal="true" aria-label="Main menu">
       <div class="or-title-inner">
-        <p class="or-eyebrow">An open world for driving in</p>
+        <p class="or-eyebrow">Open-world rally</p>
         <h1 class="or-wordmark"><span class="or-word">Open</span><span class="or-word or-word--hi">Road</span></h1>
-        <p class="or-tagline">Nowhere to be, and all day to get there.</p>
+        <p class="or-tagline">Floor it across open country, gravel stages and four race circuits.</p>
+        <div class="or-goals-strip" hidden></div>
+        <p class="or-goals-progress" hidden></p>
         <div class="or-title-actions">
-          <button class="or-btn or-btn--primary or-btn--xl" data-act="drive" data-autofocus>Drive</button>
+          <button class="or-btn or-btn--primary or-btn--xl" data-act="drive" data-autofocus>Play</button>
           <div class="or-title-secondary">
             <button class="or-btn or-btn--ghost" data-act="garage">Garage</button>
             <button class="or-btn or-btn--ghost" data-act="map">Map</button>
@@ -387,6 +405,7 @@ export function createMenus(root, opts = {}) {
           <p class="or-spec-class"></p>
           <h3 class="or-spec-name"><span class="or-spec-brand"></span><span class="or-spec-model"></span></h3>
           <p class="or-spec-blurb"></p>
+          <p class="or-spec-lock" hidden></p>
           <div class="or-stats"></div>
           <div class="or-drive">
             <span class="or-drive-label"></span>
@@ -424,8 +443,11 @@ export function createMenus(root, opts = {}) {
       <div class="or-card">
         <p class="or-eyebrow">Engine idling</p>
         <h2 class="or-card-title">Paused</h2>
+        <p class="or-goals-progress or-pause-progress" hidden></p>
         <div class="or-menu-list">
           <button class="or-btn or-btn--primary" data-act="resume" data-autofocus>Resume</button>
+          <button class="or-btn or-btn--ghost" data-act="goal-restart" hidden>Restart race</button>
+          <button class="or-btn or-btn--quiet" data-act="goal-abandon" hidden>Leave race</button>
           <button class="or-btn or-btn--ghost" data-act="map">Map</button>
           <button class="or-btn or-btn--ghost" data-act="garage">Garage</button>
           <button class="or-btn or-btn--ghost" data-act="settings">Settings</button>
@@ -444,6 +466,7 @@ export function createMenus(root, opts = {}) {
         <canvas class="or-map-canvas" tabindex="0" role="application"
                 aria-label="World map. Arrow keys move the marker, Enter travels there."></canvas>
       </div>
+      <div class="or-map-goals" hidden></div>
       <footer class="or-map-foot">
         <ul class="or-legend">
           <li><i style="background:#ffb43c"></i>Motorway</li>
@@ -451,7 +474,7 @@ export function createMenus(root, opts = {}) {
           <li><i style="background:#6d7986"></i>Street</li>
           <li><i style="background:#9b7a52"></i>Track</li>
         </ul>
-        <p class="or-hint">Tap the map to travel there</p>
+        <p class="or-hint">Tap a challenge to go straight there, or anywhere else to travel</p>
       </footer>
     </section>
   `;
@@ -543,6 +566,7 @@ export function createMenus(root, opts = {}) {
       const chip = el('i', 'or-car-chip');
       chip.style.background = '#' + car.colours[0].toString(16).padStart(6, '0');
       row.appendChild(chip);
+      row.appendChild(el('span', 'or-car-price'));
       row.addEventListener('click', () => select(i));
       listEl.appendChild(row);
     });
@@ -619,6 +643,7 @@ export function createMenus(root, opts = {}) {
     // The electric car has one reduction gear, which is not a "1-speed gearbox".
     specEls.gears.textContent = s.gears > 1 ? `${s.gears}-speed` : 'Single speed';
     renderSwatches(car);
+    renderLocks();
 
     for (const row of listEl.children) {
       const on = Number(row.dataset.index) === index;
@@ -945,6 +970,8 @@ export function createMenus(root, opts = {}) {
       mapCtx.stroke();
     }
 
+    drawGoalPins(mapCtx, s, half, scale);
+
     if (player.known) {
       const px = (player.x + half) * s, py = (player.z + half) * s;
       mapCtx.save();
@@ -1038,6 +1065,8 @@ export function createMenus(root, opts = {}) {
     const slipped = Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y) > 12;
     downAt = null;
     if (slipped) return;
+    const pin = goalAt(e.clientX, e.clientY);
+    if (pin) { hide(); emit('goal-travel', pin.id); return; }
     const p = pointToWorld(e.clientX, e.clientY);
     travelTo(p.x, p.z);
   });
@@ -1072,6 +1101,215 @@ export function createMenus(root, opts = {}) {
       || Math.abs(yaw - player.yaw) > 0.01;
     player.x = x; player.z = z; player.yaw = yaw; player.known = true;
     if (moved && current === 'map') drawMap();
+  }
+
+  // =========================================================================
+  // Goals: the title strip, the pause card, the map's challenges, car prices
+  // =========================================================================
+
+  const KIND = {
+    race: { label: 'Races', one: 'Race', colour: '#ffb43c' },
+    trap: { label: 'Speed traps', one: 'Speed trap', colour: '#ff5a5a' },
+    jump: { label: 'Jumps', one: 'Jump', colour: '#4fe38a' },
+    drift: { label: 'Drift zones', one: 'Drift zone', colour: '#e45cff' },
+  };
+  const MEDAL_COLOUR = ['', '#d08a4c', '#e6edf3', '#ffd23f'];
+  const titleStrip = ui.querySelector('.or-goals-strip');
+  const titleProgress = ui.querySelector('.or-title .or-goals-progress');
+  const tagline = ui.querySelector('.or-tagline');
+  const pauseProgress = ui.querySelector('.or-pause-progress');
+  const pauseRestart = ui.querySelector('[data-act="goal-restart"]');
+  const pauseAbandon = ui.querySelector('[data-act="goal-abandon"]');
+  const mapGoals = ui.querySelector('.or-map-goals');
+  const specLock = ui.querySelector('.or-spec-lock');
+  const garageGo = ui.querySelector('.or-garage-foot [data-act="drive"]');
+  const money = (v) => `$${Math.round(v).toLocaleString('en')}`;
+
+  function medalDot(m) {
+    const i = el('i', 'or-medal-dot');
+    i.dataset.medal = String(m || 0);
+    return i;
+  }
+
+  function progressLine() {
+    const p = goals.progress;
+    const lv = p.level;
+    const mc = p.medalCounts(goals.list.map((c) => c.id));
+    const next = goals.target || goals.recommend();
+    return `Level ${lv.level}  ·  ${money(p.cash)}  ·  ${mc.total} of ${goals.list.length} medals${next ? `  ·  Next up: ${next.name}` : ''}`;
+  }
+
+  function renderTitleGoals() {
+    if (!goals) { titleStrip.hidden = true; titleProgress.hidden = true; return; }
+    tagline.textContent = 'Race the ridges. Fly off the ramps. Beat the speed cameras. Win every car in the garage.';
+    titleStrip.hidden = false;
+    titleStrip.textContent = '';
+    const p = goals.progress;
+    for (const kind of Object.keys(KIND)) {
+      const of = goals.list.filter((c) => c.kind === kind);
+      if (!of.length) continue;
+      const chip = el('button', 'or-goal-chip');
+      chip.type = 'button';
+      chip.dataset.kind = kind;
+      chip.dataset.act = 'map';
+      chip.appendChild(el('b', null, String(of.length)));
+      chip.appendChild(el('span', null, KIND[kind].label));
+      const dots = el('em');
+      for (const c of of) dots.appendChild(medalDot(p.medalOf(c.id)));
+      chip.appendChild(dots);
+      titleStrip.appendChild(chip);
+    }
+    const tok = el('button', 'or-goal-chip');
+    tok.type = 'button';
+    tok.dataset.kind = 'token';
+    tok.dataset.act = 'map';
+    tok.appendChild(el('b', null, `${p.tokenCount}/${goals.tokens.length}`));
+    tok.appendChild(el('span', null, 'Tokens'));
+    titleStrip.appendChild(tok);
+    titleProgress.hidden = false;
+    titleProgress.textContent = progressLine();
+  }
+
+  function renderPauseGoals() {
+    const racing = !!(goals && goals.activeRace);
+    pauseRestart.hidden = !racing;
+    pauseAbandon.hidden = !racing;
+    if (racing) pauseRestart.textContent = `Restart ${goals.activeRace.name}`;
+    pauseProgress.hidden = !goals;
+    if (goals) pauseProgress.textContent = progressLine();
+  }
+
+  function renderMapGoals() {
+    if (!goals) { mapGoals.hidden = true; return; }
+    mapGoals.hidden = false;
+    mapGoals.textContent = '';
+    const p = goals.progress;
+    const order = ['race', 'trap', 'jump', 'drift'];
+    const sorted = goals.list.slice().sort((a, b) => order.indexOf(a.kind) - order.indexOf(b.kind));
+    for (const c of sorted) {
+      const b = el('button', 'or-map-goal');
+      b.type = 'button';
+      b.dataset.kind = c.kind;
+      if (goals.target === c) b.classList.add('is-target');
+      b.appendChild(medalDot(p.medalOf(c.id)));
+      const t = el('span', 'or-map-goal-text');
+      t.appendChild(el('b', null, c.name));
+      const r = p.result(c.id);
+      const best = r ? (c.kind === 'race' ? fmtRace(r.best) : `${Math.round(r.best)} ${c.unit}`) : KIND[c.kind].one;
+      t.appendChild(el('span', null, best));
+      b.appendChild(t);
+      b.addEventListener('click', () => { hide(); emit('goal-travel', c.id); });
+      mapGoals.appendChild(b);
+    }
+  }
+  function fmtRace(t) {
+    const tenths = Math.floor(t * 10 + 1e-6);
+    const m = Math.floor(tenths / 600), sec = Math.floor((tenths % 600) / 10);
+    return `${m}:${sec < 10 ? '0' : ''}${sec}.${tenths % 10}`;
+  }
+
+  /** Challenge pins on the map canvas. Called from drawMap. */
+  function drawGoalPins(ctx, s, half, scale) {
+    if (!goals) return;
+    const p = goals.progress;
+    for (const c of goals.list) {
+      const x = (c.start.x + half) * s, y = (c.start.z + half) * s;
+      const target = goals.target === c;
+      const r = (target ? 9 : 7) * scale;
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.fillStyle = KIND[c.kind].colour;
+      ctx.fill();
+      const m = p.medalOf(c.id);
+      ctx.lineWidth = (m ? 3 : 1.6) * scale;
+      ctx.strokeStyle = m ? MEDAL_COLOUR[m] : 'rgba(6, 8, 12, 0.9)';
+      ctx.stroke();
+      if (target) {
+        ctx.beginPath();
+        ctx.arc(x, y, r + 5 * scale, 0, Math.PI * 2);
+        ctx.lineWidth = 2 * scale;
+        ctx.strokeStyle = '#4fd8f0';
+        ctx.stroke();
+      }
+    }
+    ctx.fillStyle = '#ffcf3a';
+    for (let i = 0; i < goals.tokens.length; i++) {
+      if (p.hasToken(i)) continue;
+      const t = goals.tokens[i];
+      const x = (t.x + half) * s, y = (t.z + half) * s, r = 2.6 * scale;
+      ctx.beginPath();
+      ctx.moveTo(x, y - r); ctx.lineTo(x + r, y); ctx.lineTo(x, y + r); ctx.lineTo(x - r, y);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+
+  /** The challenge under a map point, within a finger's width. */
+  function goalAt(clientX, clientY) {
+    if (!goals || !world) return null;
+    const rect = mapCanvas.getBoundingClientRect();
+    let best = null, bd = 18 * 18;
+    for (const c of goals.list) {
+      const x = rect.left + ((c.start.x + world.half) / (world.half * 2)) * rect.width;
+      const y = rect.top + ((c.start.z + world.half) / (world.half * 2)) * rect.height;
+      const d = (x - clientX) * (x - clientX) + (y - clientY) * (y - clientY);
+      if (d < bd) { bd = d; best = c; }
+    }
+    return best;
+  }
+
+  function owns(id) { return !goals || goals.progress.owns(id); }
+
+  /** Prices, padlocks and the garage's main button. */
+  function renderLocks() {
+    for (const row of listEl.children) {
+      const car = cars[Number(row.dataset.index)];
+      if (!car) continue;
+      const locked = !owns(car.id);
+      row.classList.toggle('is-locked', locked);
+      const tag = row.querySelector('.or-car-price');
+      if (tag) tag.textContent = locked ? money(goals.progress.price(car.id)) : '';
+    }
+    const car = cars[index];
+    if (!car || !garageGo) return;
+    if (owns(car.id)) {
+      specLock.hidden = true;
+      garageGo.textContent = 'Take it out';
+      garageGo.dataset.act = 'drive';
+      garageGo.disabled = false;
+      return;
+    }
+    const price = goals.progress.price(car.id), cash = goals.progress.cash;
+    specLock.hidden = false;
+    specLock.textContent = cash >= price
+      ? `Yours for ${money(price)}. You have ${money(cash)}.`
+      : `Costs ${money(price)} — ${money(price - cash)} to go. Win medals and grab tokens to earn it.`;
+    garageGo.textContent = cash >= price ? `Buy for ${money(price)}` : `Need ${money(price - cash)} more`;
+    garageGo.dataset.act = 'buy';
+    garageGo.disabled = cash < price;
+  }
+
+  function buy() {
+    const car = cars[index];
+    if (!car || !goals) return;
+    if (goals.progress.buy(car.id)) {
+      if (goals.sfx) goals.sfx.play('buy');
+      renderSpec();
+      garageGo.classList.remove('is-bought'); void garageGo.offsetWidth; garageGo.classList.add('is-bought');
+    }
+  }
+
+  function setGoals(g) {
+    goals = g || null;
+    if (goals && goals.progress.onChange) goals.progress.onChange(() => refreshGoals());
+    // A player who already drives a car keeps it; the goals layer granted it.
+    refreshGoals();
+  }
+  function refreshGoals() {
+    renderTitleGoals();
+    renderPauseGoals();
+    if (current === 'map') { renderMapGoals(); drawMap(); }
+    if (cars.length) renderLocks();
   }
 
   // =========================================================================
@@ -1113,7 +1351,10 @@ export function createMenus(root, opts = {}) {
       screen.inert = !on;
     }
     if (name === 'garage' && cars.length) emit('select', selection());
-    if (name === 'map') layoutMap();
+    if (name === 'title') renderTitleGoals();
+    if (name === 'pause') renderPauseGoals();
+    if (name === 'garage') renderLocks();
+    if (name === 'map') { renderMapGoals(); layoutMap(); }
     focusFirst(name);
     emit('screen', name);
   }
@@ -1135,6 +1376,12 @@ export function createMenus(root, opts = {}) {
   function goBack() {
     if (current === 'pause' || current === null) { resume(); return; }
     if (current === 'title') return;
+    // Leaving the garage without taking anything out: put the body of the car
+    // actually being driven back on it, not whatever was browsed last.
+    if (current === 'garage' && cars[index] && cars[index].id !== drivingId) {
+      const i = cars.findIndex((c) => c.id === drivingId);
+      if (i >= 0) select(i);
+    }
     show(backTo === 'pause' ? 'pause' : 'title');
   }
 
@@ -1144,7 +1391,21 @@ export function createMenus(root, opts = {}) {
   }
 
   function startDriving() {
+    if (cars[index] && !owns(cars[index].id)) {
+      // From the garage a locked car is bought with the button, never with a
+      // stray Enter. From anywhere else, fall back to the car being driven.
+      if (current === 'garage') { garageGo.classList.remove('is-nope'); void garageGo.offsetWidth; garageGo.classList.add('is-nope'); return; }
+      const i = cars.findIndex((c) => c.id === drivingId);
+      select(i >= 0 ? i : 0, true);
+    }
     const sel = selection();
+    // A drive from the title (directly, or via the garage) starts a session;
+    // one from the pause menu's garage carries on the one in progress.
+    if (sel) sel.fresh = current === 'title' || (current === 'garage' && backTo === 'title');
+    if (sel) {
+      drivingId = sel.id;
+      if (settings.car !== sel.id) { settings.car = sel.id; persist(settings); }
+    }
     hide();
     emit('drive', sel);
   }
@@ -1159,6 +1420,9 @@ export function createMenus(root, opts = {}) {
     back: goBack,
     resume,
     quit: () => { show('title'); emit('quit-to-title'); },
+    buy,
+    'goal-restart': () => { hide(); emit('goal-restart'); },
+    'goal-abandon': () => { hide(); emit('goal-abandon'); },
     reset: () => {
       Object.assign(settings, DEFAULT_SETTINGS);
       refreshSettings();
@@ -1254,7 +1518,7 @@ export function createMenus(root, opts = {}) {
     get selected() { return selection(); },
     /** Where the garage expects the 3D car, in CSS pixels. */
     stageRect: () => stageEl.getBoundingClientRect(),
-    show, hide, on, off, setCars, setPlayer, setWorld, dispose,
+    show, hide, on, off, setCars, setPlayer, setWorld, setGoals, dispose,
     set onTyping(fn) { onTyping = fn; },
   };
 }

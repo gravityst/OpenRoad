@@ -20,6 +20,7 @@
 // guessed, and each has a pass here that fixes it.
 
 import { fbm, ridged, valueNoise, hash2, mulberry, smoothstep, clamp, lerp } from './noise.js';
+import { buildBiomes, setActiveBiomes, BIOMES } from './biomes.js';
 
 export const ROAD = {
   highway: { width: 26.0, lanes: 2, speed: 39, surface: 'asphalt', markings: 'highway' },
@@ -111,8 +112,18 @@ const CITY_R = 0;
  */
 export function makeTerrain(seed) {
   const s = seed | 0;
+  // The biome field (biomes.js), once buildWorld has made one: mountains,
+  // mesas and the sea floor as heights added to this base, and the ground
+  // cover each biome lays. Null until setRelief(), so the road layout and
+  // the circuit siting see the base terrain they were tuned on.
+  let field = null;
 
   function height(x, z) {
+    const b = baseHeight(x, z);
+    return field ? b + field.relief(x, z) : b;
+  }
+
+  function baseHeight(x, z) {
     const d = Math.hypot(x, z);
 
     // There is no city any more, and that changes the terrain more than
@@ -170,6 +181,12 @@ export function makeTerrain(seed) {
     const sl = ny === undefined ? slope(x, z) : Math.acos(clamp(ny, -1, 1));
     if (sl > 0.62) return 'rock';
     const h = height(x, z);
+    // Snow, sand, hardpan and the sea, wherever a biome says so; the rules
+    // below are the farmland's and still hold everywhere else.
+    if (field) {
+      const b = field.surfaceAt(x, z, h, sl);
+      if (b) return b;
+    }
     const n = fbm(x / 320, z / 320, s + 77, 3);
     // Sand belongs to the river valley, not to the farmland. The old threshold
     // (h < -9) caught more than a quarter of the map, because the valley cuts
@@ -191,7 +208,10 @@ export function makeTerrain(seed) {
     return 'grass';
   }
 
-  return { height, normal, slope, cover, seed: s, half: HALF, cityRadius: CITY_R };
+  /** Attach the biome field. Everything that asks for height or cover afterwards sees it. */
+  function setRelief(f) { field = f || null; }
+
+  return { height, baseHeight, normal, slope, cover, setRelief, seed: s, half: HALF, cityRadius: CITY_R };
 }
 
 // ---------------------------------------------------------------------------
@@ -1813,6 +1833,25 @@ export function buildWorld(seed = 20260820) {
   ensurePolylines(world);
   world.crossingsResolved = resolveCrossings(world);
   densify(world);
+
+  // --- Biomes -------------------------------------------------------------
+  // After the roads are laid and before they are graded: the relief is held
+  // off every carriageway by a mask built from these exact polylines, so the
+  // grading below sees mountains and mesas only where no road goes — except
+  // the broad alpine rise, which the northern roads are meant to climb.
+  world.biomes = buildBiomes(world, terrain);
+  terrain.setRelief(world.biomes);
+  setActiveBiomes(world.biomes);
+  // Named on the maps like districts: the HUD minimap points at them from
+  // its rim when they are out of view, which is half of wanting to go there.
+  for (let b = 0; b < BIOMES.length; b++) {
+    const B = BIOMES[b];
+    world.districts.push({
+      id: 'b_' + B.key, name: B.name, cx: B.at[0], cz: B.at[1], rot: 0,
+      cols: 0, rows: 0, cell: 0, kind: 'biome', biome: b, r: 240,
+    });
+  }
+
   settleElevation(world, terrain);
 
   // Junctions with three or more approaches get stop/signal treatment.

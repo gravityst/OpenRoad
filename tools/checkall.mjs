@@ -16,12 +16,12 @@ const CHECKS = [
   ['collision', 'buildings are solid and can never add energy'],
   ['damage', 'damage only ever takes capability away'],
   ['carcrash', 'cars are solid against each other and both take the damage'],
+  ['goals', 'every challenge is on a road, every race is winnable, saves survive'],
   ['debris', 'parts that fall off tumble, land, and never gain energy'],
   ['model', 'imported cars match the rig, and a missing one is harmless'],
   ['traffic', 'the other cars behave like traffic'],
   ['drift', 'sideways scores, straight does not, and the detector never flickers'],
   ['brand', 'every name in the game is invented'],
-  ['goals', 'every challenge is on a road, every race is winnable, saves survive'],
 ];
 
 const results = [];

@@ -280,6 +280,39 @@ for (const detail of ['high', 'low']) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Beyond the catalogue: the fire engine wreck.js builds from a bare spec, and
+// a seeded sweep of proportions a future car might have. The first version of
+// this sweep found arch ends landing a rounding error outside the arch.
+// ---------------------------------------------------------------------------
+{
+  let s = 0x2f6e2b1;
+  const rand = () => { s = (Math.imul(s, 1664525) + 1013904223) >>> 0; return s / 4294967296; };
+  const sweep = [{}, { body: 'van', colour: 0xc8102e, wheelbase: 3.1, track: 1.8 }, { body: 'not-a-style' }];
+  for (let i = 0; i < 70; i++) {
+    sweep.push({ id: `sweep${i}`, body: BODY_STYLES[i % 7], wheelbase: 2.1 + rand() * 1.5, track: 1.35 + rand() * 0.55,
+      wheelRadius: 0.27 + rand() * 0.21, rideHeight: 0.1 + rand() * 0.5 });
+  }
+  let broken = 0, first = '';
+  for (const sp of sweep) {
+    for (const detail of ['high', 'low']) {
+      try {
+        const m = createCarModel(sp, { detail });
+        let bad = false;
+        m.group.traverse((o) => {
+          if (!o.isMesh || bad) return;
+          const p = o.geometry.attributes.position.array, n = o.geometry.attributes.normal.array;
+          for (let k = 0; k < p.length; k++) if (!Number.isFinite(p[k]) || !Number.isFinite(n[k])) { bad = true; break; }
+        });
+        if (bad) { broken++; first = first || `${JSON.stringify(sp)} ${detail}`; }
+        m.dispose();
+      } catch (err) { broken++; first = first || `${JSON.stringify(sp)} ${detail}: ${err.message}`; }
+    }
+  }
+  check('odd specs and a sweep of proportions all build finite', broken === 0,
+    broken ? `${broken} bad, first ${first}` : `${sweep.length * 2} builds`);
+}
+
 const bad = Object.keys(problems);
 check('every car splits into panes, lamps, mirrors, bumpers and tailpipes',
   bad.length === 0, bad.length ? '' : `${CARS.length} cars x 2 detail levels, taken apart with the real damage renderer`);

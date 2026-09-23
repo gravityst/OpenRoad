@@ -1381,11 +1381,17 @@ function planHalfWidth(d, z) {
   return w;
 }
 
-/** Height of the top of the arch opening at z, or -Infinity outside an arch. */
+/**
+ * Height of the top of the arch opening at z, or -Infinity outside an arch.
+ * The ends are inclusive with a hair of slack: the stations and the cladding
+ * are placed at exactly axle +/- archLen, and (z - axle) / archLen comes back
+ * as -1.0000000000000002 often enough to turn an arch leg into bodywork — and
+ * a -Infinity into a NaN in whatever was hung off it.
+ */
 function archCut(d, z) {
   for (const za of [d.zAxleF, d.zAxleR]) {
     const t = (z - za) / d.archLen;
-    if (t >= -1 && t <= 1) return d.yWheel + d.archH * Math.sqrt(Math.max(0, 1 - t * t));
+    if (t >= -1 - 1e-9 && t <= 1 + 1e-9) return d.yWheel + d.archH * Math.sqrt(Math.max(0, 1 - t * t));
   }
   return -Infinity;
 }

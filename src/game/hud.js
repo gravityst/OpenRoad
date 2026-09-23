@@ -20,11 +20,13 @@
 //
 //   1. Nothing that can be drawn once is drawn twice. The entire road network is
 //      rasterised into an offscreen bitmap at construction and the minimap is a
-//      blit of one rotated crop of it. The dial's face, ticks, numbers and
-//      redline band are baked into a second bitmap and rebuilt only when the
-//      size or the redline changes. The compass tape is baked into a third and
-//      the visible strip is a single drawImage. Per frame the three canvases
-//      between them cost one clear, one blit and a couple of dozen arcs.
+//      blit of one rotated crop of it. The dial's face, numbers and unlit tach
+//      segments are baked into a second bitmap, and the segments fully lit into
+//      a third and fourth (band colours, and all red for the shift light), all
+//      rebuilt only when the size or the redline changes; the live tach is one
+//      of those revealed through a wedge clip. The compass tape is baked too
+//      and the visible strip is a single drawImage. Per frame the canvases
+//      between them cost a few clears, a few blits and a couple of dozen arcs.
 //
 //   2. update() allocates nothing. No object literals, no template strings, no
 //      toFixed — every number that reaches the screen is looked up in a string

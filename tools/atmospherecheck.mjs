@@ -93,12 +93,15 @@ console.log(`roads: ${st.families} surfaces in ${st.layers} layers of ${st.layer
   check('every road gets its own surface detail', badDetail === 0, `${badDetail} of ${seen} edges wrong`);
 
   // Every vertex's layer and detail index must exist, and nothing is NaN.
-  let out = 0, nan = 0, verts = 0, fringeBad = 0;
+  let out = 0, nan = 0, verts = 0, fringeBad = 0, walked = 0;
   // The road surface meshes only: roads.group also holds the roadside
-  // furniture (posts, rails, signs), which has no road layers to check.
-  // realismcheck asserts this walks every one of the surface meshes.
+  // furniture (posts, rails, signs), which has no road layers to check. It is
+  // skipped by identity, not by name, and the walk must then cover exactly
+  // the meshes and vertices roads.stats says were built — so a renamed or
+  // regrouped surface fails here instead of passing over nothing.
   for (const m of roads.group.children) {
-    if (m.name !== 'roads.region') continue;
+    if (roads.roadside && m === roads.roadside.group) continue;
+    walked++;
     const a = m.geometry.attributes;
     const r = a.aRoad.array, p = a.position.array, uv = a.uv.array;
     for (let i = 0; i < r.length / 3; i++) {
@@ -109,7 +112,9 @@ console.log(`roads: ${st.families} surfaces in ${st.layers} layers of ${st.layer
       if (!Number.isFinite(p[i * 3] + p[i * 3 + 1] + p[i * 3 + 2] + uv[i * 2] + uv[i * 2 + 1])) nan++;
     }
   }
-  check('every vertex addresses a real layer', out === 0 && fringeBad === 0,
+  check('the walk covers every road surface mesh', walked === st.drawCalls && verts === st.vertices && verts > 0,
+    `${walked} of ${st.drawCalls} meshes, ${verts} of ${st.vertices} vertices`);
+  check('every vertex addresses a real layer', out === 0 && fringeBad === 0 && verts > 0,
     `${out} out of range, ${fringeBad} bad fringe values, over ${verts} vertices`);
   check('no vertex is NaN or infinite', nan === 0, `${nan} bad`);
 }
@@ -195,7 +200,7 @@ console.log(`roads: ${st.families} surfaces in ${st.layers} layers of ${st.layer
   specs.forEach((s, f) => { if (s.kind === 'patch') for (let v = 0; v < s.variants; v++) patchLayer.add(atlas.first[f] + v); });
   const acc = { ribbon: [0, 0, 0, Infinity], patch: [0, 0, 0, Infinity] };
   for (const m of roads.group.children) {
-    if (m.name !== 'roads.region') continue;
+    if (roads.roadside && m === roads.roadside.group) continue;
     const a = m.geometry.attributes, idx = m.geometry.index.array;
     const p = a.position.array, r = a.aRoad.array;
     for (let t = 0; t < idx.length; t += 3) {

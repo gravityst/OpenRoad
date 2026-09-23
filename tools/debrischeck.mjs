@@ -311,15 +311,22 @@ const dt = 1 / 120;
   relaunch();
   for (let k = 0; k < 2000; k++) d.update(dt, cam);
 
+  // The MEDIAN round, not the mean. An update() that got slower is slower in
+  // every round, and moves the median exactly as far as the mean. Another
+  // process taking the CPU lands in a few rounds only, and those dragged the
+  // mean past the bar: with other suites and a browser sharing twelve cores
+  // (load average 28), the mean read 37-131 us and failed 5 runs in 16 while
+  // the median read 17-38 us and failed none. Quiet, both read about 11 us.
   const BATCH = 240, ROUNDS = 50;
-  let flying = 0;
+  const rounds = new Float64Array(ROUNDS);
   for (let r = 0; r < ROUNDS; r++) {
     relaunch();                              // untimed: keeps every piece airborne
     const t0 = process.hrtime.bigint();
     for (let k = 0; k < BATCH; k++) d.update(dt, cam);
-    flying += Number(process.hrtime.bigint() - t0);
+    rounds[r] = Number(process.hrtime.bigint() - t0) / BATCH / 1000;
   }
-  const usFlying = flying / (BATCH * ROUNDS) / 1000;
+  rounds.sort();
+  const usFlying = rounds[ROUNDS >> 1];
 
   // The other regime: a full pool of pieces that have already settled, which is
   // what the road behind a bad crash actually looks like a few seconds later.
@@ -329,7 +336,7 @@ const dt = 1 / 120;
   const usRest = Number(process.hrtime.bigint() - t1) / 12000 / 1000;
 
   check('update() is cheap with a full pool', usFlying < 60,
-    `${usFlying.toFixed(2)} us/frame with ${d.limit} pieces in flight ` +
+    `${usFlying.toFixed(2)} us/frame (median of ${ROUNDS} rounds) with ${d.limit} pieces in flight ` +
     `(${(usFlying / d.limit * 1000).toFixed(0)} ns/piece), ${usRest.toFixed(2)} us/frame at rest`);
 
   // Allocation proxy. A single object literal per piece per frame would be
@@ -378,25 +385,60 @@ const dt = 1 / 120;
   check('spawnPart builds a part from a detach event', !!mesh && d.count === 1,
     mesh ? `${mesh.name}, ${mesh.scale.x.toFixed(2)} x ${mesh.scale.y.toFixed(2)} x ${mesh.scale.z.toFixed(2)} m` : 'nothing spawned');
 
-  const x0 = mesh.position.x, z0 = mesh.position.z;
+  // How a part leaves the car has a random kick in it (spawnPart jitters the
+  // flick and the spin), so ONE throw was a lottery: over 400 seeds, 5 bumpers
+  // (1.25%) let go at 120 km/h turned over only once, and this check failed at
+  // random with nothing wrong. So it throws 64, from a fixed seed so every run
+  // is the same run, and holds the whole spread: every one goes more than 20 m
+  // down the road and turns over, and at least 90% go end over end at least
+  // twice (98.75% did over those 400 seeds). A spin that really weakened would
+  // fail this every time; one throw only caught it some of the time.
   const p = {};
-  let peakY = -Infinity, turns = 0, prevUpY = 1;
   const up = new THREE.Vector3();
-  for (let k = 0; k < 720; k++) {           // 6 s
-    d.update(dt);
-    if (!d.count) break;
-    d.probe(0, p);
-    peakY = Math.max(peakY, p.y - g.heightAt(p.x, p.z));
-    up.set(0, 1, 0).applyQuaternion(mesh.quaternion);
-    if (up.y < 0 && prevUpY >= 0) turns++;   // counts half-cartwheels
-    prevUpY = up.y;
+  const pool = createDebris(g, { max: 4, life: 4000, cullDistance: 1e9 });
+  const throwBumper = () => {
+    pool.clear();
+    const m = pool.spawnPart('frontBumper', car, vel);
+    const x0 = m.position.x, z0 = m.position.z;
+    let peakY = -Infinity, turns = 0, prevUpY = 1;
+    for (let k = 0; k < 720; k++) {           // 6 s
+      pool.update(dt);
+      if (!pool.count) break;
+      pool.probe(0, p);
+      peakY = Math.max(peakY, p.y - g.heightAt(p.x, p.z));
+      up.set(0, 1, 0).applyQuaternion(m.quaternion);
+      if (up.y < 0 && prevUpY >= 0) turns++;   // counts half-cartwheels
+      prevUpY = up.y;
+    }
+    pool.probe(0, p);
+    const travel = Math.hypot(p.x - x0, p.z - z0);
+    const along = ((p.x - x0) * vel.x + (p.z - z0) * vel.z) / speed;
+    return { travel, along, turns, peakY };
+  };
+  const THROWS = 64;
+  const hist = {};
+  let shortest = Infinity, shortestAlong = Infinity, twice = 0, never = 0, peak = 0;
+  const random = Math.random;
+  Math.random = mulberry(1);
+  try {
+    for (let n = 0; n < THROWS; n++) {
+      const r = throwBumper();
+      hist[r.turns] = (hist[r.turns] || 0) + 1;
+      shortest = Math.min(shortest, r.travel);
+      shortestAlong = Math.min(shortestAlong, r.along);
+      if (r.turns >= 2) twice++;
+      if (r.turns < 1) never++;
+      peak = Math.max(peak, r.peakY);
+    }
+  } finally {
+    Math.random = random;
   }
-  d.probe(0, p);
-  const travel = Math.hypot(p.x - x0, p.z - z0);
-  const along = ((p.x - x0) * vel.x + (p.z - z0) * vel.z) / speed;
-  check('a bumper torn off at 120 km/h cartwheels away', travel > 20 && along > 20 && turns >= 2,
-    `${travel.toFixed(1)} m travelled, ${along.toFixed(1)} m of it down the road, ` +
-    `${turns} half-turns, peaked ${peakY.toFixed(2)} m up`);
+  pool.dispose();
+  check('a bumper torn off at 120 km/h cartwheels away',
+    shortest > 20 && shortestAlong > 20 && never === 0 && twice >= THROWS * 0.9,
+    `${THROWS} throws: shortest ${shortest.toFixed(1)} m, ${shortestAlong.toFixed(1)} m down the road; ` +
+    `${twice}/${THROWS} end over end twice or more, ${never} never turned over ` +
+    `(half-turns ${Object.keys(hist).map((k) => `${k}:${hist[k]}`).join(' ')}), peaked ${peak.toFixed(2)} m up`);
 
   // A vehicle carries x,y,z (where it is) AND vx,vy,vz (how fast it is going).
   // Handed one of those, spawnPart must read the velocity — reading the

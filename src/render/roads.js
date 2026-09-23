@@ -1331,7 +1331,7 @@ function finishLayer(out, w, h, mPerX, mPerY, nrm, o4) {
  * Paints every family into two texture arrays and returns, per family, the
  * index of its first layer. Variants of a family occupy consecutive layers.
  */
-function buildLayers(specs, w) {
+function buildLayers(specs, w, defer) {
   const h = LAYER_H;
   let layers = 0;
   const first = [];
@@ -1344,17 +1344,36 @@ function buildLayers(specs, w) {
     H: new Float32Array(w * h), Hw: new Float32Array(w * h), Pm: new Float32Array(w * h),
   };
   const paint = { paved: paintPaved, loose: paintLoose, walk: paintWalk, kerb: paintKerb };
+  const paintOne = (f, v, F) => {
+    const spec = specs[f], L = first[f] + v;
+    out.rgba = alb.subarray(L * per, (L + 1) * per);
+    paint[spec.paint](spec, spec.variant(v), F, out, w, h);
+    finishLayer(out, w, h, spec.width / w, TILE / h, nrm, L * per);
+    return L;
+  };
+  // Deferred variants start life as copies of the first, so every tile has a
+  // correct surface from the first frame and the second copy's own repairs
+  // and potholes simply arrive a moment later.
+  const later = [];
   for (let f = 0; f < specs.length; f++) {
     const spec = specs[f];
     const F = fieldsFor(spec, w, h);
-    for (let v = 0; v < spec.variants; v++) {
-      const L = first[f] + v;
-      out.rgba = alb.subarray(L * per, (L + 1) * per);
-      paint[spec.paint](spec, spec.variant(v), F, out, w, h);
-      finishLayer(out, w, h, spec.width / w, TILE / h, nrm, L * per);
+    paintOne(f, 0, F);
+    for (let v = 1; v < spec.variants; v++) {
+      if (defer) {
+        const L0 = first[f] * per, L = (first[f] + v) * per;
+        alb.copyWithin(L, L0, L0 + per);
+        nrm.copyWithin(L, L0, L0 + per);
+        later.push({ f, v });
+      } else {
+        paintOne(f, v, F);
+      }
     }
   }
-  return { alb, nrm, first, layers, width: w, height: h };
+  // One deferred variant per call, fields recomputed: holding every family's
+  // fields until the idle queue drains would keep 30 MB alive for a second.
+  const paintLater = (job) => paintOne(job.f, job.v, fieldsFor(specs[job.f], w, h));
+  return { alb, nrm, first, layers, width: w, height: h, later, paintLater };
 }
 
 // ---------------------------------------------------------------------------
@@ -1437,7 +1456,7 @@ function tileNoise(N, cells, seed, oct) {
   return out;
 }
 
-function buildDetail(seed, want) {
+function buildDetail(seed, want, defer) {
   const N = DETAIL_PX, texel = DETAIL_M / N;
   const per = N * N * 4;
   const data = new Uint8Array(per * 4);
@@ -1516,21 +1535,19 @@ function buildDetail(seed, want) {
     },
   ];
 
-  const means = [];
-  for (let L = 0; L < recipes.length; L++) {
-    if (want && !want.has(L)) {
-      // Flat, neutral, and never sampled by anything in this world.
-      data.fill(128, L * per, (L + 1) * per);
-      means.push(1);
-      continue;
-    }
+  const means = [1, 1, 1, 1];
+  // Every layer starts flat and neutral — which the shader reads as "no
+  // detail" — and a layer some road uses is filled in by build(L), now or
+  // shortly after load.
+  data.fill(128);
+  const build = (L) => {
     recipes[L]();
     // Normalise the albedo multiplier to a mean of exactly 1, so the detail
     // adds grain without moving the colour the macro layer chose.
     let mean = 0;
     for (let i = 0; i < N * N; i++) mean += alb[i];
     mean /= N * N;
-    means.push(mean);
+    means[L] = mean;
     const o0 = L * per;
     for (let py = 0; py < N; py++) {
       const up = ((py + N - 1) % N) * N, dn = ((py + 1) % N) * N, cur = py * N;
@@ -1549,8 +1566,14 @@ function buildDetail(seed, want) {
         data[o + 3] = clamp(top[cur + px], 0, 1) * 255;
       }
     }
+    return L;
+  };
+  const later = [];
+  for (let L = 0; L < recipes.length; L++) {
+    if (want && !want.has(L)) continue;       // never sampled in this world
+    if (defer) later.push(L); else build(L);
   }
-  return { data, size: N, layers: recipes.length, means };
+  return { data, size: N, layers: recipes.length, means, later, build };
 }
 
 // ---------------------------------------------------------------------------
@@ -1806,15 +1829,23 @@ export function createRoads(world, ground, opts = {}) {
     if (!patchFam.has(s)) patchFam.set(s, family('patch:' + s, () => patchSpec(s, seed + 977)));
   }
 
+  // LOAD TIME. Painting every layer and the detail up front made the roads
+  // the slowest stage of loading. In a browser only what the first frame needs
+  // is painted now: the first copy of every surface. The detail layers and the
+  // second copies follow one at a time in idle time over the next second or
+  // so, while the player is still on the title screen. Headless (the
+  // harnesses) everything is built synchronously, so what is measured is
+  // exactly what is drawn.
+  const defer = opts.defer ?? (typeof window !== 'undefined');
   const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
   const tPaint = now();
   const layerW = maxWidth > 13 ? LAYER_W_WIDE : LAYER_W_NARROW;
-  const atlas = buildLayers(specs, layerW);
+  const atlas = buildLayers(specs, layerW, defer);
   const tDetail = now();
   // Only the detail layers some road actually uses are generated; the rest are
   // left neutral, which the shader reads as "no detail".
   const wantDetail = new Set(specs.map((s) => DETAIL[s.surface]).filter((d) => d >= 0));
-  const detail = buildDetail(seed + 5021, wantDetail);
+  const detail = buildDetail(seed + 5021, wantDetail, defer);
   const tDone = now();
   const paintMs = tDetail - tPaint, detailMs = tDone - tDetail;
 
@@ -1911,39 +1942,50 @@ export function createRoads(world, ground, opts = {}) {
     const hw = e.width / 2;
     refined.length = 0;
     refined.push(list[0]);
-    for (let i = 0; i + 1 < list.length; i++) split(e, hw, list[i], list[i + 1], 0);
+    let ya = cross3(e, hw, list[0], [0, 0, 0]);
+    for (let i = 0; i + 1 < list.length; i++) {
+      const yb = cross3(e, hw, list[i + 1], [0, 0, 0]);
+      split(e, hw, list[i], list[i + 1], ya, yb, 0);
+      ya = yb;
+    }
     list.length = 0;
-    for (const a of refined) list.push(a);
+    for (const x of refined) list.push(x);
   }
-  function chordError(e, hw, a, b) {
-    const pa = pointOnEdge(e, a), pb = pointOnEdge(e, b);
-    let worst = 0;
-    for (let k = -1; k <= 1; k++) {
-      const f = k * hw;
-      const ya = ground.heightAt(pa.x + pa.nx * f, pa.z + pa.nz * f);
-      const yb = ground.heightAt(pb.x + pb.nx * f, pb.z + pb.nz * f);
-      // Quarter points as well as the middle: the height field is stamped on
-      // a 3 m grid, so it carries bumps shorter than the quad, and a midpoint
-      // alone can land on the one sample that happens to agree.
-      for (let q = 1; q <= 3; q++) {
-        const t = q / 4;
-        const pm = pointOnEdge(e, a + (b - a) * t);
-        const ym = ground.heightAt(pm.x + pm.nx * f, pm.z + pm.nz * f);
+  /** Field heights at the left edge, the centre line and the right edge. */
+  function cross3(e, hw, s, out) {
+    const p = pointOnEdge(e, s);
+    for (let k = -1; k <= 1; k++) out[k + 1] = ground.heightAt(p.x + p.nx * k * hw, p.z + p.nz * k * hw);
+    return out;
+  }
+  /**
+   * Quarter points as well as the middle: the height field is stamped on a
+   * 3 m grid, so it carries bumps shorter than the quad, and a midpoint alone
+   * can land on the one sample that happens to agree. The endpoint heights
+   * are handed down, so each test costs nine field samples, not fifteen.
+   */
+  function split(e, hw, a, b, ya, yb, depth) {
+    if (depth < 3 && b - a > 1.9) {
+      const q1 = cross3(e, hw, a + (b - a) * 0.25, [0, 0, 0]);
+      const q2 = cross3(e, hw, (a + b) * 0.5, [0, 0, 0]);
+      const q3 = cross3(e, hw, a + (b - a) * 0.75, [0, 0, 0]);
+      let worst = 0;
+      for (let k = 0; k < 3; k++) {
         // Only a surface ABOVE the chord matters: that is the terrain coming
-        // up through the road. A chord above a sag just floats a centimetre or
-        // two, which the drawn clearance already allows for.
-        const d = ym - (ya + (yb - ya) * t);
-        if (d > worst) worst = d;
+        // up through the road. A chord above a sag just floats a centimetre
+        // or two, which the drawn clearance already allows for.
+        worst = Math.max(worst,
+          q1[k] - (ya[k] * 0.75 + yb[k] * 0.25),
+          q2[k] - (ya[k] + yb[k]) * 0.5,
+          q3[k] - (ya[k] * 0.25 + yb[k] * 0.75));
+      }
+      if (worst > TOL) {
+        const m = (a + b) * 0.5;
+        split(e, hw, a, m, ya, q2, depth + 1);
+        split(e, hw, m, b, q2, yb, depth + 1);
+        return;
       }
     }
-    return worst;
-  }
-  function split(e, hw, a, b, depth) {
-    if (depth < 3 && b - a > 1.9 && chordError(e, hw, a, b) > TOL) {
-      const m = (a + b) * 0.5;
-      split(e, hw, a, m, depth + 1);
-      split(e, hw, m, b, depth + 1);
-    } else refined.push(b);
+    refined.push(b);
   }
 
   const arcs = [];
@@ -2263,6 +2305,33 @@ export function createRoads(world, ground, opts = {}) {
   const detailTex = arrayTex(detail.data, detail.size, detail.size, detail.layers, THREE.NoColorSpace, THREE.RepeatWrapping);
   const textures = [albedoTex, normalTex, detailTex];
 
+  // The idle queue: detail first, because it is what the camera sits on, then
+  // the second copies. One job per idle slot, each 10-40 ms; only the layer
+  // that changed is re-uploaded.
+  const jobs = [];
+  for (const L of detail.later) {
+    jobs.push(() => { detailTex.addLayerUpdate(detail.build(L)); detailTex.needsUpdate = true; });
+  }
+  for (const job of atlas.later) {
+    jobs.push(() => {
+      const L = atlas.paintLater(job);
+      albedoTex.addLayerUpdate(L); albedoTex.needsUpdate = true;
+      normalTex.addLayerUpdate(L); normalTex.needsUpdate = true;
+    });
+  }
+  let disposed = false;
+  const idle = typeof requestIdleCallback === 'function'
+    ? (fn) => requestIdleCallback(fn, { timeout: 500 })
+    : (fn) => setTimeout(fn, 40);
+  const pump = () => {
+    if (disposed || !jobs.length) return;
+    jobs.shift()();
+    if (jobs.length) idle(pump);
+  };
+  if (jobs.length) idle(pump);
+  /** Runs whatever is still queued, now. For harnesses and captures. */
+  function finishNow() { while (jobs.length && !disposed) jobs.shift()(); }
+
   const verge = surfaceRGB('gravel', 1.0);
   const uniforms = {
     uRoadAlb: { value: albedoTex },
@@ -2406,6 +2475,7 @@ export function createRoads(world, ground, opts = {}) {
   }
 
   function dispose() {
+    disposed = true;
     for (const m of meshes) m.geometry.dispose();
     group.clear();
     meshes.length = 0;
@@ -2417,7 +2487,8 @@ export function createRoads(world, ground, opts = {}) {
   const detailBytes = detail.size * detail.size * 4 * detail.layers;
 
   return {
-    group, update, setQuality, dispose, material, uniforms,
+    group, update, setQuality, dispose, material, uniforms, finishNow,
+    get pending() { return jobs.length; },
     stats: {
       drawCalls: meshes.length,
       triangles, vertices, quads, fringeQuads, patches,

@@ -232,6 +232,50 @@ check('every medal table is strictly ordered', tableBad === 0, `${tableBad} tabl
   }
   g2.dispose();
 }
+// Drift zones, with a scripted drift scorer: only points earned INSIDE the
+// zone count, a chain still pending at the end banner counts, and leaving the
+// road cancels the zone rather than paying for a slide in a field.
+{
+  const fake = { x: 0, z: 0, y: 0, yaw: 0, speed: 15, vx: 0, vz: 0, airborne: false, airTime: 0, spec: { rideHeight: 0.3 },
+    reset(x, z, yaw) { this.x = x; this.z = z; this.yaw = yaw; } };
+  const dstate = { banked: 5000, pending: 0 };
+  const g6 = createGoals({ world, ground, car: fake, cars: CARS, storage: memoryStorage(), sfx: false, drift: { state: dstate } });
+  const z = g6.list.find((c) => c.kind === 'drift');
+  g6.setTarget(z.id);
+  const step = (x, zz) => { fake.x = x; fake.z = zz; g6.update(1 / 60, { driving: true }); };
+  const walk = (route, d0, d1, each) => {
+    const p = {};
+    for (let d = d0; d <= d1; d += 3) { route.at(d, p); step(p.x, p.z); if (each) each(d); }
+  };
+  // Through the zone: 600 banked on the way, 350 still pending at the end.
+  walk(z.lead, Math.max(0, z.lead.length - z.overrun - 40), z.lead.length - z.overrun - 1);
+  let banked = false, pended = false, began = false;
+  walk(z.zone, 0, z.zone.length - 6, (d) => {
+    if (d >= 20 && d < 23) began = !!g6._zone.c;
+    if (d >= 60 && !banked) { banked = true; dstate.banked += 600; }
+    if (d >= 200 && !pended) { pended = true; dstate.pending = 350; }
+  });
+  const e = z.end;
+  step(e.x - e.tx * 3, e.z - e.tz * 3); step(e.x + e.tx * 3, e.z + e.tz * 3);
+  const rec = g6.progress.result(z.id);
+  check('a drift zone scores only what was earned inside it', began && !!rec && rec.best === 950,
+    rec ? `5000 banked before the zone ignored; 600 banked + 350 pending inside = ${rec.best} pts (${['no medal', 'bronze', 'silver', 'gold'][rec.medal]})` : `began ${began}, nothing recorded`);
+  // In again (after the zone's 3 s re-trigger guard), then off into a field.
+  dstate.pending = 0;
+  for (let i = 0; i < 240; i++) g6.update(1 / 60, { driving: false });
+  walk(z.lead, Math.max(0, z.lead.length - z.overrun - 40), z.lead.length - z.overrun - 1);
+  walk(z.zone, 0, 30);
+  const inAgain = !!g6._zone.c;
+  const p = z.zone.at(80, {});
+  step(p.x + p.tz * 20, p.z - p.tx * 20);
+  step(p.x + p.tz * 60, p.z - p.tx * 60);
+  dstate.banked += 5000;
+  step(p.x + p.tz * 70, p.z - p.tx * 70);
+  check('leaving the road cancels a drift zone', inAgain && !g6._zone.c && g6.progress.result(z.id).best === 950,
+    `zone re-entered ${inAgain}, cancelled ${!g6._zone.c}, a 5000-point slide in a field paid nothing`);
+  g6.dispose();
+}
+
 // ---------------------------------------------------------------------------
 console.log('\n-- saves --');
 {

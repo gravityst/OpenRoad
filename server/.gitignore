@@ -1,0 +1,3 @@
+# `wrangler dev` keeps its local Durable Object state, caches and bundles
+# here. Local to whoever ran it; never part of the repo.
+.wrangler/

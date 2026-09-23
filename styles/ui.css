@@ -1588,6 +1588,10 @@
   .or-brand { gap: 8px; margin-bottom: clamp(14px, 3vh, 24px); }
   .or-brand .or-logo--stacked { display: none; }
   .or-brand .or-logo--line { display: block; width: clamp(300px, 34vw, 420px); }
+  /* The friends-online slab shares the logotype's row, so it sets that
+     row's height when it is the taller: with three friends it was 136 px
+     against the logotype's 107 and pushed the menu 3 px past 657. */
+  .or-ui .ormp-badge { margin-bottom: var(--or-s3); padding: 10px 14px; }
 }
 
 /* A narrow window that is short as well — half of a laptop's screen, or an

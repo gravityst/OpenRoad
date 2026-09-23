@@ -72,7 +72,8 @@
 // browser does and can measure them.
 
 import * as THREE from 'three';
-import { pointOnEdge } from '../world/layout.js';
+import { pointOnEdge, woodland } from '../world/layout.js';
+import { busStops, STAGGER } from '../ai/traffic.js';
 import { SURFACES } from '../world/ground.js';
 import { fbm, hash1, hash2, mulberry, clamp, lerp, smoothstep } from '../world/noise.js';
 
@@ -1738,6 +1739,43 @@ const F_ENV = /* glsl */`
 #endif
 `;
 
+// Appended after <lights_fragment_end>: headlamps on the tarmac.
+//
+// At night the road was lit by the moon and nothing else, so the one thing a
+// driver most needs to see — the lane ahead — was the darkest thing on the
+// screen, and a car coming the other way was two dots with nothing under
+// them. A real light for every car is a shader-compile and uniform-limit
+// problem long before it is a fill-rate one, so each lit car's lamps are
+// evaluated here instead, on the road surface only: a cone 23 degrees either
+// side, rising from nothing at the bumper to full a few metres out, falling
+// off with distance and gone by 70 m. Eight at most, the player's first.
+const BEAMS = 8;
+const F_BEAM_PARS = /* glsl */`
+uniform vec4 uBeam[ ${BEAMS} ];     // lamp x, y, z, strength
+uniform vec4 uBeamDir[ ${BEAMS} ];  // heading x, z; -, -
+uniform int uBeamCount;
+`;
+const F_BEAM = /* glsl */`
+if ( uBeamCount > 0 ) {
+  vec3 beam = vec3( 0.0 );
+  for ( int i = 0; i < ${BEAMS}; i ++ ) {
+    if ( i >= uBeamCount ) break;
+    vec2 d = vRoadXZ - uBeam[ i ].xz;
+    vec2 f = uBeamDir[ i ].xy;
+    float along = dot( d, f );
+    if ( along < 0.3 || along > 72.0 ) continue;
+    float lat = abs( d.x * f.y - d.y * f.x );
+    float cone = 1.0 - smoothstep( 0.5, 1.0, lat / ( along * 0.42 + 0.9 ) );
+    float rise = smoothstep( 0.8, 6.0, along );
+    float fall = 1.0 / ( 1.0 + along * along * 0.0024 );
+    float reach = 1.0 - smoothstep( 42.0, 72.0, along );
+    beam += uBeam[ i ].w * cone * rise * fall * reach;
+  }
+  // Warm halogen-white, on the diffuse only: the wet-road glare is the sky's.
+  reflectedLight.directDiffuse += diffuseColor.rgb * beam * vec3( 1.0, 0.93, 0.80 );
+}
+`;
+
 // ---------------------------------------------------------------------------
 // Geometry buffers
 // ---------------------------------------------------------------------------
@@ -2392,6 +2430,9 @@ export function createRoads(world, ground, opts = {}) {
     uSkyHorizon: { value: new THREE.Color(0.95, 1.10, 1.25) },
     uVerge: { value: new THREE.Color(lin(verge[0]), lin(verge[1]), lin(verge[2])) },
     uPull: { value: new THREE.Vector2(0.004, 0.15) },
+    uBeam: { value: Array.from({ length: BEAMS }, () => new THREE.Vector4()) },
+    uBeamDir: { value: Array.from({ length: BEAMS }, () => new THREE.Vector4()) },
+    uBeamCount: { value: 0 },
   };
 
   let normalsOn = true;
@@ -2418,11 +2459,13 @@ export function createRoads(world, ground, opts = {}) {
       .replace('#include <map_fragment>', F_MAP)
       .replace('#include <roughnessmap_fragment>', F_ROUGH)
       .replace('#include <normal_fragment_maps>', F_NORMAL)
-      .replace('#include <lights_fragment_maps>', '#include <lights_fragment_maps>\n' + F_ENV);
+      .replace('#include <lights_fragment_maps>', '#include <lights_fragment_maps>\n' + F_ENV)
+      .replace('#include <common>', '#include <common>\n' + F_BEAM_PARS)
+      .replace('#include <lights_fragment_end>', '#include <lights_fragment_end>\n' + F_BEAM);
   };
   // The program key has to carry the normals switch, or three reuses whichever
   // variant happened to compile first.
-  material.customProgramCacheKey = () => 'openroad-roads-v2' + (normalsOn ? '-n' : '');
+  material.customProgramCacheKey = () => 'openroad-roads-v3' + (normalsOn ? '-n' : '');
 
   const group = new THREE.Group();
   group.name = 'roads';
@@ -2461,6 +2504,19 @@ export function createRoads(world, ground, opts = {}) {
   group.updateMatrix();
   buckets.clear();
 
+  // ---- the roadside: see planRoadside --------------------------------------
+  // Built from the lots as well as the roads (nothing through a wall), so it
+  // needs world.buildLots to have run; the game builds lots first.
+  let roadside = null;
+  if (opts.roadside !== false) {
+    const plan = planRoadside(world, ground, {
+      stops: busStops(world, ground), stagger: STAGGER,
+      woodland: (x, z) => woodland(x, z, world.seed | 0),
+    });
+    roadside = createRoadside(plan, { quality: opts.quality });
+    group.add(roadside.group);
+  }
+
   // ---- runtime ------------------------------------------------------------
   let cullDist = opts.drawDistance ?? QUALITY.high.drawDistance;
   const regionRadius = REGION * Math.SQRT1_2;
@@ -2489,8 +2545,45 @@ export function createRoads(world, ground, opts = {}) {
    * cannot change meaningfully in 50 ms at any speed the car can reach, and
    * toggling on the frame boundary makes the horizon flicker.
    */
-  function update(cameraPos, dt) {
+  /**
+   * The lit lamps this frame: the player's car (switched on by the dark, or
+   * the rain), then whatever the traffic published on scene.userData.carLamps
+   * (render/carModel.js's fleet), nearest first.
+   */
+  function readBeams(car) {
+    const scene = group.parent;
+    const sky = scene && scene.userData ? scene.userData.sky : null;
+    const night = sky ? sky.night || 0 : 0;
+    const rain = sky ? sky.rain || 0 : 0;
+    let n = 0;
+    const B = uniforms.uBeam.value, D = uniforms.uBeamDir.value;
+    const dark = clamp((night - 0.25) / 0.5, 0, 1);
+    if (dark <= 0 && rain < 0.35) { uniforms.uBeamCount.value = 0; return; }
+    const k = Math.max(dark, rain > 0.35 ? 0.25 : 0);
+    if (car && car.spec) {
+      const fx = -Math.sin(car.yaw), fz = -Math.cos(car.yaw);
+      const nose = car.spec.wheelbase * 0.5 + 0.8;
+      B[n].set(car.x + fx * nose, car.y, car.z + fz * nose, 1.35 * k);
+      D[n].set(fx, fz, 0, 0);
+      n++;
+    }
+    const L = scene && scene.userData ? scene.userData.carLamps : null;
+    if (L) {
+      for (let i = 0; i < L.count && n < BEAMS; i++) {
+        const o = i * 6;
+        B[n].set(L.data[o], L.data[o + 1], L.data[o + 2], L.data[o + 5] * 1.1 * k);
+        D[n].set(L.data[o + 3], L.data[o + 4], 0, 0);
+        n++;
+      }
+    }
+    uniforms.uBeamCount.value = n;
+  }
+
+  function update(cameraPos, dt, car) {
     readSky();
+    readBeams(car);
+    // `car` (optional) is the player's: the flexible posts bend under it.
+    if (roadside) roadside.update(cameraPos, dt, car);
     // A caller that passes no dt (or a paused dt of 0) would otherwise never
     // reach the threshold again after the first pass and freeze the culling
     // wherever it happened to be. Re-evaluating every call instead is 55
@@ -2511,6 +2604,7 @@ export function createRoads(world, ground, opts = {}) {
   function setQuality(q) {
     const t = typeof q === 'string' ? QUALITY[q] : q;
     if (!t) return;
+    if (roadside && typeof q === 'string') roadside.setQuality(q);
     if (t.drawDistance !== undefined) cullDist = t.drawDistance;
     if (t.anisotropy !== undefined && t.anisotropy !== albedoTex.anisotropy) {
       // Sampler state is set on upload, so this re-uploads — on a settings
@@ -2526,6 +2620,7 @@ export function createRoads(world, ground, opts = {}) {
 
   function dispose() {
     disposed = true;
+    if (roadside) roadside.dispose();
     for (const m of meshes) m.geometry.dispose();
     group.clear();
     meshes.length = 0;
@@ -2538,6 +2633,8 @@ export function createRoads(world, ground, opts = {}) {
 
   return {
     group, update, setQuality, dispose, material, uniforms, finishNow,
+    /** The furniture: its plan counts, its fields and the calls it draws. */
+    get roadside() { return roadside; },
     get pending() { return jobs.length; },
     stats: {
       drawCalls: meshes.length,
@@ -2560,5 +2657,1189 @@ export function createRoads(world, ground, opts = {}) {
       layerOfEdge: (ei) => atlas.first[edgeFam[ei]],
       familyOfEdge: (ei) => specs[edgeFam[ei]],
     },
+  };
+}
+
+// ===========================================================================
+// The roadside
+// ===========================================================================
+//
+// A road that runs through nothing but grass reads as a line drawn on a
+// terrain. What makes it a ROAD somebody built and uses is the furniture, and
+// every piece of it is placed here by rule, from the road network itself, at
+// load — nothing is scattered at random, because a guard rail on a straight
+// or a sign pointing nowhere is worse than none:
+//
+//   REFLECTOR POSTS every 50 m both sides of the country roads, as they are on
+//     a real one — and at night they are how you see where the road goes: the
+//     reflectors light up ahead of you in a dotted line. In the mountains they
+//     are tall snow poles instead. They are flexible, like the real ones: drive
+//     through a line of them and they bend over and spring back.
+//   GUARD RAILS on the outside of every bend tighter than 150 m, and wherever
+//     the ground falls away more than 3 m beside the road, with posts every
+//     2 m and turned-down ends.
+//   CHEVRON BOARDS round the outside of the sharp bends (under 90 m on the
+//     tarmac, 60 m on the gravel): the one piece of furniture that tells a kid
+//     a corner is coming before the corner does.
+//   DIRECTION SIGNS on the approaches to junctions, naming the places the map
+//     already has — the repair shops, the circuits, the regions — with the
+//     distance by road and an arrow for the way to go. Worked out from the
+//     road graph, so a sign never points the long way round.
+//   BUS SHELTERS where ai/traffic.js's busStops() puts the stops, one on each
+//     side, so the buses that call at them stop by a shelter.
+//   POWER LINES on wooden poles along some of the country roads, the wires
+//     sagging between them.
+//   FIELD FENCES along the roads through open farmland, not through woods.
+//
+// All of it is instanced: one draw call per kind of thing, and each kind only
+// draws the instances within its reach of the camera — which the quality tier
+// scales — so a thousand posts cost what the forty in view do.
+
+const FURN = {
+  // Metres from the carriageway edge to the thing.
+  post: 1.2, rail: 0.95, chevron: 1.9, sign: 1.7, shelter: 2.6, stopPole: 1.2, power: 5.5, fence: 6.5,
+  postEvery: 50, snowEvery: 25, railStep: 4, railPostEvery: 2, powerEvery: 44, fenceEvery: 2.6,
+  bendRail: 150, bendChevron: 90, bendChevronLoose: 60, drop: 3,
+  junctionClear: 22,
+};
+const PAVED_KINDS = { rural: 1, street: 1, avenue: 1, link: 1, highway: 1 };
+const ALPINE = 2;
+
+/**
+ * Where everything goes. Pure data from the world and the ground — no three.js
+ * — so the harness measures exactly the plan the renderer draws.
+ */
+export function planRoadside(world, ground, opts = {}) {
+  const seed = (world.seed | 0) + 9173;
+  const bio = world.biomes && world.biomes.dominant ? world.biomes : null;
+  const plan = {
+    posts: [], snowPoles: [], rails: [], railPosts: [], railEnds: [], chevrons: [], signs: [],
+    shelters: [], stopPoles: [], poles: [], wires: [], fences: [],
+  };
+  const lots = world.lots || [];
+  // Buildings, bucketed, so nothing is put through a wall.
+  const LC = 64, lotCells = new Map();
+  for (const lot of lots) {
+    const r = Math.hypot(lot.w, lot.d) * 0.5 + 4;
+    for (let i = Math.floor((lot.x - r) / LC); i <= Math.floor((lot.x + r) / LC); i++) {
+      for (let j = Math.floor((lot.z - r) / LC); j <= Math.floor((lot.z + r) / LC); j++) {
+        const k = i * 65536 + j;
+        let L = lotCells.get(k);
+        if (!L) lotCells.set(k, (L = []));
+        L.push(lot);
+      }
+    }
+  }
+  // The trees, shrubs and rocks already standing (world.props): a sign in a
+  // hedge or a post inside a bush is worse than no sign. A rough radius per
+  // kind — a shrub's spread, a tree's trunk and low limbs, a rock's bulk.
+  const PC = 16, propCells = new Map();
+  // A shrub is big: 1.6 m limbs and 0.85 m leaf clumps, scaled up to 1.5x
+  // (foliage.js, props.js), so up to 4.5 m across the ground.
+  const RADIUS = { bush: 3.0, tree: 1.4, rock: 1.2, cactus: 0.9, palm: 0.8, stone: 0 };
+  for (const pr of world.props || []) {
+    const r = (RADIUS[pr.type] ?? 0) * (pr.scale || 1);
+    if (r <= 0) continue;
+    const k = Math.floor(pr.x / PC) * 65536 + Math.floor(pr.z / PC);
+    let L = propCells.get(k);
+    if (!L) propCells.set(k, (L = []));
+    L.push(pr.x, pr.z, r);
+  }
+  const blocked = (x, z, pad) => {
+    const ci = Math.floor(x / PC), cj = Math.floor(z / PC);
+    for (let i = ci - 1; i <= ci + 1; i++) {
+      for (let j = cj - 1; j <= cj + 1; j++) {
+        const L = propCells.get(i * 65536 + j);
+        if (!L) continue;
+        for (let q = 0; q < L.length; q += 3) {
+          const dx = L[q] - x, dz = L[q + 1] - z, r = L[q + 2] + pad;
+          if (dx * dx + dz * dz < r * r) return true;
+        }
+      }
+    }
+    return false;
+  };
+  const sea = (x, z) => !!(bio && bio.seaAt && bio.seaAt(x, z) > 0.3);
+  const nearLot = (x, z, pad) => {
+    const L = lotCells.get(Math.floor(x / LC) * 65536 + Math.floor(z / LC));
+    if (!L) return false;
+    for (const l of L) if (Math.hypot(l.x - x, l.z - z) < Math.hypot(l.w, l.d) * 0.5 + pad) return true;
+    return false;
+  };
+  // Nothing on another road's carriageway: a post beside one road can stand
+  // in the middle of the road that crosses it.
+  const road = {};
+  const clearOfRoads = (x, z, pad) => {
+    ground.roadAt(x, z, road);
+    return !road.onRoad && !(road.edge && road.dist < road.width * 0.5 + pad);
+  };
+  const at = (e, s, side, off) => {
+    const p = pointOnEdge(e, s);
+    const hw = e.width * 0.5;
+    const x = p.x + p.nx * side * (hw + off), z = p.z + p.nz * side * (hw + off);
+    return { x, z, y: ground.heightAt(x, z), tx: p.tx, tz: p.tz, nx: p.nx, nz: p.nz, cx: p.x, cz: p.z };
+  };
+  // Signed bend at s: radius, and which side is the outside (+1 right of +t).
+  const bendAt = (e, s) => {
+    const a = pointOnEdge(e, Math.max(0, s - 8)), b = pointOnEdge(e, Math.min(e.length, s + 8));
+    const turn = Math.atan2(a.tx * b.tz - a.tz * b.tx, a.tx * b.tx + a.tz * b.tz);
+    // turn > 0 bends toward right(t): the outside is the left.
+    return { R: 16 / Math.max(1e-6, Math.abs(turn)), outside: turn > 0 ? -1 : 1 };
+  };
+
+  // ---- guard rails, found first: posts are not doubled up behind them -----
+  const railAt = new Map();        // `${edge}|${side}` -> [s0, s1] ranges
+  for (const e of world.edges) {
+    const rural = PAVED_KINDS[e.kind] === 1, gravel = e.kind === 'gravel';
+    if ((!rural && !gravel) || !e.pts || e.length < 60) continue;
+    const hw = e.width * 0.5;
+    const n = Math.floor((e.length - 2 * FURN.junctionClear) / FURN.railStep);
+    if (n < 4) continue;
+    for (const side of [-1, 1]) {
+      const flags = new Uint8Array(n + 1);
+      for (let i = 0; i <= n; i++) {
+        const s = FURN.junctionClear + i * FURN.railStep;
+        const b = bendAt(e, s);
+        let want = rural && b.R < FURN.bendRail && b.outside === side;
+        if (!want) {
+          // A drop beside the road: the ground 8 m out is well below it.
+          const p = pointOnEdge(e, s);
+          const ry = ground.heightAt(p.x, p.z);
+          const gx = p.x + p.nx * side * (hw + 8), gz = p.z + p.nz * side * (hw + 8);
+          want = ry - ground.heightAt(gx, gz) > FURN.drop;
+        }
+        flags[i] = want ? 1 : 0;
+      }
+      // Close one-station gaps, then keep runs of at least 20 m, lengthened
+      // a station each way so a rail starts before the danger does.
+      for (let i = 1; i < n; i++) if (!flags[i] && flags[i - 1] && flags[i + 1]) flags[i] = 1;
+      let i = 0;
+      while (i <= n) {
+        if (!flags[i]) { i++; continue; }
+        let j = i;
+        while (j + 1 <= n && flags[j + 1]) j++;
+        const a = Math.max(0, i - 1), b = Math.min(n, j + 1);
+        if ((b - a) * FURN.railStep >= 20) {
+          const s0 = FURN.junctionClear + a * FURN.railStep, s1 = FURN.junctionClear + b * FURN.railStep;
+          const key = `${e.i}|${side}`;
+          if (!railAt.has(key)) railAt.set(key, []);
+          railAt.get(key).push([s0, s1]);
+          let prev = null;
+          for (let s = s0; s <= s1 + 1e-6; s += FURN.railStep) {
+            const q = at(e, s, side, FURN.rail);
+            if (!clearOfRoads(q.x, q.z, 0.6)) { prev = null; continue; }
+            if (prev) plan.rails.push({ x0: prev.x, y0: prev.y, z0: prev.z, x1: q.x, y1: q.y, z1: q.z, side });
+            else plan.railEnds.push({ x: q.x, y: q.y, z: q.z, tx: q.tx * side, tz: q.tz * side, dir: -1, side, rtx: q.tx, rtz: q.tz });
+            prev = q;
+          }
+          if (prev) plan.railEnds.push({ x: prev.x, y: prev.y, z: prev.z, tx: prev.tx * side, tz: prev.tz * side, dir: 1, side, rtx: prev.tx, rtz: prev.tz });
+          for (let s = s0; s <= s1 + 1e-6; s += FURN.railPostEvery) {
+            const q = at(e, s, side, FURN.rail + 0.12);
+            if (clearOfRoads(q.x, q.z, 0.6)) plan.railPosts.push({ x: q.x, y: q.y, z: q.z, yaw: Math.atan2(q.tx, q.tz) });
+          }
+        }
+        i = j + 1;
+      }
+    }
+  }
+  const railCovers = (e, side, s) => {
+    const L = railAt.get(`${e.i}|${side}`);
+    if (!L) return false;
+    for (const [a, b] of L) if (s > a - 6 && s < b + 6) return true;
+    return false;
+  };
+
+  // ---- reflector posts and snow poles -----------------------------------
+  for (const e of world.edges) {
+    if (PAVED_KINDS[e.kind] !== 1 || !e.pts || e.length < 2 * FURN.junctionClear) continue;
+    const alpineHere = (s) => {
+      if (!bio) return false;
+      const p = pointOnEdge(e, s);
+      return bio.dominant(p.x, p.z) === ALPINE;
+    };
+    const phase = hash1(e.i, seed) * FURN.snowEvery;
+    for (let s = FURN.junctionClear + phase; s < e.length - FURN.junctionClear; s += FURN.snowEvery) {
+      const alpine = alpineHere(s);
+      // Posts every 50 m (every other station); snow poles every 25.
+      const k = Math.round((s - FURN.junctionClear - phase) / FURN.snowEvery);
+      if (!alpine && k % 2) continue;
+      for (const side of [-1, 1]) {
+        if (railCovers(e, side, s)) continue;
+        const q = at(e, s, side, alpine ? FURN.post + 0.3 : FURN.post);
+        if (!clearOfRoads(q.x, q.z, 0.5) || nearLot(q.x, q.z, 1) || blocked(q.x, q.z, 0.3)) continue;
+        (alpine ? plan.snowPoles : plan.posts).push({ x: q.x, y: q.y, z: q.z, yaw: Math.atan2(q.tx, q.tz) });
+      }
+    }
+  }
+
+  // ---- chevron boards round sharp bends ----------------------------------
+  for (const e of world.edges) {
+    const rural = PAVED_KINDS[e.kind] === 1, gravel = e.kind === 'gravel';
+    if ((!rural && !gravel) || !e.pts || e.length < 60) continue;
+    const lim = rural ? FURN.bendChevron : FURN.bendChevronLoose;
+    const n = Math.floor((e.length - 2 * FURN.junctionClear) / 4);
+    let i = 0;
+    const R = new Float64Array(n + 1), out = new Int8Array(n + 1);
+    for (let k = 0; k <= n; k++) { const b = bendAt(e, FURN.junctionClear + k * 4); R[k] = b.R; out[k] = b.outside; }
+    while (i <= n) {
+      if (R[i] >= lim) { i++; continue; }
+      let j = i, apex = i;
+      while (j + 1 <= n && R[j + 1] < lim && out[j + 1] === out[i]) { j++; if (R[j] < R[apex]) apex = j; }
+      if ((j - i + 1) * 4 >= 16) {
+        const sApex = FURN.junctionClear + apex * 4;
+        const s0 = FURN.junctionClear + i * 4 - 6, s1 = FURN.junctionClear + j * 4 + 6;
+        const side = out[apex];
+        for (let k = -3; k <= 3; k++) {
+          const s = sApex + k * 13;
+          if (s < s0 || s > s1 || s < 10 || s > e.length - 10) continue;
+          const q = at(e, s, side, FURN.chevron);
+          if (!clearOfRoads(q.x, q.z, 0.8) || blocked(q.x, q.z, 0.6)) continue;
+          // Faces along the road; the arrows point to the inside of the bend,
+          // which for a board on the right (+1) is to the traveller's left.
+          plan.chevrons.push({ x: q.x, y: q.y, z: q.z, yaw: Math.atan2(q.tx, q.tz), flip: side });
+        }
+      }
+      i = j + 1;
+    }
+  }
+
+  // ---- bus shelters ----------------------------------------------------------
+  const stops = opts.stops || [];
+  const STAG = opts.stagger ?? 14;
+  for (const st of stops) {
+    const e = world.edges[st.edge];
+    if (!e) continue;
+    for (const dir of [1, -1]) {
+      // Each direction's shelter on its own right, STAG further along its way.
+      const side = dir;                 // right of travel: +n going +t, -n going -t
+      // Where its own direction's bus stands, or the nearest clear ground to it.
+      let s = -1, q = null;
+      for (const ds of [0, 4, -4, 8, -8, 12, -12]) {
+        const t = st.s + dir * STAG + ds;
+        if (t < 8 || t > e.length - 8) continue;
+        const c = at(e, t, side, FURN.shelter);
+        if (clearOfRoads(c.x, c.z, 0.8) && !blocked(c.x, c.z, 1.8) && !nearLot(c.x, c.z, 2)) { s = t; q = c; break; }
+      }
+      if (!q) continue;
+      // The open front faces the road: local +Z toward the carriageway.
+      const fx = -q.nx * side, fz = -q.nz * side;
+      plan.shelters.push({ x: q.x, y: q.y, z: q.z, yaw: Math.atan2(fx, fz) });
+      const p = at(e, s + dir * 5, side, FURN.stopPole);
+      plan.stopPoles.push({ x: p.x, y: p.y, z: p.z, yaw: Math.atan2(p.tx * dir, p.tz * dir) });
+    }
+  }
+
+  // ---- power lines -----------------------------------------------------------
+  // A line follows a ROAD, not an edge: the country roads are cut into edges
+  // of 100-150 m at every node, so lines are laid along chains of them,
+  // carried straight through the nodes where only two roads meet. Poles every
+  // ~44 m by distance along the chain, on one side, the wires spanning them.
+  const seen = new Uint8Array(world.edges.length);
+  const rural = (e) => e && e.kind === 'rural' && e.pts && e.length > 1;
+  for (const e0 of world.edges) {
+    if (!rural(e0) || seen[e0.i]) continue;
+    // Walk back to the start of this chain, then forward along it.
+    let e = e0, from = e0.a, guard = 0;
+    while (guard++ < 400) {
+      const nd = world.nodes[from];
+      if (nd.edges.length !== 2) break;
+      const other = world.edges[nd.edges[0] === e.i ? nd.edges[1] : nd.edges[0]];
+      if (!rural(other) || other === e0) break;
+      from = other.a === from ? other.b : other.a;
+      e = other;
+    }
+    const chain = [];
+    let at0 = from;
+    guard = 0;
+    while (e && !seen[e.i] && guard++ < 400) {
+      seen[e.i] = 1;
+      chain.push({ e, dir: e.a === at0 ? 1 : -1 });
+      const to = e.a === at0 ? e.b : e.a;
+      const nd = world.nodes[to];
+      if (nd.edges.length !== 2) break;
+      const next = world.edges[nd.edges[0] === e.i ? nd.edges[1] : nd.edges[0]];
+      if (!rural(next)) break;
+      at0 = to;
+      e = next;
+    }
+    let total = 0;
+    for (const c of chain) total += c.e.length;
+    if (total < 300) continue;
+    const key = chain[0].e.i;
+    if (hash1(key, seed + 11) > 0.5) continue;
+    const side = hash1(key, seed + 12) < 0.5 ? -1 : 1;
+    let prev = null, ci = 0, base = 0;
+    for (let d = 12; d < total - 12; d += FURN.powerEvery) {
+      while (ci < chain.length - 1 && d > base + chain[ci].e.length) { base += chain[ci].e.length; ci++; }
+      const { e: ce, dir } = chain[ci];
+      const local = d - base;
+      const s = dir > 0 ? local : ce.length - local;
+      // The side is kept relative to the direction the chain is walked.
+      const q = at(ce, s, side * dir, FURN.power);
+      const ok = clearOfRoads(q.x, q.z, 2) && !nearLot(q.x, q.z, 4) && !sea(q.x, q.z) && !blocked(q.x, q.z, 0.8);
+      if (!ok) { prev = null; continue; }
+      const pole = { x: q.x, y: q.y, z: q.z, yaw: Math.atan2(q.tx * dir, q.tz * dir) };
+      plan.poles.push(pole);
+      if (prev && Math.hypot(pole.x - prev.x, pole.z - prev.z) < FURN.powerEvery * 1.8) plan.wires.push([prev, pole]);
+      prev = pole;
+    }
+  }
+
+  // ---- field fences ------------------------------------------------------
+  const wood = opts.woodland || null;
+  for (const e of world.edges) {
+    if (e.kind !== 'rural' || !e.pts || e.length < 80) continue;
+    if (hash1(e.i, seed + 21) > 0.55) continue;
+    for (const side of [-1, 1]) {
+      if (hash1(e.i * 2 + (side > 0 ? 1 : 0), seed + 22) > 0.7) continue;
+      let run = 0;
+      for (let s = FURN.junctionClear; s < e.length - FURN.junctionClear; s += FURN.fenceEvery) {
+        const q = at(e, s, side, FURN.fence);
+        const q2 = at(e, s + FURN.fenceEvery, side, FURN.fence);
+        const open = !wood || wood(q.x, q.z) < 0.18;
+        const alpine = bio && bio.dominant(q.x, q.z) === ALPINE;
+        const ok = open && !alpine && clearOfRoads(q.x, q.z, 1.5) && clearOfRoads(q2.x, q2.z, 1.5) &&
+          !nearLot(q.x, q.z, 3) && Math.abs(q2.y - q.y) < 1.6 && !sea(q.x, q.z) &&
+          !blocked(q.x, q.z, 0.2) && !blocked(q2.x, q2.z, 0.2);
+        if (!ok) { run = 0; continue; }
+        plan.fences.push({ x0: q.x, y0: q.y, z0: q.z, x1: q2.x, y1: q2.y, z1: q2.z, gate: run > 40 && hash2(e.i, s | 0, seed) < 0.02 });
+        run++;
+      }
+    }
+  }
+
+  // ---- direction signs ---------------------------------------------------------
+  plan.signs = planSigns(world, ground, at, (x, z) => clearOfRoads(x, z, 0.8) && !blocked(x, z, 0.6) && !nearLot(x, z, 1.5),
+    (x, z) => !blocked(x, z, 0.2));
+  return plan;
+}
+
+/**
+ * The direction signs. Every named place — repair shops, circuits, regions —
+ * is found by a shortest-path search over the road graph (circuits closed),
+ * then each junction approach gets a sign listing, per exit, the nearest
+ * place that exit is the way to, with its distance by road.
+ */
+function planSigns(world, ground, at, clearAt, openAt) {
+  const nodes = world.nodes, edges = world.edges;
+  const usable = (e) => e.kind !== 'circuit' && e.kind !== 'rallyx' && e.pts && e.length > 0;
+  const nearestNode = (x, z) => {
+    const r = ground.nearestRoad(x, z, 400, usable);
+    if (!r) return -1;
+    const e = r.edge;
+    return r.s < e.length * 0.5 ? e.a : e.b;
+  };
+  const places = [];
+  for (const g of world.garages || []) places.push({ name: g.name, node: nearestNode(g.x, g.z) });
+  for (const c of world.circuits || []) places.push({ name: c.name, node: c.start ?? nearestNode(c.x, c.z) });
+  for (const d of world.districts || []) if (d.biome !== undefined) places.push({ name: d.name, node: nearestNode(d.cx, d.cz) });
+  const P = places.filter((p) => p.node >= 0);
+  // Dijkstra from each place over usable edges. 678 nodes x 15 places: a few ms.
+  const N = nodes.length;
+  const dist = P.map(() => new Float64Array(N).fill(Infinity));
+  for (let p = 0; p < P.length; p++) {
+    const D = dist[p];
+    D[P[p].node] = 0;
+    const open = [P[p].node];
+    const inOpen = new Uint8Array(N);
+    inOpen[P[p].node] = 1;
+    while (open.length) {
+      let bi = 0;
+      for (let k = 1; k < open.length; k++) if (D[open[k]] < D[open[bi]]) bi = k;
+      const u = open[bi];
+      open[bi] = open[open.length - 1]; open.pop(); inOpen[u] = 0;
+      for (const ei of nodes[u].edges) {
+        const e = edges[ei];
+        if (!usable(e)) continue;
+        const v = e.a === u ? e.b : e.a;
+        const nd = D[u] + e.length;
+        if (nd < D[v] - 1e-6) { D[v] = nd; if (!inOpen[v]) { open.push(v); inOpen[v] = 1; } }
+      }
+    }
+  }
+  const signs = [];
+  const BACK = 32;
+  for (const n of nodes) {
+    if (n.edges.length < 3) continue;
+    for (const ai of n.edges) {
+      const arm = edges[ai];
+      if (PAVED_KINDS[arm.kind] !== 1 || arm.length < 90) continue;
+      const atB = arm.b === n.i;
+      const sSign = atB ? arm.length - BACK : BACK;
+      const dirIn = atB ? 1 : -1;                // travel along +t toward b, -t toward a
+      const p = pointOnEdge(arm, sSign);
+      const hx = p.tx * dirIn, hz = p.tz * dirIn;  // heading toward the junction
+      const lines = [];
+      const taken = new Set();
+      for (const ei of n.edges) {
+        if (ei === ai) continue;
+        const ex = edges[ei];
+        if (!usable(ex)) continue;
+        const out = ex.a === n.i ? 1 : -1;
+        const q = pointOnEdge(ex, out > 0 ? Math.min(12, ex.length) : Math.max(0, ex.length - 12));
+        const ox = q.tx * out, oz = q.tz * out;
+        const cross = hx * oz - hz * ox, dot = hx * ox + hz * oz;
+        const turn = Math.atan2(cross, dot);
+        const v = ex.a === n.i ? ex.b : ex.a;
+        let best = -1, bd = Infinity;
+        for (let k = 0; k < P.length; k++) {
+          if (taken.has(k)) continue;
+          const via = ex.length + dist[k][v];
+          // This exit is the way there if going through it is the shortest.
+          if (via < dist[k][n.i] + 1 && via < bd) { bd = via; best = k; }
+        }
+        if (best < 0 || !Number.isFinite(bd) || bd > 5200) continue;
+        taken.add(best);
+        lines.push({ name: P[best].name, km: (bd + BACK) / 1000, turn: Math.abs(turn) < 0.5 ? 0 : turn > 0 ? 1 : -1 });
+      }
+      if (!lines.length) continue;
+      lines.sort((a, b) => a.turn - b.turn || a.km - b.km);
+      const side = dirIn;                           // right of the approach
+      // As near 32 m back as the verge allows: a sign in a hedge is no sign.
+      let q = null;
+      for (const ds of [0, 4, -4, 8, -8, 12, 16, 20]) {
+        const t = sSign - dirIn * ds;
+        if (t < 15 || t > arm.length - 15) continue;
+        for (const off of [FURN.sign, FURN.sign - 0.6]) {
+          const c = at(arm, t, side, off);
+          if (!clearAt(c.x, c.z)) continue;
+          // And it can be SEEN: nothing on the verge between it and a driver
+          // 5 to 30 m back up the approach.
+          let seen = true;
+          for (let b = 5; b <= 30 && seen; b += 5) {
+            const tb = t - dirIn * b;
+            if (tb < 0 || tb > arm.length) break;
+            const v = at(arm, tb, side, off - 0.9);
+            if (!openAt(v.x, v.z)) seen = false;
+          }
+          if (seen) { q = c; break; }
+        }
+        if (q) break;
+      }
+      if (!q) continue;
+      // The face looks back down the approach, at the traffic coming.
+      signs.push({ x: q.x, y: q.y, z: q.z, yaw: Math.atan2(-hx, -hz), lines: lines.slice(0, 3) });
+    }
+  }
+  return signs;
+}
+
+// ---------------------------------------------------------------------------
+// Roadside geometry. Built once, vertex-coloured, in each thing's own frame:
+// the base at y = 0 on the ground, facing +Z unless said otherwise.
+// ---------------------------------------------------------------------------
+
+/** A little mesh builder: boxes and quads with a colour and a glow code. */
+function kitBuilder() {
+  const pos = [], nor = [], col = [], uv = [], glow = [], idx = [];
+  const c = new THREE.Color();
+  const quad = (p0, p1, p2, p3, n, hex, g = 0, uvs = null) => {
+    const b = pos.length / 3;
+    c.setHex(hex);
+    for (const [k, p] of [p0, p1, p2, p3].entries()) {
+      pos.push(p[0], p[1], p[2]); nor.push(n[0], n[1], n[2]); col.push(c.r, c.g, c.b); glow.push(g);
+      if (uvs) uv.push(uvs[k * 2], uvs[k * 2 + 1]); else uv.push(-1, -1);
+    }
+    idx.push(b, b + 1, b + 2, b, b + 2, b + 3);
+  };
+  /** An axis-aligned box from (x0,y0,z0) to (x1,y1,z1); faces listed skip bottom. */
+  const box = (x0, y0, z0, x1, y1, z1, hex, g = 0, bottom = false) => {
+    quad([x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1], [0, 0, 1], hex, g);
+    quad([x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0], [0, 0, -1], hex, g);
+    quad([x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [1, 0, 0], hex, g);
+    quad([x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0], [-1, 0, 0], hex, g);
+    quad([x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [x0, y1, z0], [0, 1, 0], hex, g);
+    if (bottom) quad([x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1], [0, -1, 0], hex, g);
+  };
+  const build = () => {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geo.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+    geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+    // Not 'uv': three only declares that attribute for materials with a map,
+    // and the atlas lookup is this file's own.
+    geo.setAttribute('aUv', new THREE.Float32BufferAttribute(uv, 2));
+    geo.setAttribute('aGlow', new THREE.Float32BufferAttribute(glow, 1));
+    geo.setIndex(idx);
+    geo.computeBoundingSphere();
+    return geo;
+  };
+  return { quad, box, build };
+}
+
+const WHITE = 0xe9e8e2, BLACK = 0x17181a, STEEL = 0xa3a8ad, DARKSTEEL = 0x55595e, TIMBER = 0x6f5d49, POLEWOOD = 0x5a4a3a;
+
+/** Delineator: a white post, black band, a reflector on each face. */
+function postGeometry() {
+  const k = kitBuilder();
+  k.box(-0.05, -0.1, -0.06, 0.05, 0.72, 0.06, WHITE);
+  k.box(-0.051, 0.72, -0.061, 0.051, 0.95, 0.061, BLACK);
+  k.box(-0.05, 0.95, -0.06, 0.05, 1.0, 0.06, WHITE);
+  for (const s of [-1, 1]) {
+    const z = s * 0.0625;
+    k.quad([-0.036 * s, 0.745, z], [0.036 * s, 0.745, z], [0.036 * s, 0.925, z], [-0.036 * s, 0.925, z], [0, 0, s], 0xf4f1e0, 1);
+  }
+  return k.build();
+}
+/** Snow pole: tall and slender, banded orange and black, a reflector near the top. */
+function snowPoleGeometry() {
+  const k = kitBuilder();
+  const H = 2.3;
+  for (let i = 0; i < 9; i++) {
+    const y0 = -0.1 + (H + 0.1) * (i / 9), y1 = -0.1 + (H + 0.1) * ((i + 1) / 9);
+    k.box(-0.03, y0, -0.03, 0.03, y1, 0.03, i % 2 ? BLACK : 0xe2621d);
+  }
+  for (const s of [-1, 1]) {
+    const z = s * 0.032;
+    k.quad([-0.025 * s, H - 0.35, z], [0.025 * s, H - 0.35, z], [0.025 * s, H - 0.2, z], [-0.025 * s, H - 0.2, z], [0, 0, s], 0xf4f1e0, 1);
+  }
+  return k.build();
+}
+/**
+ * A W-beam, one unit long along +X, both faces, its centre 0.62 m up. The
+ * instance matrix stretches it along the chord between two posts.
+ */
+function railGeometry() {
+  const k = kitBuilder();
+  // Profile across the beam: height, and how far it stands out from the posts.
+  const prof = [[-0.17, 0.0], [-0.1, 0.045], [-0.03, 0.0], [0.03, 0.0], [0.1, 0.045], [0.17, 0.0]];
+  const y0 = 0.62;
+  for (let i = 0; i + 1 < prof.length; i++) {
+    const [ya, za] = prof[i], [yb, zb] = prof[i + 1];
+    const ny = -(zb - za), nz = (yb - ya);
+    const l = Math.hypot(ny, nz) || 1;
+    const shade = i === 1 || i === 3 ? 0.88 : 1;
+    const hex = ((Math.round(0xa3 * shade)) << 16) | ((Math.round(0xa8 * shade)) << 8) | Math.round(0xad * shade);
+    // Road side (+Z), then the back.
+    k.quad([0, y0 + ya, za], [1, y0 + ya, za], [1, y0 + yb, zb], [0, y0 + yb, zb], [0, ny / l, nz / l], hex);
+    k.quad([1, y0 + ya, za - 0.004], [0, y0 + ya, za - 0.004], [0, y0 + yb, zb - 0.004], [1, y0 + yb, zb - 0.004], [0, -ny / l, -nz / l], 0x7f8388);
+  }
+  // A reflector on each span, where the posts are, facing the road.
+  k.quad([0.49, 0.6, 0.05], [0.51, 0.6, 0.05], [0.51, 0.66, 0.05], [0.49, 0.66, 0.05], [0, 0, 1], 0xf4f1e0, 1);
+  return k.build();
+}
+function railPostGeometry() {
+  const k = kitBuilder();
+  k.box(-0.06, -0.2, -0.05, 0.06, 0.75, 0.05, DARKSTEEL);
+  k.box(-0.08, 0.45, 0.05, 0.08, 0.8, 0.12, 0x6c7075);          // the block-out spacer
+  return k.build();
+}
+/** A rail's turned-down end: two metres of beam falling to the ground. */
+function railEndGeometry() {
+  const k = kitBuilder();
+  const N = 4;
+  for (let i = 0; i < N; i++) {
+    const x0 = (i / N) * 2, x1 = ((i + 1) / N) * 2;
+    const y0 = 0.62 * (1 - i / N) + 0.05 * (i / N), y1 = 0.62 * (1 - (i + 1) / N) + 0.05 * ((i + 1) / N);
+    k.quad([x0, y0 - 0.17, 0.02], [x1, y1 - 0.12, 0.02], [x1, y1 + 0.12, 0.02], [x0, y0 + 0.17, 0.02], [0, 0, 1], STEEL);
+    k.quad([x1, y1 - 0.12, 0.016], [x0, y0 - 0.17, 0.016], [x0, y0 + 0.17, 0.016], [x1, y1 + 0.12, 0.016], [0, 0, -1], 0x7f8388);
+  }
+  return k.build();
+}
+/** Power pole: a tapering wooden pole, a crossarm, three insulators. */
+function powerPoleGeometry() {
+  const k = kitBuilder();
+  const H = 9.2;
+  for (let i = 0; i < 4; i++) {
+    const y0 = -0.4 + (H + 0.4) * (i / 4), y1 = -0.4 + (H + 0.4) * ((i + 1) / 4);
+    const r0 = 0.14 - 0.05 * (i / 4), r1 = 0.14 - 0.05 * ((i + 1) / 4);
+    k.box(-(r0 + r1) / 2, y0, -(r0 + r1) / 2, (r0 + r1) / 2, y1, (r0 + r1) / 2, POLEWOOD);
+  }
+  k.box(-1.0, H - 0.55, -0.06, 1.0, H - 0.42, 0.06, 0x4c3f31);
+  for (const x of [-0.85, 0.85]) k.box(x - 0.035, H - 0.42, -0.035, x + 0.035, H - 0.24, 0.035, 0xb9c4c6);
+  k.box(-0.035, H, -0.035, 0.035, H + 0.2, 0.035, 0xb9c4c6);
+  // A stay-wire's anchor plate and a step bolt or two, the things the eye
+  // expects on a pole without knowing it does.
+  for (let i = 0; i < 5; i++) k.box(-0.14, 2.2 + i * 0.9, -0.02, -0.18, 2.24 + i * 0.9, 0.02, 0x3a3a3a);
+  return k.build();
+}
+/** Field fence: one 2.6 m section along +X: a post at x = 0 and two rails. */
+function fenceGeometry() {
+  const k = kitBuilder();
+  k.box(-0.06, -0.2, -0.06, 0.06, 1.15, 0.06, 0x5f503f);
+  for (const y of [0.45, 0.95]) {
+    k.box(0, y, -0.025, 1, y + 0.1, 0.025, TIMBER);
+  }
+  return k.build();
+}
+/**
+ * Bus shelter, open front toward +Z: a steel frame, a dark roof with a
+ * canopy lip, a bench, a timetable case. The glass is its own geometry.
+ */
+function shelterGeometry() {
+  const k = kitBuilder();
+  const W = 3.2, D = 1.4, H = 2.45, F = 0x2f3b36;
+  for (const [x, z] of [[-W / 2, -D / 2], [W / 2, -D / 2], [-W / 2, D / 2], [W / 2, D / 2]]) {
+    k.box(x - 0.04, 0, z - 0.04, x + 0.04, H, z + 0.04, F);
+  }
+  k.box(-W / 2 - 0.12, H, -D / 2 - 0.1, W / 2 + 0.12, H + 0.12, D / 2 + 0.28, 0x262a2d);
+  k.box(-W / 2, H - 0.18, D / 2 - 0.02, W / 2, H, D / 2 + 0.02, F);
+  k.box(-W / 2 + 0.2, 0.42, -D / 2 + 0.08, W / 2 - 0.2, 0.47, -D / 2 + 0.42, 0x6b5640);
+  for (const x of [-W / 2 + 0.4, W / 2 - 0.4]) k.box(x - 0.03, 0, -D / 2 + 0.2, x + 0.03, 0.42, -D / 2 + 0.3, F);
+  k.box(W / 2 - 0.05, 0.9, -D / 2 + 0.3, W / 2 + 0.02, 1.8, D / 2 - 0.3, 0xdcdcd6, 0);
+  return k.build();
+}
+function shelterGlassGeometry() {
+  const k = kitBuilder();
+  const W = 3.2, D = 1.4, H = 2.45;
+  k.quad([-W / 2, 0.15, -D / 2], [W / 2, 0.15, -D / 2], [W / 2, H - 0.1, -D / 2], [-W / 2, H - 0.1, -D / 2], [0, 0, 1], 0xffffff);
+  k.quad([-W / 2, 0.15, -D / 2], [-W / 2, 0.15, D / 2], [-W / 2, H - 0.1, D / 2], [-W / 2, H - 0.1, -D / 2], [1, 0, 0], 0xffffff);
+  return k.build();
+}
+
+/**
+ * A sign on posts. The panel spans x -w/2..w/2, y y0..y0+h, facing +Z; its
+ * face carries uv 0..1 (mapped per instance into the atlas), everything else
+ * uv -1 (painted the atlas's grey). Double-sided: the back is grey.
+ */
+function signGeometry(w, h, y0, posts = 2) {
+  const k = kitBuilder();
+  const x0 = -w / 2, x1 = w / 2, y1 = y0 + h;
+  k.quad([x0, y0, 0.03], [x1, y0, 0.03], [x1, y1, 0.03], [x0, y1, 0.03], [0, 0, 1], 0xffffff, 1, [0, 0, 1, 0, 1, 1, 0, 1]);
+  k.quad([x1, y0, 0.0], [x0, y0, 0.0], [x0, y1, 0.0], [x1, y1, 0.0], [0, 0, -1], 0x8f9398);
+  const xs = posts === 2 ? [x0 + w * 0.2, x1 - w * 0.2] : [0];
+  for (const x of xs) k.box(x - 0.035, -0.2, -0.05, x + 0.035, y1 - 0.05, -0.0, 0x8f9398);
+  return k.build();
+}
+/** Chevron board: double-sided, both faces carry the chevron, mirrored so
+ *  each face's arrows point to the same physical side. */
+function chevronGeometry() {
+  const k = kitBuilder();
+  const w = 0.8, h = 0.6, y0 = 0.85, x0 = -w / 2, x1 = w / 2, y1 = y0 + h;
+  k.quad([x0, y0, 0.02], [x1, y0, 0.02], [x1, y1, 0.02], [x0, y1, 0.02], [0, 0, 1], 0xffffff, 1, [0, 0, 1, 0, 1, 1, 0, 1]);
+  k.quad([x1, y0, -0.02], [x0, y0, -0.02], [x0, y1, -0.02], [x1, y1, -0.02], [0, 0, -1], 0xffffff, 1, [0, 0, 1, 0, 1, 1, 0, 1]);
+  k.box(-0.035, -0.2, -0.018, 0.035, y1 - 0.05, 0.018, 0x8f9398);
+  return k.build();
+}
+
+// ---------------------------------------------------------------------------
+// The sign atlas: every direction sign's face, the chevron and the bus stop
+// flag, painted into one canvas. Headless there is no canvas, and the faces
+// are left blank — the geometry, placement and counts are what get measured.
+// ---------------------------------------------------------------------------
+
+const ATLAS = { w: 2048, h: 2048, cw: 256, ch: 128 };
+const CELL = { chevron: 0, bus: 1, grey: 2, first: 3 };
+
+function atlasRect(cell, uw = 1, vh = 1) {
+  const cols = ATLAS.w / ATLAS.cw;
+  const cx = cell % cols, cy = Math.floor(cell / cols);
+  // Half a texel in, so mip filtering never reaches the neighbouring cell.
+  const u0 = (cx * ATLAS.cw + 2) / ATLAS.w, v0 = 1 - ((cy + 1) * ATLAS.ch - 2) / ATLAS.h;
+  const du = (ATLAS.cw - 4) / ATLAS.w * uw, dv = (ATLAS.ch - 4) / ATLAS.h * vh;
+  return [u0, v0, du, dv];
+}
+
+function paintAtlas(signs) {
+  if (typeof document === 'undefined') return null;
+  const c = document.createElement('canvas');
+  c.width = ATLAS.w; c.height = ATLAS.h;
+  const g = c.getContext('2d');
+  g.fillStyle = '#8f9398'; g.fillRect(0, 0, ATLAS.w, ATLAS.h);
+  const cellXY = (i) => [(i % (ATLAS.w / ATLAS.cw)) * ATLAS.cw, Math.floor(i / (ATLAS.w / ATLAS.cw)) * ATLAS.ch];
+  // Chevron board: white arrows on black, pointing right (the instance
+  // mirrors it for a left-hand bend). 4:3 inside the 2:1 cell.
+  {
+    const [x, y] = cellXY(CELL.chevron);
+    g.fillStyle = '#111214'; g.fillRect(x, y, ATLAS.cw, ATLAS.ch);
+    g.fillStyle = '#f4f2ea';
+    for (let k = 0; k < 2; k++) {
+      const ox = x + 70 + k * 70, oy = y + 16;
+      g.beginPath();
+      g.moveTo(ox, oy); g.lineTo(ox + 40, oy); g.lineTo(ox + 80, oy + 48); g.lineTo(ox + 40, oy + 96);
+      g.lineTo(ox, oy + 96); g.lineTo(ox + 40, oy + 48); g.closePath(); g.fill();
+    }
+  }
+  // Bus stop flag: a disc with a bus pictogram and BUS STOP.
+  {
+    const [x, y] = cellXY(CELL.bus);
+    g.fillStyle = '#f4f2ea'; g.fillRect(x, y, ATLAS.cw, ATLAS.ch);
+    g.fillStyle = '#b3261e'; g.beginPath(); g.arc(x + 64, y + 64, 50, 0, Math.PI * 2); g.fill();
+    g.fillStyle = '#f4f2ea'; g.beginPath(); g.arc(x + 64, y + 64, 38, 0, Math.PI * 2); g.fill();
+    g.fillStyle = '#1b2b5a';
+    g.fillRect(x + 38, y + 44, 52, 30); g.fillRect(x + 42, y + 74, 10, 8); g.fillRect(x + 76, y + 74, 10, 8);
+    g.fillStyle = '#f4f2ea'; g.fillRect(x + 42, y + 48, 44, 12);
+    g.fillStyle = '#1b2b5a'; g.font = '800 34px "Helvetica Neue", Helvetica, Arial, sans-serif';
+    g.textBaseline = 'middle'; g.textAlign = 'left';
+    g.fillText('BUS', x + 128, y + 48); g.fillText('STOP', x + 128, y + 84);
+  }
+  // Direction signs: white, a black border, a line per exit with its arrow
+  // on the side it goes and the distance by road, right-aligned.
+  const font = (px) => `600 ${px}px "Helvetica Neue", Helvetica, Arial, sans-serif`;
+  for (let i = 0; i < signs.length; i++) {
+    const cell = CELL.first + i;
+    if (cell >= (ATLAS.w / ATLAS.cw) * (ATLAS.h / ATLAS.ch)) break;
+    const [x, y] = cellXY(cell);
+    const s = signs[i];
+    const rows = s.lines.length, H = ATLAS.ch * (0.34 + 0.22 * (rows - 1)) / 0.78;
+    const h = Math.min(ATLAS.ch, Math.round(H));
+    g.fillStyle = '#f4f3ee'; g.fillRect(x, y, ATLAS.cw, h);
+    g.strokeStyle = '#141517'; g.lineWidth = 5; g.strokeRect(x + 5, y + 5, ATLAS.cw - 10, h - 10);
+    const rowH = (h - 14) / rows;
+    for (let r = 0; r < rows; r++) {
+      const L = s.lines[r];
+      const cy = y + 7 + rowH * (r + 0.5);
+      const ax = L.turn > 0 ? x + ATLAS.cw - 30 : x + 26;
+      // The arrow: a shaft and a head, turned the way the exit goes.
+      g.save(); g.translate(ax, cy); g.rotate(L.turn * Math.PI / 2);
+      g.fillStyle = '#141517';
+      g.fillRect(-3.5, -4, 7, 16);
+      g.beginPath(); g.moveTo(-11, -2); g.lineTo(0, -15); g.lineTo(11, -2); g.closePath(); g.fill();
+      g.restore();
+      const km = L.km < 10 ? L.km.toFixed(1) : String(Math.round(L.km));
+      g.fillStyle = '#141517'; g.textBaseline = 'middle';
+      let px = Math.min(30, Math.floor(rowH * 0.62));
+      g.font = font(px);
+      const left = L.turn > 0 ? x + 16 : x + 46, right = L.turn > 0 ? x + ATLAS.cw - 50 : x + ATLAS.cw - 16;
+      g.textAlign = 'right';
+      g.fillText(km, right, cy);
+      const kmW = g.measureText(km).width + 12;
+      g.textAlign = 'left';
+      while (g.measureText(L.name).width > right - left - kmW && px > 12) { px -= 1; g.font = font(px); }
+      g.fillText(L.name, left, cy);
+    }
+    s.rect = atlasRect(cell, 1, h / ATLAS.ch);
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = 8;
+  t.generateMipmaps = true;
+  return t;
+}
+
+// ---------------------------------------------------------------------------
+// Materials: vertex colour + a retroreflector's night glow
+// ---------------------------------------------------------------------------
+//
+// A reflector is lit by the car's own headlamps and bounces the light back
+// the way it came, so at night it is bright exactly when it faces you and is
+// in range of your lamps — which is what draws the dotted line of the road
+// ahead in the dark. uNight fades it in with the dusk.
+
+const FURN_VERT_PARS = /* glsl */`
+attribute float aGlow;
+attribute vec2 aUv;
+attribute vec4 aCell;
+attribute vec3 aBend;
+uniform float uNight;
+varying float vGlow;
+varying vec2 vCellUv;
+varying float vCellGrey;
+`;
+const FURN_VERT = /* glsl */`
+{
+  // Flexible posts lean over from the base, stiffest at the root.
+  #ifdef FURN_BEND
+    float bh = clamp( transformed.y / 1.0, 0.0, 1.0 );
+    float ang = aBend.x * bh * ( 0.6 + 0.4 * bh );
+    vec2 bd = aBend.yz;
+    float c = cos( ang ), s = sin( ang );
+    vec3 p = transformed;
+    // Rotate in the plane of (up, bend direction), about the base.
+    float along = dot( p.xz, bd );
+    float y = p.y;
+    p.y = y * c - along * s;
+    p.xz += bd * ( y * s + along * ( c - 1.0 ) );
+    transformed = p;
+  #endif
+}
+`;
+const FURN_VERT_GLOW = /* glsl */`
+{
+  vec3 camToV = normalize( - mvPosition.xyz );
+  float face = max( 0.0, dot( normalize( transformedNormal ), camToV ) );
+  float dist = length( mvPosition.xyz );
+  float reach = 1.0 - smoothstep( 40.0, 260.0, dist );
+  vGlow = aGlow * uNight * face * face * reach;
+  #ifdef FURN_ATLAS
+    vCellGrey = aUv.x < -0.5 ? 1.0 : 0.0;
+    vCellUv = aCell.xy + aUv * aCell.zw;
+  #endif
+}
+`;
+const FURN_FRAG_PARS = /* glsl */`
+varying float vGlow;
+varying vec2 vCellUv;
+varying float vCellGrey;
+#ifdef FURN_ATLAS
+  uniform sampler2D uAtlas;
+#endif
+`;
+const FURN_FRAG_MAP = /* glsl */`
+#ifdef FURN_ATLAS
+  {
+    vec4 face = texture2D( uAtlas, vCellUv );
+    diffuseColor.rgb *= mix( face.rgb, vec3( 0.29, 0.30, 0.32 ), vCellGrey );
+  }
+#endif
+`;
+const FURN_FRAG_EMIT = /* glsl */`
+totalEmissiveRadiance += diffuseColor.rgb * vGlow * 5.5;
+`;
+
+function furnitureMaterial(uniforms, { atlas = null, bend = false } = {}) {
+  const m = new THREE.MeshStandardMaterial({
+    color: 0xffffff, vertexColors: true, roughness: 0.62, metalness: 0.08,
+  });
+  m.onBeforeCompile = (shader) => {
+    shader.uniforms.uNight = uniforms.uNight;
+    if (atlas) shader.uniforms.uAtlas = { value: atlas };
+    const defs = (atlas ? '#define FURN_ATLAS\n' : '') + (bend ? '#define FURN_BEND\n' : '');
+    shader.vertexShader = defs + shader.vertexShader
+      .replace('#include <common>', '#include <common>\n' + FURN_VERT_PARS)
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\n' + FURN_VERT)
+      .replace('#include <project_vertex>', '#include <project_vertex>\n' + FURN_VERT_GLOW);
+    shader.fragmentShader = defs + shader.fragmentShader
+      .replace('#include <common>', '#include <common>\n' + FURN_FRAG_PARS)
+      .replace('#include <map_fragment>', '#include <map_fragment>\n' + FURN_FRAG_MAP)
+      .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\n' + FURN_FRAG_EMIT);
+  };
+  m.customProgramCacheKey = () => `openroad-furniture-1${atlas ? '-a' : ''}${bend ? '-b' : ''}`;
+  return m;
+}
+
+// ---------------------------------------------------------------------------
+// Fields: one InstancedMesh per kind of thing, holding only what is in reach
+// ---------------------------------------------------------------------------
+
+const FIELD_CELL = 64;
+// How far each kind is drawn, per tier, in metres from the camera.
+const REACH = {
+  low:    { small: 160, rail: 260, sign: 220, big: 520, fence: 140 },
+  medium: { small: 280, rail: 420, sign: 340, big: 800, fence: 230 },
+  high:   { small: 420, rail: 600, sign: 480, big: 1100, fence: 320 },
+};
+
+function makeFurnitureField(name, geometry, material, n, reachKey, opts = {}) {
+  const mat = new Float32Array(n * 16);
+  const cx = new Float32Array(n), cz = new Float32Array(n);
+  const extras = {};
+  for (const [k, size] of Object.entries(opts.extras || {})) extras[k] = { size, src: new Float32Array(n * size) };
+  const mesh = new THREE.InstancedMesh(geometry, material, Math.max(1, n));
+  mesh.name = `roadside:${name}`;
+  mesh.frustumCulled = false;
+  mesh.castShadow = !!opts.shadow;
+  mesh.receiveShadow = true;
+  mesh.count = 0;
+  mesh.matrixAutoUpdate = false;
+  mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  const live = {};
+  for (const [k, e] of Object.entries(extras)) {
+    const a = new THREE.InstancedBufferAttribute(new Float32Array(Math.max(1, n) * e.size), e.size);
+    a.setUsage(THREE.DynamicDrawUsage);
+    geometry.setAttribute(k, a);
+    live[k] = a;
+  }
+  const cells = new Map();
+  let lastX = Infinity, lastZ = Infinity, indexed = false;
+  const field = {
+    name, mesh, n, reachKey, mat, cx, cz, extras, live,
+    slotOf: opts.track ? new Int32Array(n).fill(-1) : null,
+    /** Bucket the instances by cell. Runs on the first refresh, once they are placed. */
+    index() {
+      indexed = true;
+      cells.clear();
+      for (let i = 0; i < n; i++) {
+        const k = Math.floor(cx[i] / FIELD_CELL) * 65536 + Math.floor(cz[i] / FIELD_CELL);
+        let L = cells.get(k);
+        if (!L) cells.set(k, (L = []));
+        L.push(i);
+      }
+    },
+    stale(x, z) { return (x - lastX) * (x - lastX) + (z - lastZ) * (z - lastZ) > 16 * 16; },
+    refresh(x, z, reach) {
+      if (!indexed) field.index();
+      lastX = x; lastZ = z;
+      const R = reach + 20, R2 = R * R;
+      const c0x = Math.floor((x - R) / FIELD_CELL), c1x = Math.floor((x + R) / FIELD_CELL);
+      const c0z = Math.floor((z - R) / FIELD_CELL), c1z = Math.floor((z + R) / FIELD_CELL);
+      const dst = mesh.instanceMatrix.array;
+      if (field.slotOf) field.slotOf.fill(-1);
+      let k = 0;
+      for (let i = c0x; i <= c1x; i++) {
+        for (let j = c0z; j <= c1z; j++) {
+          const L = cells.get(i * 65536 + j);
+          if (!L) continue;
+          for (let q = 0; q < L.length; q++) {
+            const t = L[q];
+            const dx = cx[t] - x, dz = cz[t] - z;
+            if (dx * dx + dz * dz > R2) continue;
+            for (let m = 0; m < 16; m++) dst[k * 16 + m] = mat[t * 16 + m];
+            for (const key in extras) {
+              const e = extras[key], a = live[key].array;
+              for (let m = 0; m < e.size; m++) a[k * e.size + m] = e.src[t * e.size + m];
+            }
+            if (field.slotOf) field.slotOf[t] = k;
+            k++;
+          }
+        }
+      }
+      mesh.count = k;
+      mesh.visible = k > 0;
+      mesh.instanceMatrix.needsUpdate = true;
+      for (const key in live) live[key].needsUpdate = true;
+    },
+  };
+  return field;
+}
+
+const _rm = new THREE.Matrix4(), _rq = new THREE.Quaternion(), _rv = new THREE.Vector3(), _rs = new THREE.Vector3();
+const _bx = new THREE.Vector3(), _by = new THREE.Vector3(), _bz = new THREE.Vector3();
+/** Upright at (x, y, z), turned yaw about +Y, into field slot i. */
+function putUpright(f, i, x, y, z, yaw, sx = 1) {
+  _rq.setFromAxisAngle(_by.set(0, 1, 0), yaw);
+  _rm.compose(_rv.set(x, y, z), _rq, _rs.set(sx, 1, 1));
+  _rm.toArray(f.mat, i * 16);
+  f.cx[i] = x; f.cz[i] = z;
+}
+/** Local +X stretched from a to b (a span), +Y kept up, into slot i. */
+function putSpan(f, i, x0, y0, z0, x1, y1, z1) {
+  _bx.set(x1 - x0, y1 - y0, z1 - z0);
+  _by.set(0, 1, 0);
+  _bz.crossVectors(_bx, _by).normalize();
+  _by.crossVectors(_bz, _bx).normalize();
+  _rm.makeBasis(_bx, _by, _bz).setPosition(x0, y0, z0);
+  _rm.toArray(f.mat, i * 16);
+  f.cx[i] = (x0 + x1) * 0.5; f.cz[i] = (z0 + z1) * 0.5;
+}
+
+/**
+ * Builds the roadside from a plan (planRoadside). Returns a group to add to
+ * the scene, an update(cameraPos, dt, car) and a setQuality(tier).
+ */
+export function createRoadside(plan, opts = {}) {
+  const group = new THREE.Group();
+  group.name = 'roadside';
+  group.matrixAutoUpdate = false;
+  const uniforms = { uNight: { value: 0 } };
+  const atlas = paintAtlas(plan.signs);
+  const disposables = [];
+  const furn = furnitureMaterial(uniforms);
+  const flex = furnitureMaterial(uniforms, { bend: true });
+  const signMat = furnitureMaterial(uniforms, { atlas: atlas || new THREE.DataTexture(new Uint8Array([200, 200, 200, 255]), 1, 1) });
+  const glassMat = new THREE.MeshStandardMaterial({
+    color: 0xa9bcc4, roughness: 0.08, metalness: 0.1, transparent: true, opacity: 0.32, depthWrite: false,
+  });
+  disposables.push(furn, flex, signMat, glassMat);
+  if (atlas) disposables.push(atlas);
+  let tier = REACH[opts.quality] ? opts.quality : 'medium';
+  const fields = [];
+  const add = (f) => { group.add(f.mesh); fields.push(f); disposables.push(f.mesh.geometry); return f; };
+
+  // Flexible posts: delineators and snow poles bend when driven through.
+  const posts = add(makeFurnitureField('posts', postGeometry(), flex, plan.posts.length, 'small', { extras: { aBend: 3 }, track: true }));
+  plan.posts.forEach((p, i) => putUpright(posts, i, p.x, p.y, p.z, p.yaw));
+  const snow = add(makeFurnitureField('snowPoles', snowPoleGeometry(), flex, plan.snowPoles.length, 'small', { extras: { aBend: 3 }, track: true }));
+  plan.snowPoles.forEach((p, i) => putUpright(snow, i, p.x, p.y, p.z, p.yaw));
+
+  const rails = add(makeFurnitureField('rails', railGeometry(), furn, plan.rails.length, 'rail', { shadow: true }));
+  plan.rails.forEach((r, i) => {
+    // The road side of the beam (+Z of the span frame) must face the road.
+    // A span laid from x0 to x1 has +Z to its right; on the left side of the
+    // road that is away from it, so those spans are laid the other way.
+    if (r.side > 0) putSpan(rails, i, r.x1, r.y1, r.z1, r.x0, r.y0, r.z0);
+    else putSpan(rails, i, r.x0, r.y0, r.z0, r.x1, r.y1, r.z1);
+  });
+  const railPosts = add(makeFurnitureField('railPosts', railPostGeometry(), furn, plan.railPosts.length, 'rail'));
+  plan.railPosts.forEach((p, i) => putUpright(railPosts, i, p.x, p.y, p.z, p.yaw));
+  const railEnds = add(makeFurnitureField('railEnds', railEndGeometry(), furn, plan.railEnds.length, 'rail'));
+  plan.railEnds.forEach((p, i) => {
+    // Out along the road from the run's end, falling to the ground.
+    const ox = p.rtx * p.dir, oz = p.rtz * p.dir;
+    const yaw = Math.atan2(-oz, ox);
+    const flipped = (p.side > 0) !== (p.dir > 0);
+    putUpright(railEnds, i, p.x, p.y, p.z, yaw, 1);
+    if (flipped) {
+      // Mirror across the span's own axis so the face still looks at the road.
+      _rm.fromArray(railEnds.mat, i * 16).multiply(new THREE.Matrix4().makeScale(1, 1, -1)).toArray(railEnds.mat, i * 16);
+    }
+  });
+
+  const chevrons = add(makeFurnitureField('chevrons', chevronGeometry(), signMat, plan.chevrons.length, 'sign', { extras: { aCell: 4 } }));
+  const chev = atlasRect(CELL.chevron, 0.6667, 1);
+  plan.chevrons.forEach((c, i) => {
+    putUpright(chevrons, i, c.x, c.y, c.z, c.yaw, c.flip < 0 ? 1 : -1);
+    chevrons.extras.aCell.src.set(chev, i * 4);
+  });
+
+  // Direction signs, by how many lines they carry: the panel is sized to them.
+  for (const rows of [1, 2, 3]) {
+    const list = plan.signs.filter((s) => s.lines.length === rows && s.rect);
+    const blank = plan.signs.filter((s) => s.lines.length === rows && !s.rect);
+    const all = list.concat(blank);
+    const h = 0.34 + 0.24 * (rows - 1);
+    const f = add(makeFurnitureField(`signs${rows}`, signGeometry(1.7, h, 1.35 + (0.58 - h) * 0.5), signMat, all.length, 'sign', { extras: { aCell: 4 } }));
+    all.forEach((s, i) => {
+      putUpright(f, i, s.x, s.y, s.z, s.yaw);
+      f.extras.aCell.src.set(s.rect || atlasRect(CELL.grey), i * 4);
+    });
+  }
+
+  const shelters = add(makeFurnitureField('shelters', shelterGeometry(), furn, plan.shelters.length, 'sign', { shadow: true }));
+  plan.shelters.forEach((p, i) => putUpright(shelters, i, p.x, p.y, p.z, p.yaw));
+  const glass = add(makeFurnitureField('shelterGlass', shelterGlassGeometry(), glassMat, plan.shelters.length, 'sign'));
+  plan.shelters.forEach((p, i) => putUpright(glass, i, p.x, p.y, p.z, p.yaw));
+  const flags = add(makeFurnitureField('stopFlags', signGeometry(0.52, 0.26, 2.1, 1), signMat, plan.stopPoles.length, 'sign', { extras: { aCell: 4 } }));
+  const bus = atlasRect(CELL.bus, 1, 1);
+  plan.stopPoles.forEach((p, i) => { putUpright(flags, i, p.x, p.y, p.z, p.yaw); flags.extras.aCell.src.set(bus, i * 4); });
+
+  const poles = add(makeFurnitureField('powerPoles', powerPoleGeometry(), furn, plan.poles.length, 'big', { shadow: true }));
+  plan.poles.forEach((p, i) => putUpright(poles, i, p.x, p.y, p.z, p.yaw + Math.PI / 2));
+
+  const fences = add(makeFurnitureField('fences', fenceGeometry(), furn, plan.fences.length, 'fence'));
+  plan.fences.forEach((q, i) => putSpan(fences, i, q.x0, q.y0, q.z0, q.x1, q.y1, q.z1));
+
+  // ---- the wires: one line set for all of them, sagging between poles ----
+  let wires = null;
+  if (plan.wires.length) {
+    const SEG = 8;
+    const P = new Float32Array(plan.wires.length * 3 * SEG * 2 * 3);
+    let k = 0;
+    const tip = (p, off, out) => {
+      // Crossarm ends lie across the line: the pole's yaw + 90 degrees.
+      const ax = Math.cos(p.yaw), az = -Math.sin(p.yaw);
+      out[0] = p.x + ax * off; out[2] = p.z + az * off;
+      out[1] = p.y + (off === 0 ? 9.38 : 8.95);
+      return out;
+    };
+    const A = [0, 0, 0], B = [0, 0, 0];
+    for (const [p, q] of plan.wires) {
+      const span = Math.hypot(q.x - p.x, q.z - p.z);
+      const sag = 0.00045 * span * span + 0.25;
+      for (const off of [-0.85, 0, 0.85]) {
+        tip(p, off, A); tip(q, off, B);
+        for (let s = 0; s < SEG; s++) {
+          for (const t of [s / SEG, (s + 1) / SEG]) {
+            P[k++] = A[0] + (B[0] - A[0]) * t;
+            P[k++] = A[1] + (B[1] - A[1]) * t - sag * 4 * t * (1 - t);
+            P[k++] = A[2] + (B[2] - A[2]) * t;
+          }
+        }
+      }
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(P.subarray(0, k), 3));
+    g.computeBoundingSphere();
+    const lm = new THREE.LineBasicMaterial({ color: 0x1c1d1f, transparent: true, opacity: 0.85 });
+    wires = new THREE.LineSegments(g, lm);
+    wires.name = 'roadside:wires';
+    wires.matrixAutoUpdate = false;
+    group.add(wires);
+    disposables.push(g, lm);
+  }
+  group.updateMatrix();
+
+  // ---- flex: a post driven through bends away and springs back ----------
+  const bendState = [posts, snow].map((f) => ({
+    f, ang: new Float32Array(f.n), vel: new Float32Array(f.n), active: new Set(),
+  }));
+  function knock(car, dt) {
+    if (!car || !(car.speed > 0.8)) return;
+    const hw = (car.spec ? car.spec.track : 1.6) * 0.5 + 0.35;
+    const hl = (car.spec ? car.spec.wheelbase : 2.6) * 0.5 + 0.9;
+    const c = Math.cos(car.yaw), s = Math.sin(car.yaw);
+    const fx = -s, fz = -c;
+    const mv = Math.hypot(car.vx || 0, car.vz || 0) || 1;
+    const dx0 = (car.vx || fx * car.speed) / mv, dz0 = (car.vz || fz * car.speed) / mv;
+    for (const B of bendState) {
+      const f = B.f;
+      const k0 = Math.floor(car.x / FIELD_CELL) * 65536 + Math.floor(car.z / FIELD_CELL);
+      for (let di = -1; di <= 1; di++) {
+        for (let dj = -1; dj <= 1; dj++) {
+          const L = f.cellsAt ? f.cellsAt(k0 + di * 65536 + dj) : null;
+          if (!L) continue;
+          for (let q = 0; q < L.length; q++) {
+            const i = L[q];
+            const px = f.cx[i] - car.x, pz = f.cz[i] - car.z;
+            const lx = px * c - pz * s, lz = px * s + pz * c;
+            if (Math.abs(lx) > hw || Math.abs(lz) > hl) continue;
+            // Pressed flat under the car, then let go.
+            const want = Math.min(1.35, 0.45 + car.speed * 0.06);
+            if (B.ang[i] < want) { B.ang[i] = want; B.vel[i] = 0; }
+            f.extras.aBend.src[i * 3 + 1] = dx0; f.extras.aBend.src[i * 3 + 2] = dz0;
+            B.active.add(i);
+          }
+        }
+      }
+    }
+  }
+  function spring(dt) {
+    const h = Math.min(dt, 0.05);
+    for (const B of bendState) {
+      if (!B.active.size) continue;
+      const f = B.f, live = f.live.aBend.array;
+      for (const i of B.active) {
+        // Stiff and underdamped: a post whips back, overshoots, and settles.
+        const acc = -38 * B.ang[i] - 5.5 * B.vel[i];
+        B.vel[i] += acc * h;
+        B.ang[i] += B.vel[i] * h;
+        if (Math.abs(B.ang[i]) < 0.002 && Math.abs(B.vel[i]) < 0.01) { B.ang[i] = 0; B.vel[i] = 0; B.active.delete(i); }
+        f.extras.aBend.src[i * 3] = B.ang[i];
+        const slot = f.slotOf[i];
+        if (slot >= 0) {
+          live[slot * 3] = B.ang[i];
+          live[slot * 3 + 1] = f.extras.aBend.src[i * 3 + 1];
+          live[slot * 3 + 2] = f.extras.aBend.src[i * 3 + 2];
+        }
+      }
+      f.live.aBend.needsUpdate = true;
+    }
+  }
+  // The flex fields need their cells for the knock test.
+  for (const B of bendState) {
+    const f = B.f, cells = new Map();
+    for (let i = 0; i < f.n; i++) {
+      const k = Math.floor(f.cx[i] / FIELD_CELL) * 65536 + Math.floor(f.cz[i] / FIELD_CELL);
+      let L = cells.get(k);
+      if (!L) cells.set(k, (L = []));
+      L.push(i);
+    }
+    f.cellsAt = (k) => cells.get(k);
+  }
+
+  let cursor = 0, first = true;
+  function update(cameraPos, dt, car) {
+    const sky = group.parent && group.parent.parent && group.parent.parent.userData ? group.parent.parent.userData.sky : null;
+    const night = sky ? sky.night || 0 : 0;
+    uniforms.uNight.value = clamp((night - 0.25) / 0.55, 0, 1);
+    if (!cameraPos) return;
+    const R = REACH[tier];
+    if (first) {
+      for (const f of fields) f.refresh(cameraPos.x, cameraPos.z, R[f.reachKey]);
+      first = false;
+    } else {
+      // One field a frame: a full sweep is ~14 frames, a quarter of a second,
+      // in which nothing reaches the edge of a reach of 140 m or more.
+      for (let t = 0; t < fields.length; t++) {
+        const f = fields[cursor];
+        cursor = (cursor + 1) % fields.length;
+        if (!f.stale(cameraPos.x, cameraPos.z)) continue;
+        f.refresh(cameraPos.x, cameraPos.z, R[f.reachKey]);
+        break;
+      }
+    }
+    knock(car, dt);
+    spring(dt || 0);
+  }
+
+  function setQuality(q) {
+    if (REACH[q]) tier = q;
+    first = true;
+  }
+
+  function dispose() {
+    for (const d of disposables) d.dispose && d.dispose();
+    for (const f of fields) f.mesh.dispose();
+    group.removeFromParent();
+  }
+
+  const stats = {
+    kinds: fields.length + (wires ? 1 : 0),
+    instances: Object.fromEntries(fields.map((f) => [f.name, f.n])),
+    wires: plan.wires.length,
+  };
+  return {
+    group, update, setQuality, dispose, stats, fields, plan,
+    get drawCalls() { let n = wires ? 1 : 0; for (const f of fields) if (f.mesh.count > 0) n++; return n; },
   };
 }

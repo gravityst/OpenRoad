@@ -1263,7 +1263,7 @@ async function boot() {
 
     // ---- streaming ----
     terrain.update(camera.position, dt);
-    roads.update(camera.position, dt);
+    roads.update(camera.position, dt, car);   // the car: roadside posts bend under it
     city.update(camera.position, dt);
     props.update(camera.position, dt);
     particles.update(dt, camera.position);

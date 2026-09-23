@@ -3587,6 +3587,13 @@ export function createFleet(scene, opts = {}) {
 
   let built = false;
   const stats = { near: 0, far: 0, flares: 0, kinds: 0, farTriangles: 0 };
+  // The lit headlamps nearest the camera, for the road to pool their light
+  // on the tarmac (render/roads.js reads scene.userData.carLamps): per lamp
+  // x, y, z at the nose, heading x, z, strength. One object, rewritten.
+  const LAMPS_MAX = 12;
+  const lampsOut = { count: 0, data: new Float32Array(LAMPS_MAX * 6) };
+  const lampD2 = new Float64Array(LAMPS_MAX);
+  if (scene.userData) scene.userData.carLamps = lampsOut;
 
   function keyOf(t) {
     const s = t.spec || {};
@@ -3740,6 +3747,7 @@ export function createFleet(scene, opts = {}) {
     for (let i = 0; i < cars.length; i++) slots[i].near = false;
     for (let a = 0; a < cand; a++) slots[order[a]].near = true;
 
+    lampsOut.count = 0;
     for (let q = 0; q < kindList.length; q++) kindList[q].n = 0;
     let nb = 0, nf = 0, nNear = 0, nFar = 0, farTris = 0;
     for (let i = 0; i < cars.length; i++) {
@@ -3797,6 +3805,24 @@ export function createFleet(scene, opts = {}) {
         }
       }
 
+      // Its lamps on the road, if it is among the nearest dozen lit cars.
+      if (head && d2s[i] < 160 * 160) {
+        let slot = lampsOut.count;
+        if (slot >= LAMPS_MAX) {
+          let worst = 0;
+          for (let q = 1; q < LAMPS_MAX; q++) if (lampD2[q] > lampD2[worst]) worst = q;
+          slot = lampD2[worst] > d2s[i] ? worst : -1;
+        } else lampsOut.count++;
+        if (slot >= 0) {
+          const nose = k.template.dims.front + 0.2;          // negative: ahead of the origin
+          const hx = -Math.sin(t.yaw), hz = -Math.cos(t.yaw);
+          const D = lampsOut.data, o = slot * 6;
+          D[o] = t.x - hx * nose; D[o + 1] = t.y; D[o + 2] = t.z - hz * nose;
+          D[o + 3] = hx; D[o + 4] = hz; D[o + 5] = 1;
+          lampD2[slot] = d2s[i];
+        }
+      }
+
       // Flares, near or far, when there is something to see.
       if (inView && (glow > 0.01 || brake) && d2s[i] < T.flareFar * T.flareFar) {
         const L = k.bake.lamps;
@@ -3839,6 +3865,14 @@ export function createFleet(scene, opts = {}) {
         mesh.instanceColor.needsUpdate = true;
         k.lamp.needsUpdate = true;
         k.finish.needsUpdate = true;
+      }
+    }
+    // Nearest first, so the road's eight go to the cars that matter.
+    for (let a = 1; a < lampsOut.count; a++) {
+      for (let b = a; b > 0 && lampD2[b - 1] > lampD2[b]; b--) {
+        const t = lampD2[b]; lampD2[b] = lampD2[b - 1]; lampD2[b - 1] = t;
+        const D = lampsOut.data;
+        for (let q = 0; q < 6; q++) { const v = D[b * 6 + q]; D[b * 6 + q] = D[(b - 1) * 6 + q]; D[(b - 1) * 6 + q] = v; }
       }
     }
     blobs.count = nb;

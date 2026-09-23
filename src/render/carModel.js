@@ -3461,7 +3461,7 @@ const _fm = new THREE.Matrix4(), _fm2 = new THREE.Matrix4(), _fq = new THREE.Qua
 const _fe = new THREE.Euler(0, 0, 0, 'YXZ'), _fp = new THREE.Vector3(), _fs = new THREE.Vector3();
 const _fv = new THREE.Vector3(), _fn = new THREE.Vector3(), _fnm = new THREE.Matrix3();
 const _frust = new THREE.Frustum(), _pv = new THREE.Matrix4(), _fsph = new THREE.Sphere();
-const _fcol = new THREE.Color();
+const _fcol = new THREE.Color(), _fdir = new THREE.Vector3();
 
 /**
  * One model, baked into a single mesh for drawing far away: every visible
@@ -3687,6 +3687,7 @@ export function createFleet(scene, opts = {}) {
     return s.model;
   }
 
+  const lastDir = new THREE.Vector3(0, 0, -1);
   // Scratch for the nearest-N pick.
   let d2s = new Float64Array(0);
   let order = new Int32Array(0);
@@ -3718,6 +3719,14 @@ export function createFleet(scene, opts = {}) {
     const cam = camera.position;
     _pv.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     _frust.setFromProjectionMatrix(_pv);
+    // This runs before the frame's camera update, so the frustum is last
+    // frame's. That is fine while the view turns slowly; while it swings (the
+    // look-back key turns it 180 degrees in a fifth of a second) a far car at
+    // the edge would be culled a frame early and pop, so nothing is culled
+    // until the view settles.
+    _fdir.set(0, 0, -1).transformDirection(camera.matrixWorld);
+    const swinging = _fdir.dot(lastDir) < 0.995;
+    lastDir.copy(_fdir);
     const H = (typeof window !== 'undefined' && window.innerHeight) || 720;
     flareU.uPx.value = 2 * Math.tan((camera.fov || 60) * Math.PI / 360) / H;
     const nearR = T.near, farR = T.near * 1.12;
@@ -3765,7 +3774,7 @@ export function createFleet(scene, opts = {}) {
       _fm.compose(_fp.set(t.x, t.y, t.z), _fq, _fs.set(1, 1, 1));
       const k = kinds.get(s.key);
       const radius = k.template.dims.length * 0.5 + 4 + Math.sqrt(d2s[i]) * 0.05;
-      const inView = _frust.intersectsSphere(_fsph.set(_fp, radius));
+      const inView = swinging || _frust.intersectsSphere(_fsph.set(_fp, radius));
 
       if (s.near) {
         nNear++;

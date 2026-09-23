@@ -522,7 +522,9 @@ function looseSpec(kind, width, seed) {
 
     rut: kind === 'rallyx' ? [width * 0.5 - 1.1, width * 0.5 + 1.1] : [width * 0.5 - 0.82, width * 0.5 + 0.82],
     rutW: lerp(0.44, 0.60, used),
-    rutCut: lerp(0.30, 0.18, used),
+    // The wheel paths are compacted to a dark, fine, almost sealed surface;
+    // that pair of darker tracks is the first thing that says "gravel road".
+    rutCut: lerp(0.34, 0.26, used),
     rutH: lerp(0.078, 0.028, used),        // m — a track's ruts are real ruts
     bermH: lerp(0.030, 0.014, used) + 0.014 * stony,   // material pushed aside
     crownH: lerp(0.048, 0.010, used),      // the untouched strip between them
@@ -1010,7 +1012,7 @@ function paintLoose(spec, V, F, out, w, h) {
   // ---- column tables ----
   const tone = new Float32Array(w), rel0 = new Float32Array(w), relw = new Float32Array(w);
   const rutk = new Float32Array(w), grass = new Float32Array(w);
-  const loose = new Float32Array(w);
+  const loose = new Float32Array(w), bermk = new Float32Array(w);
 
   for (let px = 0; px < w; px++) {
     const m = (px + 0.5) * mPerX;
@@ -1037,6 +1039,7 @@ function paintLoose(spec, V, F, out, w, h) {
         }
       }
       rel += spec.bermH * Math.min(1, berm) * (1 - k);
+      bermk[px] = Math.min(1, berm) * (1 - k);
     }
     // The strip between the ruts is never touched, so it stands proud and, on a
     // road nothing straddles, it grows a line of grass down the middle.
@@ -1088,7 +1091,9 @@ function paintLoose(spec, V, F, out, w, h) {
       // the shadow it casts. Soft thresholds — the individual stones are in the
       // detail layer, and a hard threshold here is what made the old mosaic.
       const sn = F.c1[i];
-      const st = smoothstep(0.05, 0.55, sn) * spec.stoneAmt * loose[px];
+      // Traffic sweeps the loose stone out of the wheel paths into windrows
+      // beside them, so the berms are where the stone lies thickest.
+      const st = smoothstep(0.05, 0.55, sn) * spec.stoneAmt * loose[px] * (1 + 1.4 * bermk[px]);
       if (st > 0.004) {
         r = lerp(r, spec.stoneHi[0], st); gr = lerp(gr, spec.stoneHi[1], st); b = lerp(b, spec.stoneHi[2], st);
         rel += st * spec.stoneH;
@@ -1112,7 +1117,7 @@ function paintLoose(spec, V, F, out, w, h) {
         const spoil = (1 - smoothstep(0.95, 1.75, q2)) * (1 - core);
         // A hole in an unpaved road holds water, so its floor is dark and
         // smooth and the spoil thrown out of it is the palest thing around.
-        const wet = core * 0.55;
+        const wet = core * 0.38;
         r = lerp(r, spec.stoneLo[0] * 0.7, wet); gr = lerp(gr, spec.stoneLo[1] * 0.7, wet); b = lerp(b, spec.stoneLo[2] * 0.7, wet);
         r = lerp(r, spec.stoneHi[0], spoil * 0.42); gr = lerp(gr, spec.stoneHi[1], spoil * 0.42); b = lerp(b, spec.stoneHi[2], spoil * 0.42);
         rel -= core * hq.depth; wrel -= core * hq.depth;
@@ -1586,6 +1591,7 @@ function buildDetail(seed, want, defer) {
 
 const V_PARS = /* glsl */`
 attribute vec3 aRoad;        // x macro layer, y detail layer (-1 none), z fringe 0..1
+uniform vec2 uPull;          // x fraction of distance, y cap in metres
 varying vec3 vRoad;
 varying vec2 vRoadUv;
 varying vec2 vRoadXZ;
@@ -1596,6 +1602,28 @@ const V_MAIN = /* glsl */`
 vRoad = aRoad;
 vRoadUv = uv;
 vRoadXZ = ( modelMatrix * vec4( position, 1.0 ) ).xz;
+`;
+
+// Appended after <project_vertex>: draw the road a little nearer the eye in
+// DEPTH only. Scaling the view-space position toward the camera leaves x/z
+// and y/z untouched, so nothing moves on screen; only the depth test sees it.
+//
+// The terrain mesh is a linear interpolation of the same field between
+// vertices 1.3-16 m apart, and where a flat carriageway meets a rising verge
+// the interpolation rides above the true surface by more than the 4 cm the
+// road is drawn at — worst on the low tier, whose near grid is 2.7 m. Polygon
+// offset cannot help: its units are depth-buffer steps, which are fractions of
+// a millimetre near the car. A pull of 0.4% of the distance does, and it is
+// capped at 15 cm so a road behind the crest of a hill can never show through
+// it: the only thing the cap lets the road win against is something within
+// 15 cm of lying on it.
+const V_PULL = /* glsl */`
+{
+  float roadLen = length( mvPosition.xyz );
+  float roadPull = min( uPull.x * roadLen, uPull.y );
+  mvPosition.xyz *= 1.0 - roadPull / max( roadLen, 1e-3 );
+  gl_Position = projectionMatrix * mvPosition;
+}
 `;
 
 const F_PARS = /* glsl */`
@@ -2308,15 +2336,35 @@ export function createRoads(world, ground, opts = {}) {
   // The idle queue: detail first, because it is what the camera sits on, then
   // the second copies. One job per idle slot, each 10-40 ms; only the layer
   // that changed is re-uploaded.
+  //
+  // A partial upload is only safe onto storage that already holds every other
+  // layer. The FIRST upload allocates the storage, and so does any upload
+  // after a sampler change (anisotropy is part of three's texture cache key,
+  // so changing it makes a new GL texture) — a layer update riding either of
+  // those uploads every layer but one as black. Measured: switching quality
+  // while the queue was still running blacked out every road but one. So a
+  // texture waiting on a full upload takes no layer updates; the data array
+  // is shared, and the full upload carries the new layer anyway.
+  const fullPending = new Set();
+  const expectFull = (tex) => {
+    tex.clearLayerUpdates();
+    fullPending.add(tex);
+    tex.onUpdate = () => fullPending.delete(tex);
+  };
+  const touch = (tex, L) => {
+    if (!fullPending.has(tex)) tex.addLayerUpdate(L);
+    tex.needsUpdate = true;
+  };
+  for (const tex of textures) expectFull(tex);
   const jobs = [];
   for (const L of detail.later) {
-    jobs.push(() => { detailTex.addLayerUpdate(detail.build(L)); detailTex.needsUpdate = true; });
+    jobs.push(() => touch(detailTex, detail.build(L)));
   }
   for (const job of atlas.later) {
     jobs.push(() => {
       const L = atlas.paintLater(job);
-      albedoTex.addLayerUpdate(L); albedoTex.needsUpdate = true;
-      normalTex.addLayerUpdate(L); normalTex.needsUpdate = true;
+      touch(albedoTex, L);
+      touch(normalTex, L);
     });
   }
   let disposed = false;
@@ -2343,6 +2391,7 @@ export function createRoads(world, ground, opts = {}) {
     uSkyZenith: { value: new THREE.Color(0.30, 0.52, 0.95) },
     uSkyHorizon: { value: new THREE.Color(0.95, 1.10, 1.25) },
     uVerge: { value: new THREE.Color(lin(verge[0]), lin(verge[1]), lin(verge[2])) },
+    uPull: { value: new THREE.Vector2(0.004, 0.15) },
   };
 
   let normalsOn = true;
@@ -2362,7 +2411,8 @@ export function createRoads(world, ground, opts = {}) {
     Object.assign(shader.uniforms, uniforms);
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', '#include <common>\n' + V_PARS)
-      .replace('#include <uv_vertex>', '#include <uv_vertex>\n' + V_MAIN);
+      .replace('#include <uv_vertex>', '#include <uv_vertex>\n' + V_MAIN)
+      .replace('#include <project_vertex>', '#include <project_vertex>\n' + V_PULL);
     shader.fragmentShader = (normalsOn ? '#define ROAD_NORMALS\n' : '') + shader.fragmentShader
       .replace('#include <common>', '#include <common>\n' + F_PARS)
       .replace('#include <map_fragment>', F_MAP)
@@ -2464,8 +2514,8 @@ export function createRoads(world, ground, opts = {}) {
     if (t.drawDistance !== undefined) cullDist = t.drawDistance;
     if (t.anisotropy !== undefined && t.anisotropy !== albedoTex.anisotropy) {
       // Sampler state is set on upload, so this re-uploads — on a settings
-      // change, never per frame.
-      for (const tex of textures) { tex.anisotropy = t.anisotropy; tex.needsUpdate = true; }
+      // change, never per frame — and it is a full upload into new storage.
+      for (const tex of textures) { tex.anisotropy = t.anisotropy; expectFull(tex); tex.needsUpdate = true; }
     }
     if (t.normals !== undefined && t.normals !== normalsOn) {
       normalsOn = t.normals;

@@ -640,12 +640,14 @@ void main() {
     vec2 toSun = uSunDir.xz / max(uSunDir.y + 0.35, 0.35) * (140.0 / REPEAT_LO);
     vec2 c1 = cumulusCoarse(uv + toSun, cover);
     vec2 c2 = cumulusCoarse(uv + toSun * 2.6, cover);
-    float depthToSun = mix(d * 1.2, (d + c0.y) * 0.3 + (c1.x + c1.y) * 0.5 + (c2.x + c2.y) * 0.3, uCloudDetail);
+    // The low tier skips the two steps and lights the deck by its own
+    // density alone — flatter, but the same brightness overall.
+    float depthToSun = mix(d * 0.55, (d + c0.y) * 0.3 + (c1.x + c1.y) * 0.5 + (c2.x + c2.y) * 0.3, uCloudDetail);
     float lit = exp(-depthToSun * 2.4);
     // Overhead you see a cumulus's flat base; toward the horizon you see its
     // sunlit flanks. So low in the sky the deck is whiter than it is above you.
     float flank = 1.0 - smoothstep(0.04, 0.45, dir.y);
-    lit = mix(lit, max(lit, 0.8), flank * 0.75 * uCloudDetail);
+    lit = mix(lit, max(lit, 0.8), flank * 0.75);
     // "Powder": the thinnest wisps scatter less light back out than their
     // density suggests, which is what darkens the very rims of a backlit puff.
     float powder = 1.0 - exp(-d * 5.0);

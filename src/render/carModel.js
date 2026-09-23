@@ -558,6 +558,36 @@ function lampTextures() {
 }
 
 /**
+ * A spinning alloy, smeared. Greyscale with alpha: a solid hub, the spoke
+ * zone at the average of spoke and the dark disc behind it — thin enough that
+ * the caliper still shows through, as it does in any photo of a car at speed —
+ * and a bright lip. The rim's own finish colour comes from vertex colours.
+ */
+function blurTexture() {
+  const S = 128;
+  const c = canvas(S, S);
+  if (!c) return null;
+  const g = c.getContext('2d');
+  const img = g.createImageData(S, S);
+  for (let j = 0; j < S; j++) {
+    for (let i = 0; i < S; i++) {
+      const r = Math.hypot(i + 0.5 - S / 2, j + 0.5 - S / 2) / (S / 2);
+      let v, a;
+      if (r > 1) { v = 0; a = 0; }
+      else if (r < 0.27) { v = 0.9; a = 0.92; }
+      else if (r < 0.9) { v = 0.62 + 0.06 * Math.sin(r * 46); a = 0.6; }
+      else { v = 1; a = 0.9; }
+      // Soften the ring boundaries by a couple of texels.
+      const o = (j * S + i) * 4;
+      img.data[o] = img.data[o + 1] = img.data[o + 2] = Math.round(255 * v);
+      img.data[o + 3] = Math.round(255 * a * clamp((1 - r) * 40, 0, 1));
+    }
+  }
+  g.putImageData(img, 0, 0);
+  return texFrom(c, { wrap: false });
+}
+
+/**
  * A soft dark footprint for the contact shadow. The sun's shadow map is far
  * too coarse to darken the two centimetres where a tyre meets the road, and a
  * car without that darkening floats: it is the single cue the eye uses to put
@@ -806,7 +836,7 @@ function acquireKit() {
     kit.tex = {
       env: envTexture(), tyre: tyre.map, tyreBump: tyre.bump,
       wheelLow: low.map, wheelLowOrm: low.orm,
-      grille: grilleTexture(), plate: plateTexture(), shadow: shadowTexture(),
+      grille: grilleTexture(), plate: plateTexture(), shadow: shadowTexture(), blur: blurTexture(),
       ...lampTextures(),
     };
     const T = kit.tex, E = T.env;
@@ -2332,6 +2362,21 @@ function sides(d, B, hi) {
     const z = d.roofR + 0.015, y = canopyTop(d, canopyLines(d), d.roofR) - 0.005;
     B.plastic.push(place(rbox(d.hwRoof * 1.85, 0.03, 0.14, 0.012, null, hi ? 2 : 1), 0, y, z, -0.12, 0, 0));
   }
+  // ---- the high-level brake light -------------------------------------------
+  // On the centreline, which carDamage reads as not one of the four tracked
+  // lamps, so like the first version's it survives every smash.
+  {
+    const w = Math.min(0.34, d.hwRoof * 0.5);
+    if (st.cargo) {
+      B.lBrake.push(place(rbox(w, 0.03, 0.02, 0.008, null, 1), 0, d.yRoof - d.wr * 0.3, d.zR0 + 0.008));
+    } else {
+      const L = canopyLines(d);
+      const z = Math.min(d.roofR + 0.1, lerp(d.roofR, d.cabR, 0.3));
+      const y = canopyTop(d, L, z), dy = canopyTop(d, L, z + 0.03) - y;
+      const tilt = Math.atan2(-dy, 0.03);
+      B.lBrake.push(place(rbox(w, 0.014, 0.05, 0.006, null, 1), 0, y + 0.004, z, tilt, 0, 0));
+    }
+  }
   if (st.spoiler) {
     // Paint, and separate components standing above the deck behind the rear
     // glass: carDamage finds a sports car's wing by exactly that description,
@@ -2666,10 +2711,15 @@ function wheelGeometry(d, detail) {
     return { wheel: toGeometry(merge2(merge2(tyre, faces[0]), faces[1])) };
   }
   const segs = 36;
+  // In front of the spokes and behind the polished lip, so at speed the lip
+  // still rings the smeared face.
+  const blur = fromGeometry(new THREE.CircleGeometry(d.rimR * 0.96, 36), d.st.wheel.finish);
+  place(blur, d.tyreW * 0.5 * 0.76, 0, 0, 0, Math.PI * 0.5, 0);
   return {
     tyre: toGeometry(tyreGeometry(d, segs, true)),
     rim: toGeometry(rimGeometry(d, segs)),
     caliper: toGeometry(caliperGeometry(d)),
+    blur: toGeometry(blur),
   };
 }
 
@@ -2912,6 +2962,7 @@ export function createCarModel(spec = {}, opts = {}) {
     if (want === near) return;
     near = want;
     for (let i = 0; i < cosmetic.length; i++) cosmetic[i].visible = near;
+    if (!near) for (let i = 0; i < blurs.length; i++) blurs[i].visible = false;
   };
   group.add(lod);
 
@@ -2966,6 +3017,12 @@ export function createCarModel(spec = {}, opts = {}) {
   // default XYZ the wheel would corkscrew as it turned.
   const wheels = [];
   const calipers = [];
+  const blurs = [];
+  // Per car, because its opacity follows this car's wheel speed.
+  const blurMat = detail === 'high' ? envMaterial(THREE.MeshStandardMaterial, {
+    color: 0xffffff, map: K.tex.blur, vertexColors: true, transparent: true, opacity: 0,
+    depthWrite: false, roughness: 0.35, metalness: 0.7,
+  }, env) : null;
   const restY = d.yWheel;
   for (let i = 0; i < 4; i++) {
     const w = new THREE.Object3D();
@@ -2988,6 +3045,15 @@ export function createCarModel(spec = {}, opts = {}) {
       w.add(m);
       triangles += g.index.count / 3;
       if (part === 'caliper') { calipers.push(m); cosmetic.push(m); }
+    }
+    if (blurMat && geo.wheel.blur) {
+      const b = new THREE.Mesh(geo.wheel.blur, blurMat);
+      b.name = 'blur';
+      b.castShadow = false;
+      b.visible = false;
+      if (left) b.scale.x = -1;
+      w.add(b);
+      blurs.push(b);
     }
     group.add(w);
     wheels.push(w);
@@ -3012,11 +3078,16 @@ export function createCarModel(spec = {}, opts = {}) {
     wheels[1].rotation.y = -rad;
   }
 
+  // How far the wheels turned since the last call, smoothed: one call a frame
+  // is how main.js drives every car, so this is radians per frame.
+  let lastSpin = NaN, spinRate = 0;
+
   function setWheelSpin(rad) {
     // + = rolling forward. Rolling forward carries the front of the wheel
     // downward, which is a negative rotation about +X. The calipers are bolted
     // to the upright, not the wheel, so they are turned back by the same amount
     // — which leaves them steering and riding the suspension, but not spinning.
+    const a = typeof rad === 'number' ? rad : rad[0];
     if (typeof rad === 'number') {
       for (let i = 0; i < 4; i++) wheels[i].rotation.x = -rad;
       for (let i = 0; i < calipers.length; i++) calipers[i].rotation.x = rad;
@@ -3024,6 +3095,17 @@ export function createCarModel(spec = {}, opts = {}) {
       for (let i = 0; i < 4; i++) wheels[i].rotation.x = -rad[i];
       for (let i = 0; i < calipers.length; i++) calipers[i].rotation.x = rad[i];
     }
+    // Motion blur. Past ~0.3 rad a frame (a 0.33 m wheel at 21 km/h, 60 fps) a
+    // ten-spoke alloy starts to strobe and appears to turn backwards; by 100
+    // km/h it moves 1.4 rad a frame, more than two spokes' spacing. A smeared
+    // face fades in over the spokes instead, and is not drawn at all below it.
+    if (!blurs.length) return;
+    if (a === a && lastSpin === lastSpin) spinRate += (Math.min(3, Math.abs(a - lastSpin)) - spinRate) * 0.3;
+    lastSpin = a;
+    const k = smooth(0.22, 0.6, spinRate);
+    blurMat.opacity = k;
+    const show = near && k > 0.02;
+    for (let i = 0; i < blurs.length; i++) blurs[i].visible = show;
   }
 
   function setSuspension(comps) {
@@ -3080,6 +3162,7 @@ export function createCarModel(spec = {}, opts = {}) {
     group.removeFromParent();
     paint.dispose();
     shadowMat.dispose();
+    if (blurMat) blurMat.dispose();
     for (const m of Object.values(lamp)) m.dispose();
     // Geometry and the shared textures belong to the kit, which only tears
     // itself down once the last car has let go of it.

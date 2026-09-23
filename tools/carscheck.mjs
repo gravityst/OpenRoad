@@ -337,6 +337,36 @@ for (const k of bad) for (const msg of problems[k]) console.log(`        ${k.pad
     charred.cc < 0.3 && charred.r > 0.7 && paint.clearcoat === 1 && paint.roughness < 0.4,
     `clearcoat ${charred.cc.toFixed(2)} charred, ${paint.clearcoat.toFixed(2)} repaired`);
 
+  // Wheel blur: invisible at a crawl, over the spokes at speed.
+  const blurs = m.wheels.map((w) => w.children.find((k) => k.name === 'blur'));
+  let ang = 0;
+  for (let i = 0; i < 20; i++) { ang += 0.02; m.setWheelSpin(ang); }
+  const slow = blurs.every((b) => b && !b.visible);
+  for (let i = 0; i < 20; i++) { ang += 1.4; m.setWheelSpin(ang); }
+  const fast = blurs.every((b) => b && b.visible) && blurs[0].material.opacity > 0.8;
+  for (let i = 0; i < 30; i++) { ang += 0.02; m.setWheelSpin(ang); }
+  check('spokes blur at speed and are sharp again at a crawl', slow && fast && blurs.every((b) => !b.visible),
+    `opacity at 1.4 rad/frame ${fast ? '> 0.8' : 'too low'}; hidden at 0.02 rad/frame`);
+
+  // The high-level brake light rides the centreline, so smashing both tail
+  // lamps must leave it lit.
+  {
+    const rig = createCarDamage(m, spec, {});
+    rig.applyEvents([{ type: 'light-smash', light: 'tailL' }, { type: 'light-smash', light: 'tailR' }]);
+    // The pieces carDamage could not attribute to a tracked lamp keep the
+    // working material; the centreline brake light has to be among them.
+    const brakeMat = byName(m, 'lBrake').material;
+    const rest = chassisOf(m).children.find((k) => k.name === 'lBrake:rest');
+    const box = rest ? new THREE.Box3().setFromObject(rest) : null;
+    const onCentre = !!box && box.min.x < 0 && box.max.x > 0;
+    m.setBrakeLights(1);
+    check('the high-level brake light survives both tail lamps being smashed',
+      !!rest && rest.material === brakeMat && onCentre && brakeMat.emissiveIntensity > 2,
+      rest ? `centred at x ${((box.min.x + box.max.x) / 2).toFixed(3)}, still lit at ${brakeMat.emissiveIntensity}` : 'no unattributed brake lamp');
+    m.setBrakeLights(0);
+    rig.dispose();
+  }
+
   m.setHeadlights(true);
   const head = byName(m, 'lHead').material, tail = byName(m, 'lTail').material;
   check('headlights on light the tails as running lights', head.emissiveIntensity === 2.4 && tail.emissiveIntensity === 0.45);

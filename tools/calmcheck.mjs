@@ -15,7 +15,7 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, resolve, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { DAMAGE } from '../src/physics/damage.js';
+import { DAMAGE, createDamage } from '../src/physics/damage.js';
 import { createVehicle } from '../src/physics/vehicle.js';
 import { createCollision, createCarCollision } from '../src/physics/collision.js';
 import { CARS, specFor } from '../src/vehicles/catalog.js';
@@ -38,6 +38,58 @@ const check = (name, ok, detail) => {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name.padEnd(50)} ${detail}`);
   if (!ok) fail++;
 };
+
+// ---- main.js's own crash code ----------------------------------------------
+//
+// The crash handlers live inside main.js's boot() closure, which needs a
+// browser. A stand-in written here could drift from them without anyone
+// noticing, so these checks lift the handlers' SOURCE out of main.js by
+// matching braces and run that, closed over stubs for the renderer-side names
+// it touches. Every stub counts what it was asked to do, so "nothing exploded"
+// is counted, not assumed.
+const MAIN = readFileSync(join(ROOT, 'src/main.js'), 'utf8');
+function lift(head) {
+  const at = MAIN.indexOf(head);
+  if (at < 0) return null;
+  let depth = 0;
+  for (let i = MAIN.indexOf('{', at); i > 0 && i < MAIN.length; i++) {
+    const c = MAIN[i], n = MAIN[i + 1];
+    if (c === '/' && n === '/') { i = MAIN.indexOf('\n', i); continue; }
+    if (c === '/' && n === '*') { i = MAIN.indexOf('*/', i) + 1; continue; }
+    if (c === "'" || c === '"' || c === '`') {
+      for (i++; i < MAIN.length && MAIN[i] !== c; i++) if (MAIN[i] === '\\') i++;
+      continue;
+    }
+    if (c === '{') depth++;
+    else if (c === '}' && --depth === 0) return MAIN.slice(at, i + 1);
+  }
+  return null;
+}
+function fromMain(heads, returns, scope, prelude = '') {
+  const parts = heads.map(lift);
+  const missing = heads.filter((h, k) => !parts[k]);
+  if (missing.length) return { missing };
+  const body = `'use strict';\n${prelude}\n${parts.join(';\n')}\nreturn { ${returns.join(', ')} };`;
+  return new Function(...Object.keys(scope), body)(...Object.values(scope));
+}
+
+// main.js's explode() and onTrafficHit(), with DAMAGE as given. `player` is the
+// car explode() reads as `car`. The damage renderer, debris and wreck layers are
+// the null they are in the game with DAMAGE off; the fireball, sparks, smoke,
+// wreck sequence and toast are counters.
+function crashHandlers(damageOn, player) {
+  const did = { fireballs: 0, sparks: 0, smoke: 0, wrecks: 0, toasts: 0 };
+  const fns = fromMain(['function explode(', 'function onTrafficHit('], ['explode', 'onTrafficHit'], {
+    DAMAGE: damageOn, createDamage, car: player,
+    trafficRespawn: [], trafficModels: [], trafficDamage: [], npcEvents: [],
+    mCarDamage: null, debris: null, carDamage: null,
+    boom: { fire() { did.fireballs++; } },
+    wreck: { ignite() { did.wrecks++; } },
+    particles: { emitSparks() { did.sparks++; }, emitSmoke() { did.smoke++; }, emitDust() {} },
+    hud: { toast() { did.toasts++; } },
+  }, 'let boomCooldown = 0;');
+  return { ...fns, did };
+}
 
 // ---- 1. The switch --------------------------------------------------------
 check('DAMAGE is off', DAMAGE === false,
@@ -143,11 +195,16 @@ function crash(car) {
 
 // ---- 4. Traffic you hit drives on -----------------------------------------
 //
-// A real road, real traffic, and a 60 m/s head-on into a moving car. main.js
-// hands the collision a callback that returns at once with DAMAGE off, so
-// null here is the same thing. The knock is consumed the way main.js consumes
-// it (stepFrame, "Consume the shove"), and the player then pulls over, because
+// A real road, real traffic, and a 60 m/s head-on into a moving car. The
+// collision is handed main.js's own onTrafficHit(), and every contact main.js
+// would blow up on (stepFrame: closing past 21 m/s, or 15 head-on) goes through
+// main.js's own explode(). The knock is consumed the way main.js consumes it
+// (stepFrame, "Consume the shove"), and the player then pulls over, because
 // traffic rightly queues behind a car stopped in its lane.
+//
+// Then the very same contact is replayed through the same onTrafficHit() with
+// DAMAGE on, onto a copy of the car, and must write it off: that is what makes
+// "not damaged" a result rather than a foregone conclusion.
 {
   const world = buildWorld();
   const ground = createGround(world);
@@ -178,6 +235,13 @@ function crash(car) {
     car.reset(t.x + fx * 14, t.z + fz * 14, t.yaw + Math.PI);
     car.vx = fx * -60; car.vz = fz * -60;
     const vBefore = t.speed, respawn = t.respawnId;
+    const main = crashHandlers(DAMAGE, car);
+    let calls = 0, booms = 0, first = null;
+    const onHit = (o, sev, lx, lz, closing) => {
+      calls++;
+      if (o === t && !first) first = [sev, lx, lz, closing];
+      main.onTrafficHit(o, sev, lx, lz, closing);
+    };
     let closing = 0, contact = -1, tick = 0;
     const trace = [];
     for (let frame = 0; frame < 60 * 12; frame++) {
@@ -191,8 +255,12 @@ function crash(car) {
       }
       for (let s = 0; s < 2; s++) {
         car.step(dt);
-        const b = hits.resolve(car, traffic.cars, dt, null);
+        const b = hits.resolve(car, traffic.cars, dt, main.missing ? null : onHit);
         if (b.hit && b.other === t && contact < 0) { contact = frame; closing = b.closing; }
+        if (!main.missing && b.hit && (b.closing > 21 || (b.headOn && b.closing > 15))) {
+          booms++;
+          main.explode(b.x, car.y + 0.6, b.z, Math.min(1, b.closing / 30));
+        }
       }
       for (const o of traffic.cars) {
         if (!o || !o.kvx) continue;
@@ -208,10 +276,30 @@ function crash(car) {
     const same = t.active && t.respawnId === respawn;
     check('a 60 m/s head-on into traffic makes contact', contact >= 0 && closing > 55,
       contact >= 0 ? `closing at ${closing.toFixed(1)} m/s` : `no contact in ${tick + 1} frames`);
+    const d = main.did || {};
+    const quiet = !d.fireballs && !d.sparks && !d.smoke && !d.wrecks && !d.toasts;
     check('the car you hit is not damaged, capped or alight',
+      !main.missing && calls > 0 && quiet &&
       !t.damage && t.speedCap === undefined && !t.wrecked && !t.written && !(t.burning > 0),
-      `damage model ${t.damage ? 'yes' : 'none'}, speedCap ${t.speedCap}, ` +
-      `wrecked ${!!t.wrecked}, burning ${t.burning || 0}`);
+      main.missing ? `main.js has no ${main.missing.join(', ')}` :
+        `through main.js's onTrafficHit (${calls} calls) and explode (${booms}): ` +
+        `damage model ${t.damage ? 'yes' : 'none'}, speedCap ${t.speedCap}, ` +
+        `wrecked ${!!t.wrecked}, burning ${t.burning > 0 ? `${t.burning.toFixed(1)} s` : 0}, ` +
+        `${d.fireballs} fireballs, ${d.sparks} spark bursts, ${d.smoke} smoke`);
+
+    // The replay. A copy, so the car above is untouched; burning is reported
+    // as yes/no because its length is Math.random().
+    const armed = crashHandlers(true, playerCar(CARS[0].id, ground));
+    const copy = { ...t, damage: null, speedCap: undefined, wrecked: false, written: false,
+      exploded: false, burning: 0 };
+    let err = '';
+    try { if (first && !armed.missing) armed.onTrafficHit(copy, ...first); } catch (e) { err = e.message; }
+    check('with DAMAGE on, the same contact is caught', !err && !!first && !!copy.damage &&
+      copy.speedCap === 0 && copy.burning > 0 && armed.did.fireballs > 0,
+      err ? `main.js's onTrafficHit threw: ${err}` : !first ? 'onTrafficHit was never called for it' :
+        `integrity ${copy.damage ? copy.damage.integrity.toFixed(2) : '-'}, speedCap ${copy.speedCap}, ` +
+        `written off ${!!copy.written}, burning ${copy.burning > 0 ? 'yes' : 'no'}, ` +
+        `${armed.did.fireballs} fireball`);
     check('and it drives on', same && t.speed > vBefore * 0.6,
       `${same ? 'same car' : 'recycled'}, ${vBefore.toFixed(1)} m/s before; each second after: ${trace.join(' ')}`);
   }
@@ -222,7 +310,7 @@ function crash(car) {
 // Read main.js for the four places the switch has to reach. If a merge drops
 // one of these, the fire comes back and nothing else here would notice.
 {
-  const main = readFileSync(join(ROOT, 'src/main.js'), 'utf8');
+  const main = MAIN;
   const imports = /import\s*\{[^}]*\bDAMAGE\b[^}]*\}\s*from\s*'\.\/physics\/damage\.js'/.test(main);
   const vehicle = /createVehicle\(\{[^\n]*\bisPlayer:\s*true[^\n]*\bdamage:\s*DAMAGE\b/.test(main);
   const LAYERS = ['render/carDamage.js', 'physics/debris.js', 'render/damageFx.js',

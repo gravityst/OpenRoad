@@ -2964,9 +2964,9 @@ export function planRoadside(world, ground, opts = {}) {
     }
     let total = 0;
     for (const c of chain) total += c.e.length;
-    if (total < 300) continue;
+    if (total < 220) continue;
     const key = chain[0].e.i;
-    if (hash1(key, seed + 11) > 0.5) continue;
+    if (hash1(key, seed + 11) > 0.8) continue;
     const side = hash1(key, seed + 12) < 0.5 ? -1 : 1;
     let prev = null, ci = 0, base = 0;
     for (let d = 12; d < total - 12; d += FURN.powerEvery) {
@@ -3167,7 +3167,9 @@ function kitBuilder() {
   return { quad, box, build };
 }
 
-const WHITE = 0xe9e8e2, BLACK = 0x17181a, STEEL = 0xa3a8ad, DARKSTEEL = 0x55595e, TIMBER = 0x6f5d49, POLEWOOD = 0x5a4a3a;
+// Weathered, not new: silvered timber and galvanised steel are what a real
+// verge is made of, and brand-new colours read as a toy set.
+const WHITE = 0xe9e8e2, BLACK = 0x17181a, STEEL = 0xa3a8ad, DARKSTEEL = 0x55595e, TIMBER = 0x8a7b69, POLEWOOD = 0x6a5846;
 
 /** Delineator: a white post, black band, a reflector on each face. */
 function postGeometry() {
@@ -3256,7 +3258,7 @@ function powerPoleGeometry() {
 /** Field fence: one 2.6 m section along +X: a post at x = 0 and two rails. */
 function fenceGeometry() {
   const k = kitBuilder();
-  k.box(-0.06, -0.2, -0.06, 0.06, 1.15, 0.06, 0x5f503f);
+  k.box(-0.06, -0.2, -0.06, 0.06, 1.15, 0.06, 0x75664f);
   for (const y of [0.45, 0.95]) {
     k.box(0, y, -0.025, 1, y + 0.1, 0.025, TIMBER);
   }
@@ -3276,7 +3278,8 @@ function shelterGeometry() {
   k.box(-W / 2, H - 0.18, D / 2 - 0.02, W / 2, H, D / 2 + 0.02, F);
   k.box(-W / 2 + 0.2, 0.42, -D / 2 + 0.08, W / 2 - 0.2, 0.47, -D / 2 + 0.42, 0x6b5640);
   for (const x of [-W / 2 + 0.4, W / 2 - 0.4]) k.box(x - 0.03, 0, -D / 2 + 0.2, x + 0.03, 0.42, -D / 2 + 0.3, F);
-  k.box(W / 2 - 0.05, 0.9, -D / 2 + 0.3, W / 2 + 0.02, 1.8, D / 2 - 0.3, 0xdcdcd6, 0);
+  // The timetable case on the end panel, lit at night like the real ones.
+  k.box(W / 2 - 0.05, 0.9, -D / 2 + 0.3, W / 2 + 0.02, 1.8, D / 2 - 0.3, 0xe8e4d6, -0.35);
   return k.build();
 }
 function shelterGlassGeometry() {
@@ -3450,7 +3453,9 @@ const FURN_VERT_GLOW = /* glsl */`
   float face = max( 0.0, dot( normalize( transformedNormal ), camToV ) );
   float dist = length( mvPosition.xyz );
   float reach = 1.0 - smoothstep( 40.0, 260.0, dist );
-  vGlow = aGlow * uNight * face * face * reach;
+  // aGlow > 0: a retroreflector, bright when it faces the lamps behind you.
+  // aGlow < 0: lit from inside (a shelter's timetable case), whatever the angle.
+  vGlow = aGlow > 0.0 ? aGlow * uNight * face * face * reach : - aGlow * uNight;
   #ifdef FURN_ATLAS
     vCellGrey = aUv.x < -0.5 ? 1.0 : 0.0;
     vCellUv = aCell.xy + aUv * aCell.zw;

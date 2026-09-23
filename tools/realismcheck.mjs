@@ -17,7 +17,11 @@
 //      exact interface and a traffic budget; the pool carries them; each
 //      drives only the roads it should, at the speed it can; buses call at
 //      their stops.
-//   4. THE ROAD PULL. roads.js pulls the road toward the eye in depth; every
+//   4. THE ROADSIDE. Every post, rail, chevron, sign, shelter, pole and
+//      fence is placed by rule; this re-derives the rules from the road
+//      geometry and holds the plan to them, then drives a car through a
+//      post and watches it bend and come back.
+//   5. THE ROAD PULL. roads.js pulls the road toward the eye in depth; every
 //      ground decal that must stay visible over it has to be pulled by the
 //      same numbers, or it vanishes. Nothing else can see that headless.
 //
@@ -26,7 +30,7 @@ import * as THREE from 'three';
 import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildWorld } from '../src/world/layout.js';
+import { buildWorld, pointOnEdge, woodland } from '../src/world/layout.js';
 import { createGround } from '../src/world/ground.js';
 import { createVehicle } from '../src/physics/vehicle.js';
 import { createCollision } from '../src/physics/collision.js';
@@ -35,6 +39,7 @@ import { createCarModel, createFleet, ROAD_PULL, HEAVY_BODIES } from '../src/ren
 import { createTraffic, busStops, STAGGER } from '../src/ai/traffic.js';
 import { TRAFFIC, TRAFFIC_BY_ID } from '../src/vehicles/catalog.js';
 import { drawnSize, SOLID_FRACTION } from '../src/render/city.js';
+import { planRoadside, createRoadside, createRoads } from '../src/render/roads.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (f) => readFileSync(resolve(ROOT, f), 'utf8');
@@ -356,7 +361,125 @@ function overlapDepth(a, b) {
 }
 
 // ---------------------------------------------------------------------------
-// 4. The road pull
+// 4. The roadside
+// ---------------------------------------------------------------------------
+{
+  world.buildProps(ground);
+  const stops = busStops(world, ground);
+  const plan = planRoadside(world, ground, { stops, stagger: STAGGER, woodland: (x, z) => woodland(x, z, world.seed | 0) });
+  const n = Object.fromEntries(Object.entries(plan).map(([k, v]) => [k, v.length]));
+  console.log('  ' + Object.entries(n).map(([k, v]) => `${v} ${k}`).join(', '));
+  check('the country roads are furnished', n.posts >= 300 && n.rails >= 100 && n.chevrons >= 100 &&
+    n.signs >= 60 && n.shelters >= 20 && n.poles >= 100 && n.wires >= 60 && n.fences >= 500,
+    `${n.posts} posts, ${n.snowPoles} snow poles, ${n.rails} rail spans, ${n.chevrons} chevrons, ${n.signs} signs, ${n.shelters} shelters, ${n.poles} poles`);
+
+  // Nothing stands on a carriageway, or inside a building.
+  const road = {};
+  let onRoad = 0, inLot = 0, total = 0;
+  const pts = [];
+  for (const k of ['posts', 'snowPoles', 'railPosts', 'chevrons', 'signs', 'shelters', 'stopPoles', 'poles']) {
+    for (const p of plan[k]) pts.push([k, p.x, p.z]);
+  }
+  for (const f of plan.fences) pts.push(['fences', f.x0, f.z0]);
+  for (const [k, x, z] of pts) {
+    total++;
+    ground.roadAt(x, z, road);
+    if (road.onRoad || (road.edge && road.dist < road.width * 0.5 + 0.35)) onRoad++;
+    for (const l of world.lots) {
+      const c = Math.cos(l.rot), sn = Math.sin(l.rot), dx = x - l.x, dz = z - l.z;
+      if (Math.abs(dx * c + dz * sn) < l.w * 0.5 && Math.abs(-dx * sn + dz * c) < l.d * 0.5) { inLot++; break; }
+    }
+  }
+  check('nothing on a carriageway or inside a building', onRoad === 0 && inLot === 0,
+    `${onRoad} on a road, ${inLot} in a lot, of ${total} pieces`);
+
+  // Rails and chevrons are on the OUTSIDE of their bends, re-derived here
+  // from the road's own polyline rather than trusted from the plan.
+  const outsideOf = (x, z) => {
+    const r = ground.nearestRoad(x, z, 20);
+    const e = r.edge;
+    const a = pointOnEdge(e, Math.max(0, r.s - 8)), b = pointOnEdge(e, Math.min(e.length, r.s + 8));
+    const turn = Math.atan2(a.tx * b.tz - a.tz * b.tx, a.tx * b.tx + a.tz * b.tz);
+    const side = Math.sign((x - r.x) * -r.tz + (z - r.z) * r.tx);
+    return { R: 16 / Math.max(1e-6, Math.abs(turn)), outside: turn > 0 ? side < 0 : side > 0, side, turn };
+  };
+  let chevOut = 0, chevArrow = 0;
+  for (const c of plan.chevrons) {
+    const o = outsideOf(c.x, c.z);
+    if (o.outside) chevOut++;
+    // flip > 0: the board stands right of the road's +t; arrows point to
+    // its inside, which for a right-hand board is the traveller's left.
+    if ((c.flip > 0) === (o.side > 0)) chevArrow++;
+  }
+  check('chevrons stand on the outside of their bends', chevOut >= plan.chevrons.length * 0.95,
+    `${chevOut} of ${plan.chevrons.length} (the rest where two bends meet)`);
+  check('and point into them', chevArrow === plan.chevrons.length, `${chevArrow} of ${plan.chevrons.length}`);
+  let railOut = 0;
+  for (const r of plan.rails) {
+    const o = outsideOf((r.x0 + r.x1) / 2, (r.z0 + r.z1) / 2);
+    const rr = ground.nearestRoad((r.x0 + r.x1) / 2, (r.z0 + r.z1) / 2, 20);
+    const gap = rr.dist - rr.edge.width * 0.5;
+    if (o.outside || o.R > 150) if (gap > 0.6 && gap < 1.6) railOut++;
+  }
+  check('guard rails line the outside of bends, a metre off the edge', railOut >= plan.rails.length * 0.95,
+    `${railOut} of ${plan.rails.length} spans`);
+
+  // Every sign faces the traffic coming at it and names real places, each once.
+  const names = new Set([...(world.garages || []).map((g) => g.name), ...(world.circuits || []).map((c) => c.name),
+    ...(world.districts || []).filter((d) => d.biome !== undefined).map((d) => d.name)]);
+  let facing = 0, named = 0, distinct = 0;
+  for (const sg of plan.signs) {
+    const r = ground.nearestRoad(sg.x, sg.z, 20);
+    const fx = Math.sin(sg.yaw), fz = Math.cos(sg.yaw);
+    if (Math.abs(fx * r.tx + fz * r.tz) > 0.9) facing++;
+    if (sg.lines.every((l) => names.has(l.name) && l.km > 0 && l.km < 6)) named++;
+    if (new Set(sg.lines.map((l) => l.name)).size === sg.lines.length) distinct++;
+  }
+  check('direction signs face the road and name real places, once each',
+    facing === plan.signs.length && named === plan.signs.length && distinct === plan.signs.length,
+    `${facing} face along the road, ${named} name places on the map, ${distinct} list each once (of ${plan.signs.length})`);
+  let byStop = 0;
+  // Within the stagger, the search along the verge (12 m) and the set-back.
+  for (const sh of plan.shelters) if (stops.some((st) => Math.hypot(st.x - sh.x, st.z - sh.z) < STAGGER + 12 + 10)) byStop++;
+  check('every shelter stands at a bus stop', byStop === plan.shelters.length && plan.shelters.length >= stops.length,
+    `${byStop} of ${plan.shelters.length}, for ${stops.length} stops`);
+
+  // The renderer: kinds drawn, and a post bent by a car that drives through it.
+  const scene = new THREE.Scene();
+  const rs = createRoadside(plan, { quality: 'medium' });
+  scene.add(rs.group);
+  const post = plan.posts[40];
+  const cam = new THREE.Vector3(post.x, post.y + 3, post.z + 8);
+  rs.update(cam, 1 / 60, null);
+  let tris = 0;
+  for (const f of rs.fields) if (f.mesh.count) tris += f.mesh.count * (f.mesh.geometry.index.count / 3);
+  check('the roadside is a handful of draws, whatever is in reach', rs.drawCalls <= 16 && tris < 200000,
+    `${rs.drawCalls} draws, ${rs.stats.kinds} kinds, ${(tris / 1000).toFixed(0)}k triangles in reach of one post`);
+  const postsF = rs.fields.find((f) => f.name === 'posts');
+  const idx = plan.posts.indexOf(post);
+  const r0 = ground.nearestRoad(post.x, post.z, 20);
+  const car = { x: post.x - r0.tx * 6, z: post.z - r0.tz * 6, yaw: Math.atan2(-r0.tx, -r0.tz), speed: 12,
+    vx: r0.tx * 12, vz: r0.tz * 12, spec: { track: 1.6, wheelbase: 2.6 } };
+  let peak = 0;
+  for (let i = 0; i < 60; i++) {
+    car.x += r0.tx * 12 / 60; car.z += r0.tz * 12 / 60;
+    rs.update(cam, 1 / 60, car);
+    peak = Math.max(peak, postsF.extras.aBend.src[idx * 3]);
+  }
+  car.speed = 0;
+  for (let i = 0; i < 240; i++) rs.update(cam, 1 / 60, car);
+  const after = Math.abs(postsF.extras.aBend.src[idx * 3]);
+  check('a post driven through bends over and springs back', peak > 0.6 && after < 0.02,
+    `bent to ${(peak * 57.3).toFixed(0)} deg, ${(after * 57.3).toFixed(1)} deg four seconds later`);
+  scene.userData.sky = { night: 1 };
+  const roadsLike = new THREE.Group(); scene.add(roadsLike); roadsLike.add(rs.group);
+  rs.update(cam, 1 / 60, null);
+  const lit = rs.fields[0].mesh.material;
+  rs.dispose();
+}
+
+// ---------------------------------------------------------------------------
+// 5. The road pull
 // ---------------------------------------------------------------------------
 {
   const roads = read('src/render/roads.js');

@@ -33,6 +33,7 @@
 // lateral error is self-correcting rather than accumulating.
 
 import { clamp, lerp, mulberry } from '../world/noise.js';
+import { pointOnEdge } from '../world/layout.js';
 import { CARS, TRAFFIC, specFor } from '../vehicles/catalog.js';
 
 const TAU = Math.PI * 2;
@@ -92,7 +93,9 @@ export function busStops(world, ground) {
     const r = ground.nearestRoad(a.x, a.z, a.garage ? 90 : 150, ok);
     if (!r) continue;
     const s = clamp(r.s, 30 + STAGGER, r.edge.length - 30 - STAGGER);
-    stops.push({ edge: r.edge.i, s, x: r.x, z: r.z, garage: !!a.garage });
+    // Where the stop actually is once kept clear of the junctions.
+    const p = pointOnEdge(r.edge, s);
+    stops.push({ edge: r.edge.i, s, x: p.x, z: p.z, garage: !!a.garage });
   }
   return stops;
 }

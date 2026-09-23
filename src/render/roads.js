@@ -11,44 +11,65 @@
 //     polyline segment under it is 8 m or 80, and leaves no second surface to
 //     fight with.
 //
-//   * One texture for the whole network. Seven road styles, sidewalk, kerb and
-//     the two junction fills are stacked into a single atlas, so a region costs
-//     one draw call instead of eleven. The atlas is a vertical stack: U runs
-//     across the carriageway and uses the full texture width, so only V is
-//     sub-ranged. Each row carries an 8 px guard band top and bottom holding a
-//     copy of the opposite edge — without it the hand-rolled V wrap shows a
-//     hairline seam every tile, because bilinear filtering reads whatever row
-//     happens to be adjacent in the atlas.
+//   * One set of textures for the whole network, so a region is one draw call
+//     however many kinds of road run through it.
 //
 // The ribbon sits 4 cm above ground.heightAt() with polygon offset as well.
 // 4 cm is well inside the suspension's own travel so nothing reads as floating,
 // and the height comes from the same field the physics stands on — what you see
 // and what you drive on cannot disagree.
 //
-// SURFACE DETAIL — three decisions worth knowing before changing anything here
+// WHY THE ROADS USED TO LOOK LIKE A PIXEL MOSAIC
 //
-//   * There are TWO atlases, not one: albedo and a tangent-space normal map,
-//     built in the same pass from the same relief buffer and stacked to the
-//     IDENTICAL row layout, so one set of UVs addresses both. Everything the
-//     surface has — aggregate, ruts, cracks, potholes, kerb arrises, slab
-//     joints — is a height first and a colour second. Without the normal map a
-//     road under a low sun or a headlight is a photograph of tarmac lying flat
-//     on the ground; with it the same texels catch the light and the surface
-//     has a direction. It costs no draw calls: one extra sampler on the one
-//     material every region already shares.
+// Measured, not guessed. Every road style, the kerb, the pavement and the
+// junction fills were stacked as rows of ONE 512 px wide canvas no taller than
+// 2048 px, so each row got a slice of that height: 150 to 304 texels to cover
+// 24 m of road. That is 8 to 16 cm per texel ALONG the road against 1.5 to
+// 2.3 cm across it — texels five to nine times longer than they were wide. The
+// stone and crack noise was then generated right at that texel scale. Near the
+// car a screen pixel covers about a centimetre of road, so every one of those
+// long texels was magnified into a visible rectangle, and the thresholded stone
+// field became a chequerboard of them. That is the mosaic. At range the other
+// half of the design bit: the atlas was 1790 px tall (not a power of two) with
+// an 8 px guard between rows, so by the third mip level, and much earlier
+// under anisotropic filtering, a road was being averaged with whichever surface
+// happened to sit next to it in the stack.
 //
-//   * Row heights are shared out by NEED, not evenly. A row is 512 px across
-//     the carriageway but only ~200 down 24 m of it, so the along-road axis is
-//     the scarce one, and it is scarce in very different amounts: the kerb is
-//     an 8.5 cm face whose only lengthwise feature is a joint every 1.2 m,
-//     while a gravel lane is nothing BUT lengthwise structure. Weighting the
-//     split buys the unpaved rows 40% more resolution for free.
+// WHAT REPLACED IT
 //
-//   * Noise here is periodic by construction (pvalue/pfbm below) rather than
-//     cross-faded across the tile seam. The old cross-fade flattened the grain
-//     toward the middle of every tile, which showed up as a soft horizontal
-//     band every 24 m of road — visible in the atlas and visible in the game.
-//     Exact periodicity removes the band AND halves the sample count.
+//   * A TEXTURE ARRAY, one layer per surface, every layer the same 256 x 1024.
+//     24 m of road now gets 1024 texels: 2.3 cm along, 3 to 5 cm across, so the
+//     texels are near-square. Layers cannot bleed into each other at any mip
+//     level, the sampler wraps V by itself, and the guard bands and hand-rolled
+//     wrap are gone.
+//
+//   * A DETAIL LAYER for everything smaller than that — asphalt chippings,
+//     loose gravel, earth, concrete grain — tiled every 1.6 m in WORLD space at
+//     3 mm per texel. It is what the eye reads as "road" at the bottom of the
+//     screen, and it is continuous across junctions because it does not care
+//     which ribbon it is on. Its albedo is mean-neutral, so it adds grain
+//     without moving the colour the macro layer chose.
+//
+//   * VARIANTS. A 24 m tile with a pothole in it is a pothole every 24 m, and
+//     at 30 m/s that is a rhythm the eye locks onto inside a second. Each road
+//     kind is painted twice with different repairs, holes and sealed cracks,
+//     and each tile picks one by hash. Everything within SEAM metres of a tile
+//     end is shared by every variant, so any sequence of them is seamless.
+//
+//   * A real surface model. The material is PBR: polished wheel paths, bled
+//     binder and crack sealant are glossier than the chippings around them, so
+//     a low sun picks the wheel tracks out the way it does on a real lane. Rain
+//     darkens the surface and fills the ruts and potholes first. The sky the
+//     road reflects is the sky the sky module draws, handed over each frame.
+//
+//   * A ragged edge. A country road does not stop in a ruled line: the last
+//     handspan of tarmac breaks up into chippings and the gravel shoulder. A
+//     narrow fringe strip either side does that by alpha test, so the edge
+//     blends into the verge instead of sitting on it like a sheet of paper.
+//
+// All of it is still generated from the seed at load, and none of it needs a
+// canvas, which means the headless harness builds the exact textures the
+// browser does and can measure them.
 
 import * as THREE from 'three';
 import { pointOnEdge } from '../world/layout.js';
@@ -62,62 +83,75 @@ const TILE = 24;            // m of road per texture repeat
 const VSTEPS = 3;           // stations per tile, so V lands on exact thirds
 const STEP = TILE / VSTEPS; // 8 m, which is also layout.js's densify() spacing
 
-const ATLAS_W = 512;
-const GUARD = 8;
-const SLOT_MIN = 64;        // below this a row cannot hold its own joint spacing
-const SLOT_MAX = 320;       // above this the extra texels buy nothing measurable
-const ATLAS_MAX = 2048;     // the WebGL2 floor for MAX_TEXTURE_SIZE
+// Layer size. 1024 along 24 m is 2.3 cm per texel, which is about what a
+// screen pixel covers five metres ahead of the car; finer than that is the
+// detail layer's job. Across, 256 texels spans the widest road in this world
+// (12 m) at under 5 cm. A world with a 26 m highway gets 512 automatically.
+const LAYER_H = 1024;
+const LAYER_W_NARROW = 256;
+const LAYER_W_WIDE = 512;
+
+// Every variant of a kind is identical within this many metres of either tile
+// end, which is what lets any variant follow any other without a seam.
+const SEAM = 1.6;
+
+// Detail layer: 512 texels over 1.6 m of world, so 3.1 mm per texel.
+const DETAIL_PX = 512;
+const DETAIL_M = 1.6;
+const DETAIL = { asphalt: 0, gravel: 1, dirt: 2, concrete: 3, none: -1 };
+
+// How far the ragged edge reaches past the carriageway, in metres. A circuit's
+// edge is a built edge and stays crisp.
+const FRINGE = { paved: 0.85, loose: 0.75, circuit: 0 };
 
 // How hard a road has been used, which is the one number the whole wear model
 // hangs off: it drives binder oxidation (old asphalt is grey, not black), how
 // far the markings have faded, how much cracking and patching there is, and
 // whether there are potholes at all. Highways get resurfaced; a country lane
-// gets patched until it is more patch than road.
+// gets patched until it is more patch than road. A circuit is resurfaced every
+// few seasons and swept before every meeting.
 const AGE = {
-  highway: 0.30, avenue: 0.46, link: 0.52, street: 0.64, rural: 0.86,
-  gravel: 0.70, dirt: 0.80, track: 0.92,
+  highway: 0.30, avenue: 0.46, link: 0.52, street: 0.64, rural: 0.80,
+  circuit: 0.10, gravel: 0.70, dirt: 0.80, track: 0.92, rallyx: 0.95,
 };
 
-// Share of the atlas height each row asks for.
-//
-// The along-road axis is the scarce one — a row is 512 px across the
-// carriageway but only ~200 down 24 m of it — and the rows need it in very
-// different amounts. Unpaved lanes are nothing BUT lengthwise structure (ruts,
-// corrugation, stones); a highway needs enough to place an expansion joint
-// every 6 m; a city street's wear is almost entirely longitudinal and reads off
-// the width instead; a kerb's only lengthwise feature is a joint every 1.2 m,
-// and a junction fill has none at all. Splitting the budget evenly, as this
-// used to, spent a third of the atlas on the rows with the least to say.
-const WEIGHT = {
-  highway: 1.30, avenue: 0.95, link: 0.95, street: 0.95, rural: 1.20,
-  gravel: 1.40, dirt: 1.40, track: 1.40, walk: 0.62, kerb: 0.60, patch: 0.55,
+// How many differently-worn copies of each kind to paint. Every copy costs a
+// 256 x 1024 layer in each of two textures (1.4 MB each with mips).
+const VARIANTS = {
+  rural: 2, street: 2, avenue: 2, link: 2, highway: 2,
+  // A circuit has no repairs, holes or sealed cracks, so a second copy of it
+  // would differ only in where its few hairline cracks run. Not worth a layer.
+  circuit: 1,
+  gravel: 2, dirt: 2, track: 2, rallyx: 2,
 };
 
-// The three unpaved kinds are three different roads, not one drawn at three
-// widths. `stony` is how much of the surface is loose stone rather than earth,
-// and `used` is how completely traffic has claimed it — the pair decides the
+// The unpaved kinds are different roads, not one drawn at different widths.
+// `stony` is how much of the surface is loose stone rather than earth, and
+// `used` is how completely traffic has claimed it — the pair decides the
 // dressing, the depth of the ruts and whether anything grows down the middle.
+// The rallycross is stone over hardpack and is driven flat out lap after lap,
+// so it has no crown of grass and the racing line is scoured bare.
 const LOOSE = {
   gravel: { stony: 1.00, used: 0.90 },
   dirt:   { stony: 0.42, used: 0.70 },
   track:  { stony: 0.26, used: 0.28 },
+  rallyx: { stony: 0.88, used: 1.00 },
 };
 
 // Cull distances, NOT the engine's raw tier draw distances. Culling a region
 // the player can still see is worse than drawing it: sky.js does not close its
 // fog until drawDistance * 1.55 in clear weather, so a road dropped at the raw
 // tier figure vanishes over bare terrain while it is still well over half
-// visible. These are the four engine tiers carried out to where the fog
-// actually hides them. Costs nothing here — every region shares one material,
-// and the frustum still throws away everything behind the camera.
+// visible. Costs nothing here — every region shares one material, and the
+// frustum still throws away everything behind the camera.
 //
-// `normals` drops the normal map on the lowest tier. That is a shader-program
-// change, so it may only ever happen on a quality switch, never per frame.
+// `normals` drops the normal and detail relief on the lowest tier. That is a
+// shader-program change, so it may only ever happen on a quality switch.
 const QUALITY = {
-  low:    { anisotropy: 1,  drawDistance: 2170, normals: false },  // engine tier 1400
-  medium: { anisotropy: 4,  drawDistance: 3410, normals: true },   // engine tier 2200
-  high:   { anisotropy: 8,  drawDistance: 4960, normals: true },   // engine tier 3200
-  ultra:  { anisotropy: 16, drawDistance: 6980, normals: true },   // engine tier 4500
+  low:    { anisotropy: 2,  drawDistance: 2170, normals: false },
+  medium: { anisotropy: 8,  drawDistance: 3410, normals: true },
+  high:   { anisotropy: 12, drawDistance: 4960, normals: true },
+  ultra:  { anisotropy: 16, drawDistance: 6980, normals: true },
 };
 
 /** SURFACES stores 0xRRGGBB; every colour in this file is a 0..255 triple. */
@@ -130,6 +164,12 @@ function mix3(a, b, t) {
   return [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)];
 }
 
+/** sRGB 0..255 to linear 0..1, for colours handed to the shader as uniforms. */
+function lin(c) {
+  const s = c / 255;
+  return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+}
+
 /**
  * A row's own seed, keyed on the road KIND as well as its width.
  *
@@ -137,8 +177,7 @@ function mix3(a, b, t) {
  * 7.5 m, so a width-derived seed handed both of them the SAME RNG stream and
  * the same noise seed — identical stones, identical blotches, and potholes in
  * identical places on the two roads whose whole point is that they are not the
- * same road. Folding the kind in closes the class of collision rather than the
- * one instance of it, and costs a dozen character codes at load.
+ * same road.
  */
 function rowSeed(kind, width) {
   let h = 0;
@@ -146,66 +185,65 @@ function rowSeed(kind, width) {
   return width * 17 + (h & 0xffff);
 }
 
-// ---------------------------------------------------------------------------
-// Tileable noise
-// ---------------------------------------------------------------------------
+const quinticT = (t) => t * t * t * (t * (t * 6 - 15) + 10);
 
-function quinticT(t) { return t * t * t * (t * (t * 6 - 15) + 10); }
+// ---------------------------------------------------------------------------
+// Lattice noise
+// ---------------------------------------------------------------------------
 
 /**
- * Value noise that repeats EXACTLY every `pz` lattice cells along z.
+ * Value noise in METRE space that repeats exactly every TILE metres along the
+ * road and is clamped across it, returned as a function (m, mz) -> [-1, 1].
  *
- * The z lattice index is taken modulo pz before hashing, so the cell at the end
- * of the tile shares its corners with the cell at the start and the surface is
- * continuous across the seam with no blending anywhere. mz is never negative in
- * the row painters, so the plain % is safe.
- */
-function pvalue(x, z, pz, seed) {
-  const x0 = Math.floor(x), z0 = Math.floor(z);
-  const u = quinticT(x - x0), v = quinticT(z - z0);
-  const za = z0 % pz, zb = (z0 + 1) % pz;
-  const a = hash2(x0, za, seed), b = hash2(x0 + 1, za, seed);
-  const c = hash2(x0, zb, seed), d = hash2(x0 + 1, zb, seed);
-  const top = a + (b - a) * u, bot = c + (d - c) * u;
-  return (top + (bot - top) * v) * 2 - 1;
-}
-
-/**
- * Fractal sum of pvalue. Each octave doubles the frequency AND the period.
+ * The random lattice is built once up front instead of hashed per sample, which
+ * is four array reads against four integer hashes and makes the 1024-texel
+ * layers affordable at load. Periodicity is exact: the lattice index along the
+ * road is taken modulo the period, so the cell at the end of the tile shares
+ * its corners with the cell at the start and there is no seam and no blend.
  *
- * Octaves stop once the period passes `pmax`, the finest lengthwise detail this
- * row has the texels to hold. Rows differ by a factor of three in along-road
- * resolution, so a scale that is aggregate on a gravel lane is finer than a
- * texel on a junction fill; carrying it anyway does not produce fine detail, it
- * produces a moire of hard horizontal stripes, which is exactly what the short
- * rows showed before this was added. Dropping the octave is what mipmapping
- * would do and costs less than generating it.
+ * `sx` and `sz` are deliberately different: tarmac grain IS streaked along the
+ * direction of travel by tyre polish and water runoff. `sz` is snapped to a
+ * whole number of cells per tile, and every octave doubles both frequency and
+ * period. Octaves stop once a cell would be under `minTexels` texels long,
+ * because noise finer than the texel grid is not detail, it is moire.
  */
-function pfbm(x, z, pz, seed, oct, pmax) {
-  let sum = 0, amp = 1, f = 1, norm = 0, p = pz;
+function makeField(width, sx, sz, seed, oct, texPerTile, minTexels = 2.6) {
+  const pmax = Math.max(2, Math.floor(texPerTile / minTexels));
+  const levels = [];
+  let p = Math.min(pmax, Math.max(1, Math.round(TILE / sz)));
+  let fx = 1 / sx, amp = 1, norm = 0;
   for (let o = 0; o < oct; o++) {
-    sum += pvalue(x * f, z * f, p, seed + o * 1013) * amp;
-    norm += amp; amp *= 0.5; f *= 2; p *= 2;
+    const nx = Math.ceil(width * fx) + 2;
+    const a = new Float32Array(nx * p);
+    const s = seed + o * 1013;
+    for (let j = 0; j < p; j++) for (let i = 0; i < nx; i++) a[j * nx + i] = hash2(i, j, s) * 2 - 1;
+    levels.push({ a, nx, p, fx, fz: p / TILE, amp });
+    norm += amp; amp *= 0.5; fx *= 2; p *= 2;
     if (p > pmax) break;
   }
-  return sum / norm;
+  const inv = 1 / norm, n = levels.length;
+  return function field(m, mz) {
+    let sum = 0;
+    for (let k = 0; k < n; k++) {
+      const L = levels[k];
+      const x = m * L.fx, z = mz * L.fz;
+      let x0 = Math.floor(x), z0 = Math.floor(z);
+      const u = quinticT(x - x0), v = quinticT(z - z0);
+      if (x0 < 0) x0 = 0; else if (x0 > L.nx - 2) x0 = L.nx - 2;
+      z0 %= L.p; if (z0 < 0) z0 += L.p;
+      const z1 = z0 + 1 === L.p ? 0 : z0 + 1;
+      const ra = z0 * L.nx + x0, rb = z1 * L.nx + x0;
+      const A = L.a[ra], B = L.a[ra + 1], C = L.a[rb], D = L.a[rb + 1];
+      const top = A + (B - A) * u, bot = C + (D - C) * u;
+      sum += (top + (bot - top) * v) * L.amp;
+    }
+    return sum * inv;
+  };
 }
 
-/**
- * Noise in METRE space that repeats exactly every TILE metres along the road.
- *
- * Metre space matters because a row is 512 px across a 9.5 m lane but only
- * ~200 px along 24 m of it — sampling in pixel space would smear the aggregate
- * into stripes at wildly different scales on every road kind. `sx` and `sz` are
- * deliberately different: real tarmac grain IS streaked along the direction of
- * travel by tyre polish and water runoff. `sz` is snapped to a whole number of
- * cells per tile, so the requested lengthwise scale is honoured to within that
- * rounding and not exactly — and it is clamped to `pmax`, so a row that is only
- * 74 px down 24 m of road never asks for half-metre detail it cannot hold.
- */
-function nfield(m, mz, sx, sz, seed, oct, pmax) {
-  const P = Math.min(pmax, Math.max(1, Math.round(TILE / sz)));
-  return pfbm(m / sx, (mz / TILE) * P, P, seed, oct, pmax);
+/** 1 in the middle of a tile, 0 within SEAM of either end. */
+function seamWeight(mz) {
+  return smoothstep(0, SEAM, mz) * smoothstep(0, SEAM, TILE - mz);
 }
 
 // ---------------------------------------------------------------------------
@@ -216,6 +254,8 @@ function nfield(m, mz, sx, sz, seed, oct, pmax) {
  * Longitudinal stripes for one road style, in metres from the left edge.
  * `dash`/`gap` cycles are chosen to divide TILE exactly (3+9 and 2+4 both do),
  * otherwise the dash pattern would visibly stutter at every texture repeat.
+ * Every plan is symmetric about the centre line, which is what lets a whole
+ * road be mirrored across its width for variety without the paint noticing.
  */
 function markingPlan(markings, width, lanes) {
   const out = [];
@@ -244,7 +284,15 @@ function markingPlan(markings, width, lanes) {
   } else if (markings === 'street') {
     line(c, 0.15, 2, 4);
   } else if (markings === 'rural') {
+    // Dashed centre line and solid edge lines 35 cm in. The edge lines are the
+    // single strongest cue that a strip of tarmac is a ROAD rather than a path:
+    // they give the eye the road's width at a glance, even at night.
     line(c, 0.14, 3, 9);
+    line(0.35, 0.10); line(width - 0.35, 0.10);
+  } else if (markings === 'circuit') {
+    // Track limits: a solid white line along each edge, and nothing down the
+    // middle, because a circuit has no oncoming traffic to separate.
+    line(0.28, 0.12); line(width - 0.28, 0.12);
   }
   return out;
 }
@@ -263,34 +311,38 @@ function wheelTracks(markings, width, lanes) {
 }
 
 // ---------------------------------------------------------------------------
-// Wear features, drawn from the spec's own seed
+// Wear features, drawn from each variant's own seed
 // ---------------------------------------------------------------------------
+//
+// Every one of these is placed clear of the tile ends by SEAM plus its own
+// half-length, which is the other half of the seamless-variant guarantee.
+
+function placeAlong(rnd, halfLen) {
+  const lo = SEAM + halfLen + 0.1, hi = TILE - SEAM - halfLen - 0.1;
+  return hi > lo ? lo + rnd() * (hi - lo) : TILE / 2;
+}
 
 /**
  * Patch repairs, as boxes in (across, along) metres with a sealed overband.
  *
  * Two shapes, because real roads have two: a trench reinstatement that crosses
  * the whole carriageway where a service was laid, and a squarish pothole repair
- * a metre or two across. Both are stored by centre so the along-road test can
- * wrap the tile in one subtraction.
+ * a metre or two across.
  */
 function makePatches(rnd, width, age, full) {
   const out = [];
-  const n = Math.round(0.6 + 5.4 * age * age);
+  const n = Math.round(0.4 + 3.6 * age * age);
   for (let i = 0; i < n; i++) {
     const trench = rnd() < full;
     const hm = trench ? width * 0.52 : 0.35 + rnd() * 1.30;
+    const hz = trench ? 0.50 + rnd() * 0.85 : 0.45 + rnd() * 1.45;
     out.push({
       mc: trench ? width * 0.5 : hm + rnd() * Math.max(0.1, width - 2 * hm),
-      hm,
-      zc: rnd() * TILE,
-      hz: trench ? 0.50 + rnd() * 0.85 : 0.45 + rnd() * 1.45,
-      // A repair is newer than the road around it, so it is darker; one in five
-      // is an older repair that has itself gone grey.
+      hm, hz, zc: placeAlong(rnd, hz + 0.1),
       // A fresh repair is darker than the road around it, but only by about a
       // quarter — pushed further it stops reading as asphalt and starts reading
       // as a hole. One in five is an older repair that has itself gone grey.
-      tone: rnd() < 0.2 ? 1.05 + rnd() * 0.10 : 0.78 + rnd() * 0.15,
+      tone: rnd() < 0.2 ? 1.05 + rnd() * 0.10 : 0.76 + rnd() * 0.14,
       seal: 0.045 + rnd() * 0.045,
     });
   }
@@ -304,9 +356,37 @@ function makeHoles(rnd, width, n, deep) {
     const rx = 0.16 + rnd() * 0.34;
     const rz = rx * (0.7 + rnd() * 0.9);
     out.push({
-      m: 0.45 + rnd() * Math.max(0.1, width - 0.9), z: rnd() * TILE,
-      rx, irx2: 1 / (rx * rx), irz2: 1 / (rz * rz),
+      m: 0.45 + rnd() * Math.max(0.1, width - 0.9), z: placeAlong(rnd, rz * 1.4),
+      rx, rz, irx2: 1 / (rx * rx), irz2: 1 / (rz * rz),
       depth: deep * (0.45 + rnd() * 0.75),
+    });
+  }
+  return out;
+}
+
+/**
+ * Transverse cracks, most of them sealed with a bead of black bitumen.
+ *
+ * Old asphalt cracks ACROSS the road from thermal contraction, every few
+ * metres, and on a country lane the council runs a bead of sealant down each
+ * one. These wandering glossy black lines — "tar snakes" — are one of the most
+ * recognisable things about a real rural road, and nothing else in the texture
+ * runs across the direction of travel.
+ */
+function makeTransverse(rnd, width, age) {
+  const out = [];
+  const n = Math.round(age * age * 4.2);
+  for (let i = 0; i < n; i++) {
+    out.push({
+      z: placeAlong(rnd, 0.35),
+      amp: 0.06 + rnd() * 0.20,           // m of wander either side
+      k: 1.4 + rnd() * 2.2,               // wander wavenumber per metre across
+      ph: rnd() * 6.283,
+      sealed: rnd() < 0.8,
+      w: 0.012 + rnd() * 0.012,           // half-width of the crack itself
+      seal: 0.028 + rnd() * 0.020,        // half-width of the sealant bead
+      from: rnd() < 0.5 ? 0 : rnd() * width * 0.45,
+      to: rnd() < 0.5 ? width : width * (0.55 + rnd() * 0.45),
     });
   }
   return out;
@@ -317,8 +397,9 @@ function makeScuffs(rnd, n) {
   const out = [];
   for (let i = 0; i < n; i++) {
     const chip = rnd() < 0.3;
+    const hz = chip ? 0.05 + rnd() * 0.09 : 0.12 + rnd() * 0.40;
     out.push({
-      z: rnd() * TILE, hz: chip ? 0.05 + rnd() * 0.09 : 0.12 + rnd() * 0.40,
+      z: placeAlong(rnd, hz), hz,
       u: chip ? 0.80 + rnd() * 0.18 : 0.12 + rnd() * 0.55,
       hu: chip ? 0.07 + rnd() * 0.07 : 0.10 + rnd() * 0.22,
       chip, k: 0.35 + rnd() * 0.5,
@@ -328,8 +409,12 @@ function makeScuffs(rnd, n) {
 }
 
 // ---------------------------------------------------------------------------
-// Row specifications
+// Specifications
 // ---------------------------------------------------------------------------
+//
+// A spec describes a FAMILY: everything its variants share (colours, the
+// profile across the road, the noise fields) plus a `variant(i)` function that
+// returns the discrete features only that copy has.
 
 /**
  * A sealed carriageway: base tone, wheel-track polish, wear and markings.
@@ -343,63 +428,76 @@ function makeScuffs(rnd, n) {
  * consistent with the rutting in the relief buffer.
  */
 function pavedSpec(kind, markings, width, lanes, seed) {
-  const rnd = mulberry((Math.imul(seed, 2654435761) ^ 0x9e37) >>> 0);
   const age = AGE[kind] ?? 0.5;
   const city = kind === 'street' || kind === 'avenue' || kind === 'link';
+  const circuit = kind === 'circuit';
   const tracks = wheelTracks(markings, width, lanes);
 
-  return {
-    paint: 'paved', kind: 'road', width, seed, age,
-    weight: WEIGHT[kind] ?? WEIGHT.patch,
+  const spec = {
+    paint: 'paved', kind: 'road', surface: 'asphalt', width, seed, age,
+    variants: VARIANTS[kind] ?? 1,
     // Fresh asphalt is near-black; oxidised binder turns it grey, and that is
     // the difference between a motorway and a lane that was last surfaced a
     // generation ago far more than any amount of cracking is.
-    base: mix3([46, 48, 52], [88, 89, 92], age),
-    agg: [128, 129, 133],                  // exposed chippings
-    tar: [21, 20, 20],                     // bleed, sealant, crack shadow
-    ink: [232, 229, 215],                  // marking paint
+    base: mix3([44, 45, 48], [92, 92, 94], age),
+    agg: [132, 131, 128],                  // exposed chippings, slightly warm
+    tar: [18, 17, 17],                     // bleed, sealant, crack shadow
+    ink: [236, 233, 222],                  // marking paint
     // The verge outside a country road is the MAT_GRAVEL shoulder the ground
     // query hands the physics, so the last handspan of tarmac ravels toward it
     // and the ribbon edge does not meet the shoulder as a colour step.
     edgeCol: surfaceRGB('gravel', 1.15),
-    edgeMix: city ? 0.0 : 0.30 + 0.35 * age,
+    edgeMix: city || circuit ? 0.0 : 0.30 + 0.35 * age,
 
-    stripes: markingPlan(markings, width, lanes),
-    markAlpha: 0.95 - 0.52 * age,
-    tracks, trackW: 0.62,
-    trackCut: 0.045 + 0.055 * age,         // how much darker the polished path is
+    stripes: markingPlan(circuit ? 'circuit' : markings, width, lanes),
+    markAlpha: 0.97 - 0.50 * age,
+    tracks, trackW: circuit ? 1.10 : 0.62,
+    // A circuit's "wheel tracks" are the rubbered-in racing line: much darker
+    // and wider than a lane's polish, which is how a real track reads from the
+    // grandstand.
+    trackCut: circuit ? 0.20 : 0.055 + 0.065 * age,
     aggLift: 0.065 + 0.075 * age,          // how much lighter the untrodden rest is
     aggMix: 0.10 + 0.16 * age,
-    rutH: 0.004 + 0.008 * age,             // m of dish worn into each wheel path
+    rutH: circuit ? 0 : 0.004 + 0.008 * age,   // m of dish worn into each wheel path
     crownH: 0.055,                         // m of camber, normal map only
 
     gutter: city ? 0.42 : 0,
     joint: kind === 'highway' ? 6 : 0,     // m between expansion joints; divides TILE
     grime: 0.20 + 0.16 * age,
 
-    gx: 0.13, gz: 0.42, grainAmt: 0.09 + 0.06 * age, grainH: 0.0014 + 0.0013 * age,
-    // The blotch has to vary SLOWLY along the road. At the 5.5 m it started on
-    // it beat against the 2.6 m across and the pair read as wood grain.
-    bx: 3.4, bz: 13.0, blotchAmt: 0.030 + 0.035 * age,
-    bleedAmt: 0.10 + 0.42 * age,
+    gx: 0.16, gz: 0.30, grainAmt: 0.05 + 0.04 * age, grainH: 0.0008 + 0.0008 * age,
+    // The blotch has to vary SLOWLY along the road. At 5.5 m it beat against
+    // the 2.6 m across and the pair read as wood grain.
+    bx: 3.4, bz: 13.0, blotchAmt: 0.035 + 0.040 * age,
+    bleedAmt: circuit ? 0 : 0.10 + 0.42 * age,
     // Cracking is very non-linear in age: a road is sound, then suddenly it is
     // not. Squaring the age is what keeps highways clean and lanes broken.
     crackAmt: age * age,
-    crackW: 0.045 + 0.065 * age,
-    patches: makePatches(rnd, width, age, city ? 0.12 : 0.26),
-    holes: kind === 'rural' ? makeHoles(rnd, width, 4, 0.055) : [],
+    crackW: 0.040 + 0.055 * age,
+    gloss: circuit ? 0.30 : 0.20,
   };
+
+  spec.variant = (v) => {
+    const rnd = mulberry((Math.imul(seed + v * 7919, 2654435761) ^ 0x9e37) >>> 0);
+    return {
+      seed: seed + v * 7919,
+      patches: circuit ? [] : makePatches(rnd, width, age, city ? 0.12 : 0.26),
+      holes: kind === 'rural' ? makeHoles(rnd, width, v === 0 ? 2 : 3, 0.055) : [],
+      transverse: circuit ? [] : makeTransverse(rnd, width, age),
+    };
+  };
+  return spec;
 }
 
 /**
- * An unpaved lane. Two of them exist and they are not the same road.
+ * An unpaved lane. They are not the same road.
  *
  * kind 'gravel' is a dressed lane: loose stone over a compacted formation, well
  * used, so the stones are swept out of the ruts and banked either side. kind
  * 'dirt' is the same road without the dressing — mostly earth, some stone.
- * kind 'track' is the least-used of the three, and it is the one that grows
- * the raised line of grass down the middle, because a road only keeps that
- * where nothing straddles it.
+ * kind 'track' is the least-used, and it is the one that grows the raised line
+ * of grass down the middle, because a road only keeps that where nothing
+ * straddles it.
  *
  * The colours come straight out of SURFACES so the surface agrees with the
  * material the physics reports on it: the earth is SURFACES.dirt and the stone
@@ -407,69 +505,75 @@ function pavedSpec(kind, markings, width, lanes, seed) {
  * the shoulders either side are made of and what the wheels throw up.
  */
 function looseSpec(kind, width, seed) {
-  const rnd = mulberry((Math.imul(seed, 40503) ^ 0x51ed) >>> 0);
   const L = LOOSE[kind] ?? LOOSE.dirt;
   const stony = L.stony, used = L.used;
   const age = AGE[kind] ?? 0.8;
-  const earth = surfaceRGB('dirt', 1.34);
-  const dust = surfaceRGB('gravel', 1.30);
+  const earth = surfaceRGB('dirt', 1.10);
+  const dust = surfaceRGB('gravel', 1.16);
 
-  return {
-    paint: 'loose', kind: 'road', width, seed, age,
-    weight: WEIGHT[kind] ?? WEIGHT.patch,
+  const spec = {
+    paint: 'loose', kind: 'road', surface: stony > 0.6 ? 'gravel' : 'dirt', width, seed, age,
+    variants: VARIANTS[kind] ?? 1,
     base: mix3(earth, dust, stony * 0.72),
     dust,                                   // the fine film that settles on top
-    stoneLo: mix3(dust, [42, 40, 36], 0.42),
-    stoneHi: mix3(dust, [236, 232, 222], 0.36),
-    grass: [74, 86, 50],
+    stoneLo: mix3(dust, [44, 41, 37], 0.42),
+    stoneHi: mix3(dust, [232, 228, 218], 0.30),
+    grass: [70, 84, 46],
 
-    rut: [width * 0.5 - 0.82, width * 0.5 + 0.82],
-    rutW: lerp(0.44, 0.54, used),
-    rutCut: lerp(0.34, 0.20, used),
+    rut: kind === 'rallyx' ? [width * 0.5 - 1.1, width * 0.5 + 1.1] : [width * 0.5 - 0.82, width * 0.5 + 0.82],
+    rutW: lerp(0.44, 0.60, used),
+    // The wheel paths are compacted to a dark, fine, almost sealed surface;
+    // that pair of darker tracks is the first thing that says "gravel road".
+    rutCut: lerp(0.34, 0.26, used),
     rutH: lerp(0.078, 0.028, used),        // m — a track's ruts are real ruts
     bermH: lerp(0.030, 0.014, used) + 0.014 * stony,   // material pushed aside
     crownH: lerp(0.048, 0.010, used),      // the untouched strip between them
 
     // A dressed lane keeps a thin fringe; a track is being taken back.
     grassCrown: 0.98 * (1 - used) * (1 - 0.40 * stony),
-    grassEdge: lerp(0.46, 0.18, used),
+    grassEdge: lerp(0.46, 0.14, used),
 
-    gx: 0.10, gz: 0.45, grainAmt: 0.15 + 0.07 * stony, grainH: 0.005 + 0.005 * stony,
-    bx: 2.0, bz: 4.2, blotchAmt: 0.13,
-    // Larger aggregate, near-isotropic in metres. At ~10 px per metre along the
-    // road a stone under about 25 cm cannot be resolved lengthwise at all, so
-    // the scatter is deliberately coarse and the fine grain above carries the
-    // rest — streaked, which is how traffic leaves it anyway.
-    stoneS: lerp(0.30, 0.21, stony), stoneAmt: 0.20 + 0.50 * stony,
-    stoneH: 0.010 + 0.014 * stony,
+    // Near-isotropic and gentle: at 0.10 x 0.30 m this streaked the whole lane
+    // along its length and read as a brushed-metal smear rather than as earth.
+    gx: 0.12, gz: 0.18, grainAmt: 0.05 + 0.03 * stony, grainH: 0.003 + 0.003 * stony,
+    bx: 2.0, bz: 4.2, blotchAmt: 0.08,
+    // Stone CLUSTERS at a scale the macro layer can hold; the individual stones
+    // are the detail layer's. Kept soft, because a thresholded field at this
+    // scale is exactly what used to turn into a chequerboard.
+    stoneS: lerp(0.34, 0.24, stony), stoneAmt: 0.06 + 0.14 * stony,
+    stoneH: 0.006 + 0.008 * stony,
     // Corrugation. 24/44 m divides TILE a whole number of times, so the
     // washboard wraps; anything else beats against the tile and reads as a
     // rhythm change every 24 m. It only forms where traffic is regular.
     washL: 24 / 44, washH: (0.004 + 0.008 * stony) * used,
-    holes: makeHoles(rnd, width, 4 + Math.round(3 * age), 0.085),
-    patches: [],
-    dustFilm: 0.16 + 0.22 * stony,
+    dustFilm: 0.10 + 0.14 * stony,
+    gloss: 0.04,
   };
+  spec.variant = (v) => {
+    const rnd = mulberry((Math.imul(seed + v * 6007, 40503) ^ 0x51ed) >>> 0);
+    return { seed: seed + v * 6007, holes: makeHoles(rnd, width, 3 + Math.round(3 * age), 0.085) };
+  };
+  return spec;
 }
 
 /** Concrete paving, 4.2 m across, jointed every 1.2 m so it tiles into TILE. */
 function walkSpec(seed) {
   return {
-    paint: 'walk', kind: 'walk', width: WALK_W, seed, weight: WEIGHT.walk,
+    paint: 'walk', kind: 'walk', surface: 'concrete', width: WALK_W, seed, variants: 1,
     base: [118, 120, 126], agg: [158, 160, 165], grass: [78, 92, 54],
-    slab: 1.2, jointH: 0.006, chamfer: 0.05,
-    gx: 0.16, gz: 0.24, grainAmt: 0.075, grainH: 0.0011,
+    slab: 1.2, jointH: 0.006,
+    gx: 0.16, gz: 0.24, grainAmt: 0.06, grainH: 0.0008,
     bx: 1.4, bz: 1.8, blotchAmt: 0.05,
     // Grit and grime collect against the kerb, which is the road-side edge.
-    kerbGrime: 0.15, crackRate: 0.16,
+    kerbGrime: 0.15, crackRate: 0.16, gloss: 0.12,
+    variant: () => ({ seed }),
   };
 }
 
 /** The 8.5 cm kerb face. U runs up the face, so `width` here is the face param. */
 function kerbSpec(seed) {
-  const rnd = mulberry((Math.imul(seed, 374761393) ^ 0x2b7) >>> 0);
   return {
-    paint: 'kerb', kind: 'kerb', width: KERB, seed, weight: WEIGHT.kerb,
+    paint: 'kerb', kind: 'kerb', surface: 'none', width: KERB, seed, variants: 1,
     base: [132, 133, 137], agg: [168, 169, 172], tar: [26, 25, 25],
     slab: 1.2, jointH: 0.008,
     // A kerb is not a flat face: there is a chamfered arris at the top that
@@ -478,8 +582,11 @@ function kerbSpec(seed) {
     // an object rather than a painted stripe.
     arris: 0.86, arrisH: 0.009, gutterLine: 0.10,
     gx: 0.9, gz: 0.22, grainAmt: 0.09, grainH: 0.0012,
-    bx: 3.0, bz: 1.9, blotchAmt: 0.05,
-    scuffs: makeScuffs(rnd, 14),
+    bx: 3.0, bz: 1.9, blotchAmt: 0.05, gloss: 0.14,
+    variant: () => {
+      const rnd = mulberry((Math.imul(seed, 374761393) ^ 0x2b7) >>> 0);
+      return { seed, scuffs: makeScuffs(rnd, 14) };
+    },
   };
 }
 
@@ -487,62 +594,144 @@ function kerbSpec(seed) {
 function patchSpec(surface, seed) {
   if (surface !== 'asphalt') {
     const s = looseSpec(surface === 'gravel' ? 'gravel' : 'dirt', 20, seed);
-    s.kind = 'patch'; s.weight = WEIGHT.patch;
+    s.kind = 'patch'; s.variants = 1;
     // Nothing tracks a junction the same way twice, so it has no ruts.
     s.rut = []; s.grassCrown = 0; s.grassEdge = 0; s.washH = 0;
     return s;
   }
   const s = pavedSpec('street', 'none', 20, 1, seed);
-  s.kind = 'patch'; s.weight = WEIGHT.patch;
+  s.kind = 'patch'; s.variants = 1;
   s.stripes = []; s.tracks = []; s.gutter = 0; s.joint = 0;
   s.edgeMix = 0; s.grime = 0.06; s.crownH = 0;
   // A junction is scrubbed by every car that turns across it, so it is darker
   // and more polished than the roads feeding it, and it cracks in the middle.
   s.base = mix3(s.base, [40, 42, 46], 0.35);
-  s.aggLift = 0.05; s.aggMix = 0.07; s.crackAmt = 0.5; s.bleedAmt = 0.2;
+  s.aggLift = 0.05; s.aggMix = 0.07; s.crackAmt = 0.5; s.bleedAmt = 0.2; s.gloss = 0.28;
   return s;
 }
 
 // ---------------------------------------------------------------------------
-// Row painters
+// Painters
 // ---------------------------------------------------------------------------
 //
-// Each painter fills an ImageData with colour and a parallel Float32Array with
-// RELIEF IN METRES; reliefToNormal() turns the second into the normal map. Two
-// rules apply to all of them:
+// Each painter fills one layer: RGBA albedo (A = gloss), RELIEF IN METRES in
+// `H`, the relief that holds water in `Hw`, and painted-line coverage in `Pm`.
+// finishLayer() turns the last three into the second texture.
 //
 //   * anything that depends only on the metre ACROSS the row is hoisted into a
 //     column table, and anything that depends only on the metre ALONG it into a
-//     row table. The inner loop then costs a handful of noise samples instead
-//     of re-deriving a cross-section a hundred thousand times, which is what
-//     pays for the extra detail without lengthening the load.
+//     row table. The inner loop then costs a handful of lookups.
 //
-//   * every along-road test wraps the tile with one subtraction of the form
-//     `dz -= TILE * Math.round(dz / TILE)`. A pothole clipped by the end of the
-//     row would otherwise appear as a half pothole every 24 m — the same
-//     mistake the old marking scuffs had to correct for by hand.
+//   * the per-pixel noise fields are computed ONCE per family into `F` and
+//     shared by its variants, which is both why two variants cost barely more
+//     than one and why they agree exactly near the tile ends.
+
+function fieldsFor(spec, w, h) {
+  const n = w * h;
+  const mPerX = spec.width / w, mPerY = TILE / h;
+  const F = { g: new Float32Array(n), bn: new Float32Array(n), c1: null, c2: null };
+  const seed = spec.seed;
+  const W = spec.width;
+  // The kerb's U runs up an 8.5 cm face, so its across-scales are given as a
+  // fraction of that face rather than in metres.
+  const kx = spec.paint === 'kerb' ? W : 1;
+  // One octave of grain is enough now: everything finer is the detail layer's.
+  const grain = makeField(W, spec.gx * kx, spec.gz, seed, 1, h);
+  const blotch = makeField(W, spec.bx * kx, spec.bz, seed + 91, 2, h);
+  let f1 = null, f2 = null;
+  // Which columns the second field is ever read in. Fatigue crazing only grows
+  // in the wheel paths and grass only on the crown and the edges, so the rest
+  // of the layer never pays for it.
+  const need2 = new Uint8Array(w);
+  if (spec.paint === 'paved') {
+    if (spec.crackAmt > 0.002) {
+      F.c1 = new Float32Array(n);
+      f1 = makeField(W, 0.22, 14.0, seed + 55, 2, h);
+      if (spec.age > 0.55) {
+        F.c2 = new Float32Array(n);
+        f2 = makeField(W, 0.30, 0.40, seed + 311, 2, h);
+        for (let px = 0; px < w; px++) {
+          const m = (px + 0.5) * mPerX;
+          let p = 0;
+          for (const t of spec.tracks) { const q = (m - t) / spec.trackW; p += Math.exp(-q * q); }
+          need2[px] = p > 0.19 ? 1 : 0;
+        }
+      }
+    }
+  } else if (spec.paint === 'loose') {
+    F.c1 = new Float32Array(n);
+    F.c2 = new Float32Array(n);
+    f1 = makeField(W, spec.stoneS, spec.stoneS * 1.5, seed + 77, 2, h);
+    f2 = makeField(W, 0.7, 2.4, seed + 7, 2, h);
+    const c = W / 2;
+    for (let px = 0; px < w; px++) {
+      const m = (px + 0.5) * mPerX;
+      const cq = (m - c) / 0.62;
+      const gk = spec.grassCrown * Math.exp(-cq * cq) + spec.grassEdge * (1 - smoothstep(0, 1.1, Math.min(m, W - m)));
+      need2[px] = gk > 0.002 ? 1 : 0;
+    }
+  }
+
+  // The blotch varies over metres, so it is sampled on a grid four texels
+  // apart and interpolated. Measured against the full-rate field the largest
+  // difference is under 0.3% of its range, and it is a fifth of the cost.
+  const S = 4;
+  const cw = Math.ceil(w / S) + 2, ch = Math.ceil(h / S);
+  const coarse = new Float32Array(cw * ch);
+  for (let j = 0; j < ch; j++) {
+    const mz = (j * S + 0.5) * mPerY;
+    for (let k = 0; k < cw; k++) coarse[j * cw + k] = blotch(Math.min(W, (k * S + 0.5) * mPerX), mz);
+  }
+
+  for (let py = 0, i = 0; py < h; py++) {
+    const mz = (py + 0.5) * mPerY;
+    const j0 = Math.floor(py / S), fj = (py - j0 * S) / S;
+    const j1 = j0 + 1 === ch ? 0 : j0 + 1;               // wraps with the tile
+    const r0 = j0 * cw, r1 = j1 * cw;
+    for (let px = 0; px < w; px++, i++) {
+      const m = (px + 0.5) * mPerX;
+      F.g[i] = grain(m, mz);
+      const k0 = Math.floor(px / S), fk = (px - k0 * S) / S;
+      const a = coarse[r0 + k0] + (coarse[r0 + k0 + 1] - coarse[r0 + k0]) * fk;
+      const b = coarse[r1 + k0] + (coarse[r1 + k0 + 1] - coarse[r1 + k0]) * fk;
+      F.bn[i] = a + (b - a) * fj;
+      if (f1) F.c1[i] = f1(m, mz);
+      if (f2 && need2[px]) F.c2[i] = f2(m, mz);
+    }
+  }
+  return F;
+}
+
+/**
+ * For each row of a layer, the features whose along-road extent touches it.
+ * Most rows touch none, so the per-pixel loops over repairs and potholes
+ * collapse to nothing on most of the layer.
+ */
+function rowLists(h, mPerY, items, halfAlong) {
+  const lists = new Array(h);
+  for (let py = 0; py < h; py++) lists[py] = null;
+  for (const it of items) {
+    const [z, r] = halfAlong(it);
+    const a = Math.max(0, Math.floor((z - r) / mPerY)), b = Math.min(h - 1, Math.ceil((z + r) / mPerY));
+    for (let py = a; py <= b; py++) (lists[py] || (lists[py] = [])).push(it);
+  }
+  return lists;
+}
 
 /** Sealed surfaces: asphalt carriageways and asphalt junction fills. */
-function paintPaved(spec, w, h, img, H, mPerX, mPerY) {
-  const d = img.data;
-  // The finest lengthwise noise period this row can hold. 2.6 texels per cell
-  // is the smallest that does not visibly beat against the pixel grid.
+function paintPaved(spec, V, F, out, w, h) {
+  const d = out.rgba, H = out.H, Hw = out.Hw, Pm = out.Pm;
+  const mPerX = spec.width / w, mPerY = TILE / h;
   const pmax = Math.max(2, Math.floor(h / 2.6));
-  // Aggregate sparkle, defined in TEXELS rather than metres: the relief has to
-  // vary over two or three texels to tilt the normal at all, and a row's texel
-  // is 5 cm on a highway and 1 cm on a lane. Sized in metres it would be flat
-  // on one and aliased on the other. The amplitude scales with the texel too,
-  // so the SLOPE it produces — about 7 degrees — is the same on every row; it
-  // is a lighting cheat, not a claim about how deep the chippings are.
-  const microS = 2.5 * mPerX, microH = 0.30 * mPerX;
   const width = spec.width, c = width / 2;
   const S = spec.stripes, ns = S.length;
-  const P = spec.patches, np = P.length;
-  const Hl = spec.holes, nh = Hl.length;
+  const rowP = rowLists(h, mPerY, V.patches, (q) => [q.zc, q.hz + q.seal + 0.15]);
+  const rowH = rowLists(h, mPerY, V.holes, (q) => [q.z, q.rz * 1.7 + 0.05]);
+  const rowT = rowLists(h, mPerY, V.transverse, (q) => [q.z, q.amp + 0.12]);
 
   // ---- column tables ----
   const tone = new Float32Array(w), poli = new Float32Array(w);
-  const rel0 = new Float32Array(w), bled = new Float32Array(w);
+  const rel0 = new Float32Array(w), relw = new Float32Array(w), bled = new Float32Array(w);
   const ckm = new Float32Array(w), edgk = new Float32Array(w);
   const salp = new Float32Array(w), strp = new Int16Array(w);
 
@@ -563,17 +752,20 @@ function paintPaved(spec, w, h, img, H, mPerX, mPerY) {
     t *= 1 + spec.aggLift * (1 - p) - spec.trackCut * p;
     rel -= spec.rutH * p;
 
-    // Camber lives in the normal map alone: the ribbon is flat across because
-    // the height field it is built from is, and bending the geometry to fake a
-    // crown would put the visible surface off the one the wheels stand on.
-    if (spec.crownH) { const q = (m - c) / Math.max(0.5, c); rel -= spec.crownH * q * q; }
-
     // The gutter is a dished channel, permanently damp and full of silt.
     if (spec.gutter > 0) {
       const g = Math.max(0, 1 - edge / spec.gutter);
       t *= 1 - 0.34 * g * g;
       rel -= 0.019 * g * (2 - g);
     }
+    // Water collects in everything above EXCEPT the camber, which exists to
+    // shed it. So the water relief is taken before the crown is added.
+    relw[px] = rel;
+
+    // Camber lives in the normal map alone: the ribbon is flat across because
+    // the height field it is built from is, and bending the geometry to fake a
+    // crown would put the visible surface off the one the wheels stand on.
+    if (spec.crownH) { const q = (m - c) / Math.max(0.5, c); rel -= spec.crownH * q * q; }
 
     // The last handspan of tarmac is always dirtier than the rest of it, and on
     // a country road it is also ravelling away into the gravel shoulder.
@@ -599,11 +791,11 @@ function paintPaved(spec, w, h, img, H, mPerX, mPerY) {
     }
     bled[px] = bl;
 
-    // Stripe coverage, antialiased over a texel: a hard fillRect edge shimmers
-    // at range even with anisotropy on, which is exactly where lane lines live.
+    // Stripe coverage, antialiased over a texel: a hard edge shimmers at range
+    // even with anisotropy on, which is exactly where lane lines live.
     let best = 0, bi = -1;
     for (let i = 0; i < ns; i++) {
-      const a = 1 - smoothstep(S[i].w * 0.5 - mPerX, S[i].w * 0.5 + mPerX * 0.7, Math.abs(m - S[i].m));
+      const a = 1 - smoothstep(S[i].w * 0.5 - mPerX * 0.5, S[i].w * 0.5 + mPerX * 0.5, Math.abs(m - S[i].m));
       if (a > best) { best = a; bi = i; }
     }
     salp[px] = best; strp[px] = bi;
@@ -613,19 +805,24 @@ function paintPaved(spec, w, h, img, H, mPerX, mPerY) {
   // ---- row tables ----
   const shearB = new Int16Array(h), gate = new Float32Array(h);
   const jb = new Float32Array(h), js = new Float32Array(h);
+  // The gate decides which stretches of the tile have cracks at all. It is the
+  // one place variants differ in the CRACKS rather than in discrete repairs, so
+  // it is blended back to a shared gate near the tile ends.
+  const gShared = makeField(1, 1, 13, spec.seed + 7, 2, h);
+  const gOwn = makeField(1, 1, 11, V.seed + 13, 2, h);
+  const wander = makeField(4, 1, 9, spec.seed + 401, 2, h);
   for (let py = 0; py < h; py++) {
     const mz = (py + 0.5) * mPerY;
     // Bleed lines wander; shifting the column table by whole texels is a shear,
     // which costs one clamped index instead of an exp per line per pixel.
-    // 10 cm of wander. At the 26 cm it started on, every bleed line in the row
-    // snaked in step and the pair read as a drawn curve rather than a stain.
-    shearB[py] = Math.round(nfield(3.5, mz, 1, 9, spec.seed + 401, 2, pmax) * 0.10 / mPerX);
-    gate[py] = clamp(0.30 + 1.7 * nfield(0.5, mz, 1, 13, spec.seed + 7, 2, pmax), 0, 1);
+    // 10 cm of wander: any more and every bleed line snakes in step.
+    shearB[py] = Math.round(wander(3.5, mz) * 0.10 / mPerX);
+    const sw = seamWeight(mz);
+    gate[py] = clamp(0.30 + 1.7 * lerp(gShared(0.5, mz), gOwn(0.5, mz), sw), 0, 1);
     if (spec.joint > 0) {
       const f = Math.abs(mz / spec.joint - Math.round(mz / spec.joint)) * spec.joint;
-      // The sealed overband is ~18 cm wide, which is also about the narrowest
-      // lengthwise feature this row can resolve, so the joint is drawn at the
-      // width it really has rather than the hairline the sealant slot is.
+      // The sealed overband is ~18 cm wide, drawn at the width it really has
+      // rather than the hairline the sealant slot is.
       jb[py] = 1 - smoothstep(0.06, 0.10, f);
       js[py] = 1 - smoothstep(0.015, 0.045, f);
     }
@@ -635,19 +832,22 @@ function paintPaved(spec, w, h, img, H, mPerX, mPerY) {
   for (let py = 0; py < h; py++) {
     const mz = (py + 0.5) * mPerY;
     const sb = shearB[py], gt = gate[py], jbv = jb[py], jsv = js[py];
+    const row = py * w;
+    const P = rowP[py], np = P ? P.length : 0;
+    const Hl = rowH[py], nh = Hl ? Hl.length : 0;
+    const T = rowT[py], nt = T ? T.length : 0;
     for (let px = 0; px < w; px++) {
+      const i = row + px;
       const m = (px + 0.5) * mPerX;
       const p = poli[px];
-      let t = tone[px], rel = rel0[px];
-      // Macro relief (camber, ruts, gutter, cracks, holes) and micro relief are
-      // kept apart because tar bleed floods the second and not the first.
-      let fine = 0;
-
-      const g = nfield(m, mz, spec.gx, spec.gz, spec.seed, 3, pmax);
+      let t = tone[px], rel = rel0[px], wrel = relw[px];
+      let gloss = spec.gloss + 0.24 * p;
+      let paint = 0;
+      // Macro relief (camber, ruts, gutter, cracks, holes) and grain are kept
+      // apart because tar bleed floods the second and not the first.
+      const g = F.g[i], bn = F.bn[i];
+      let fine = g * spec.grainH * (1 - 0.75 * p);
       t *= 1 + g * spec.grainAmt * (1 - 0.70 * p);
-      fine += g * spec.grainH * (1 - 0.75 * p);
-      fine += nfield(m, mz, microS, microS * 4, spec.seed + 877, 1, pmax) * microH * (1 - 0.72 * p);
-      const bn = nfield(m, mz, spec.bx, spec.bz, spec.seed + 91, 2, pmax);
       t *= 1 + bn * spec.blotchAmt;
 
       let r = spec.base[0] * t, gr = spec.base[1] * t, b = spec.base[2] * t;
@@ -661,6 +861,7 @@ function paintPaved(spec, w, h, img, H, mPerX, mPerY) {
       if (ek > 0.002) {
         r = lerp(r, spec.edgeCol[0], ek); gr = lerp(gr, spec.edgeCol[1], ek); b = lerp(b, spec.edgeCol[2], ek);
         rel += ek * 0.004 * g;
+        gloss *= 1 - ek;
       }
 
       // Tar bleed. Bled binder is a flooded, glassy surface, so as well as
@@ -670,70 +871,92 @@ function paintPaved(spec, w, h, img, H, mPerX, mPerY) {
       if (bd > 0.003) {
         r = lerp(r, spec.tar[0], bd); gr = lerp(gr, spec.tar[1], bd); b = lerp(b, spec.tar[2], bd);
         fine *= 1 - 0.72 * bd;
+        gloss += 0.45 * bd;
       }
 
-      // Cracking. |noise| near zero gives filaments; stretching the sample 25:1
-      // along the road turns them into longitudinal cracks, and a second,
-      // near-isotropic field inside the wheel paths gives the fatigue crazing
-      // an old road grows there.
-      if (spec.crackAmt > 0.002) {
-        const cn = nfield(m, mz, 0.22, 14.0, spec.seed + 55, 2, pmax);
-        let ck = (1 - smoothstep(0, spec.crackW, Math.abs(cn))) * ckm[px] * gt * spec.crackAmt;
-        if (p > 0.20 && spec.age > 0.55) {
-          const fn = nfield(m, mz, 0.30, 0.40, spec.seed + 311, 2, pmax);
-          const fk = (1 - smoothstep(0, 0.045, Math.abs(fn))) * p * (spec.age - 0.55) * 2.0 * gt;
+      // Longitudinal cracking. |noise| near zero gives filaments; stretching
+      // the sample 60:1 along the road turns them into longitudinal cracks, and
+      // a second, near-isotropic field inside the wheel paths gives the fatigue
+      // crazing an old road grows there.
+      if (F.c1) {
+        let ck = (1 - smoothstep(0, spec.crackW, Math.abs(F.c1[i]))) * ckm[px] * gt * spec.crackAmt;
+        if (F.c2 && p > 0.20) {
+          const fk = (1 - smoothstep(0, 0.045, Math.abs(F.c2[i]))) * p * (spec.age - 0.55) * 2.0 * gt;
           if (fk > ck) ck = fk;
         }
         if (ck > 0.004) {
           r = lerp(r, spec.tar[0], ck); gr = lerp(gr, spec.tar[1], ck); b = lerp(b, spec.tar[2], ck);
-          rel -= ck * 0.007;
+          rel -= ck * 0.007; wrel -= ck * 0.007;
+        }
+      }
+
+      // Transverse cracks and their sealant. The crack wanders; the bead of
+      // sealant laid over it is wider, glossy, and stands a millimetre proud.
+      for (let k = 0; k < nt; k++) {
+        const q = T[k];
+        if (m < q.from || m > q.to) continue;
+        const dz = Math.abs(mz - q.z - q.amp * Math.sin(m * q.k + q.ph) - 0.03 * bn);
+        if (dz > 0.09) continue;
+        const ends = smoothstep(q.from, q.from + 0.25, m) * (1 - smoothstep(q.to - 0.25, q.to, m));
+        if (q.sealed) {
+          const s = (1 - smoothstep(q.seal * 0.6, q.seal, dz)) * ends;
+          if (s > 0.003) {
+            r = lerp(r, spec.tar[0] * 0.9, s * 0.92); gr = lerp(gr, spec.tar[1] * 0.9, s * 0.92); b = lerp(b, spec.tar[2] * 0.9, s * 0.92);
+            rel += s * 0.0012; gloss = lerp(gloss, 0.62, s); fine *= 1 - 0.8 * s;
+          }
+        } else {
+          const s = (1 - smoothstep(q.w * 0.4, q.w, dz)) * ends;
+          if (s > 0.003) {
+            r = lerp(r, spec.tar[0], s); gr = lerp(gr, spec.tar[1], s); b = lerp(b, spec.tar[2], s);
+            rel -= s * 0.008; wrel -= s * 0.008;
+          }
         }
       }
 
       // Patch repairs. The blotch noise doubles as the edge wobble, so a repair
       // has a ragged boundary without costing another sample.
-      for (let i = 0; i < np; i++) {
-        const q = P[i];
+      for (let k = 0; k < np; k++) {
+        const q = P[k];
         const dm = Math.abs(m - q.mc) - q.hm;
         if (dm > q.seal) continue;
-        let dz = mz - q.zc; dz -= TILE * Math.round(dz / TILE);
-        const dzz = Math.abs(dz) - q.hz;
+        const dzz = Math.abs(mz - q.zc) - q.hz;
         if (dzz > q.seal) continue;
         // A cut edge is ragged at two scales, so the wobble takes one from the
-        // blotch and one from the aggregate grain. The blotch alone shifted the
-        // whole boundary at once and the repairs stayed drawn rectangles.
-        const dIn = (dm > dzz ? dm : dzz) + bn * 0.09 + g * 0.06;
+        // blotch and one from the grain.
+        const dIn = (dm > dzz ? dm : dzz) + bn * 0.09 + g * 0.05;
         const ins = 1 - smoothstep(-0.03, 0.01, dIn);
         if (ins > 0.002) {
           const tt = lerp(1, q.tone, ins);
           r *= tt; gr *= tt; b *= tt;
-          rel -= ins * 0.005;                      // a repair always settles
+          rel -= ins * 0.005; wrel -= ins * 0.005;          // a repair always settles
+          gloss += ins * (q.tone < 1 ? 0.08 : -0.04);
         }
         const band = 1 - smoothstep(q.seal * 0.35, q.seal, Math.abs(dIn));
         if (band > 0.004) {
-          const k = band * 0.52;
-          r = lerp(r, spec.tar[0], k); gr = lerp(gr, spec.tar[1], k); b = lerp(b, spec.tar[2], k);
+          const kk = band * 0.55;
+          r = lerp(r, spec.tar[0], kk); gr = lerp(gr, spec.tar[1], kk); b = lerp(b, spec.tar[2], kk);
           rel += band * 0.005;                     // the overband stands proud
+          gloss = lerp(gloss, 0.55, band * 0.8);
         }
       }
 
       // Potholes.
-      for (let i = 0; i < nh; i++) {
-        const q = Hl[i];
+      for (let k = 0; k < nh; k++) {
+        const q = Hl[k];
         const dm = m - q.m;
         if (dm > q.rx * 1.6 || dm < -q.rx * 1.6) continue;
-        let dz = mz - q.z; dz -= TILE * Math.round(dz / TILE);
+        const dz = mz - q.z;
         // The rim has to break up WITHIN the hole, so the raggedness comes off
-        // the aggregate grain; the blotch varies over metres and merely moved
-        // the whole ellipse, leaving it a drawn oval.
+        // the grain; the blotch varies over metres and merely moves the ellipse.
         const q2 = dm * dm * q.irx2 + dz * dz * q.irz2 + g * 0.40 + bn * 0.25;
         if (q2 > 1.9) continue;
         const core = 1 - smoothstep(0.30, 0.95, q2);
         const spoil = (1 - smoothstep(0.95, 1.8, q2)) * (1 - core);
-        r = lerp(r, spec.tar[0] * 1.1, core * 0.82); gr = lerp(gr, spec.tar[1] * 1.1, core * 0.82); b = lerp(b, spec.tar[2] * 1.15, core * 0.82);
+        r = lerp(r, spec.tar[0] * 1.3, core * 0.78); gr = lerp(gr, spec.tar[1] * 1.3, core * 0.78); b = lerp(b, spec.tar[2] * 1.35, core * 0.78);
         r = lerp(r, spec.agg[0], spoil * 0.30); gr = lerp(gr, spec.agg[1], spoil * 0.30); b = lerp(b, spec.agg[2], spoil * 0.30);
-        rel -= core * q.depth;
+        rel -= core * q.depth; wrel -= core * q.depth;
         rel += spoil * q.depth * 0.16;
+        gloss *= 1 - core * 0.5;
       }
 
       // Expansion joints.
@@ -751,41 +974,45 @@ function paintPaved(spec, w, h, img, H, mPerX, mPerY) {
         if (st.dash) {
           const ph = mz % (st.dash + st.gap);
           on = ph < st.dash
-            ? smoothstep(0, 0.22, ph) * smoothstep(0, 0.30, st.dash - ph)   // scuffed ends
+            ? smoothstep(0, 0.10, ph) * smoothstep(0, 0.10, st.dash - ph)   // square-cut ends
             : 0;
         }
         if (on > 0.004) {
           // Paint wears off fastest where it is driven over, so a centre line
           // in a wheel path is a ghost while a shoulder line beside it is not.
           let a = salp[px] * on * spec.markAlpha * (1 - 0.70 * p);
-          a *= clamp(0.45 + 0.75 * (g * 0.5 + 0.5) + 0.55 * bn, 0, 1);
+          a *= clamp(0.55 + 0.60 * (g * 0.5 + 0.5) + 0.45 * bn, 0, 1);
           if (a > 0.004) {
             r = lerp(r, spec.ink[0], a); gr = lerp(gr, spec.ink[1], a); b = lerp(b, spec.ink[2], a);
             rel += a * 0.0012;                    // fresh paint sits proud
+            fine *= 1 - 0.5 * a;                  // and fills the texture
+            gloss = lerp(gloss, 0.34, a);
+            paint = a;
           }
         }
       }
 
-      const o = (py * w + px) * 4;
-      d[o] = r; d[o + 1] = gr; d[o + 2] = b; d[o + 3] = 255;
-      H[py * w + px] = rel + fine;
+      const o = i * 4;
+      d[o] = clamp(r, 0, 255); d[o + 1] = clamp(gr, 0, 255); d[o + 2] = clamp(b, 0, 255);
+      d[o + 3] = clamp(gloss, 0, 1) * 255;
+      H[i] = rel + fine;
+      Hw[i] = wrel;
+      Pm[i] = paint;
     }
   }
 }
 
 /** Unpaved surfaces: the gravel lane, the dirt track, and their junctions. */
-function paintLoose(spec, w, h, img, H, mPerX, mPerY) {
-  const d = img.data;
-  // The finest lengthwise noise period this row can hold. 2.6 texels per cell
-  // is the smallest that does not visibly beat against the pixel grid.
-  const pmax = Math.max(2, Math.floor(h / 2.6));
+function paintLoose(spec, V, F, out, w, h) {
+  const d = out.rgba, H = out.H, Hw = out.Hw, Pm = out.Pm;
+  const mPerX = spec.width / w, mPerY = TILE / h;
   const width = spec.width, c = width / 2;
-  const Hl = spec.holes, nh = Hl.length;
+  const rowH = rowLists(h, mPerY, V.holes, (q) => [q.z, q.rz * 1.7 + 0.05]);
 
   // ---- column tables ----
-  const tone = new Float32Array(w), rel0 = new Float32Array(w);
+  const tone = new Float32Array(w), rel0 = new Float32Array(w), relw = new Float32Array(w);
   const rutk = new Float32Array(w), grass = new Float32Array(w);
-  const loose = new Float32Array(w);
+  const loose = new Float32Array(w), bermk = new Float32Array(w);
 
   for (let px = 0; px < w; px++) {
     const m = (px + 0.5) * mPerX;
@@ -802,6 +1029,7 @@ function paintLoose(spec, w, h, img, H, mPerX, mPerY) {
     // which is pushed into berms on either side of it.
     t *= 1 - spec.rutCut * k;
     rel -= spec.rutH * k;
+    relw[px] = rel;
     if (spec.rut.length) {
       let berm = 0;
       for (let i = 0; i < spec.rut.length; i++) {
@@ -811,13 +1039,14 @@ function paintLoose(spec, w, h, img, H, mPerX, mPerY) {
         }
       }
       rel += spec.bermH * Math.min(1, berm) * (1 - k);
+      bermk[px] = Math.min(1, berm) * (1 - k);
     }
     // The strip between the ruts is never touched, so it stands proud and, on a
     // road nothing straddles, it grows a line of grass down the middle.
     const cq = (m - c) / 0.62;
     const crown = Math.exp(-cq * cq);
     rel += spec.crownH * crown;
-    let gk = spec.grassCrown * crown + spec.grassEdge * (1 - smoothstep(0, 1.1, edge));
+    const gk = spec.grassCrown * crown + spec.grassEdge * (1 - smoothstep(0, 1.1, edge));
     grass[px] = gk > 1 ? 1 : gk;
     loose[px] = clamp(1 - 1.15 * k, 0, 1);        // where stones can still sit
     t *= 1 + 0.14 * (1 - smoothstep(width * 0.30, width * 0.5, Math.abs(m - c)));
@@ -828,24 +1057,28 @@ function paintLoose(spec, w, h, img, H, mPerX, mPerY) {
   // Corrugation: a real washboard is a standing wave, not noise, so it is a
   // sine whose amplitude a slow noise turns on and off along the road.
   const wash = new Float32Array(h);
+  const envF = makeField(3, 1, 11, spec.seed + 613, 2, h);
   for (let py = 0; py < h; py++) {
     const mz = (py + 0.5) * mPerY;
-    const env = clamp(0.25 + 1.5 * nfield(1.5, mz, 1, 11, spec.seed + 613, 2, pmax), 0, 1);
+    const env = clamp(0.25 + 1.5 * envF(1.5, mz), 0, 1);
     wash[py] = Math.sin((mz / spec.washL) * Math.PI * 2) * env;
   }
 
   for (let py = 0; py < h; py++) {
     const mz = (py + 0.5) * mPerY;
     const wv = wash[py];
+    const row = py * w;
+    const Hl = rowH[py], nh = Hl ? Hl.length : 0;
     for (let px = 0; px < w; px++) {
+      const i = row + px;
       const m = (px + 0.5) * mPerX;
       const k = rutk[px];
-      let t = tone[px], rel = rel0[px];
+      let t = tone[px], rel = rel0[px], wrel = relw[px];
+      let gloss = spec.gloss + 0.10 * k;           // compacted ruts are smoother
 
-      const g = nfield(m, mz, spec.gx, spec.gz, spec.seed, 3, pmax);
+      const g = F.g[i], bn = F.bn[i];
       t *= 1 + g * spec.grainAmt;
       rel += g * spec.grainH;
-      const bn = nfield(m, mz, spec.bx, spec.bz, spec.seed + 91, 2, pmax);
       t *= 1 + bn * spec.blotchAmt;
 
       let r = spec.base[0] * t, gr = spec.base[1] * t, b = spec.base[2] * t;
@@ -854,16 +1087,18 @@ function paintLoose(spec, w, h, img, H, mPerX, mPerY) {
       const df = spec.dustFilm * loose[px] * clamp(0.4 + 0.8 * bn, 0, 1);
       r = lerp(r, spec.dust[0], df); gr = lerp(gr, spec.dust[1], df); b = lerp(b, spec.dust[2], df);
 
-      // Larger aggregate: the top of the field is a stone, the shoulder below
-      // it the shadow it casts. Thresholding one field for both is what stops
-      // the stones reading as a grey cloud.
-      const sn = nfield(m, mz, spec.stoneS, spec.stoneS * 1.5, spec.seed + 77, 2, pmax);
-      const st = smoothstep(0.16, 0.40, sn) * spec.stoneAmt * loose[px];
+      // Stone clusters: the top of the field is a heap, the shoulder below it
+      // the shadow it casts. Soft thresholds — the individual stones are in the
+      // detail layer, and a hard threshold here is what made the old mosaic.
+      const sn = F.c1[i];
+      // Traffic sweeps the loose stone out of the wheel paths into windrows
+      // beside them, so the berms are where the stone lies thickest.
+      const st = smoothstep(0.05, 0.55, sn) * spec.stoneAmt * loose[px] * (1 + 1.4 * bermk[px]);
       if (st > 0.004) {
         r = lerp(r, spec.stoneHi[0], st); gr = lerp(gr, spec.stoneHi[1], st); b = lerp(b, spec.stoneHi[2], st);
         rel += st * spec.stoneH;
       }
-      const sd = smoothstep(-0.12, -0.36, sn) * spec.stoneAmt * 0.7;
+      const sd = smoothstep(-0.10, -0.55, sn) * spec.stoneAmt * 0.35;
       if (sd > 0.004) {
         r = lerp(r, spec.stoneLo[0], sd); gr = lerp(gr, spec.stoneLo[1], sd); b = lerp(b, spec.stoneLo[2], sd);
         rel -= sd * spec.stoneH * 0.5;
@@ -871,44 +1106,46 @@ function paintLoose(spec, w, h, img, H, mPerX, mPerY) {
 
       rel += wv * spec.washH * k;
 
-      for (let i = 0; i < nh; i++) {
-        const q = Hl[i];
-        const dm = m - q.m;
-        if (dm > q.rx * 1.7 || dm < -q.rx * 1.7) continue;
-        let dz = mz - q.z; dz -= TILE * Math.round(dz / TILE);
-        const q2 = dm * dm * q.irx2 + dz * dz * q.irz2 + g * 0.45 + bn * 0.25;
+      for (let q = 0; q < nh; q++) {
+        const hq = Hl[q];
+        const dm = m - hq.m;
+        if (dm > hq.rx * 1.7 || dm < -hq.rx * 1.7) continue;
+        const dz = mz - hq.z;
+        const q2 = dm * dm * hq.irx2 + dz * dz * hq.irz2 + g * 0.45 + bn * 0.25;
         if (q2 > 1.9) continue;
         const core = 1 - smoothstep(0.25, 0.95, q2);
         const spoil = (1 - smoothstep(0.95, 1.75, q2)) * (1 - core);
         // A hole in an unpaved road holds water, so its floor is dark and
         // smooth and the spoil thrown out of it is the palest thing around.
-        const wet = core * 0.55;
+        const wet = core * 0.38;
         r = lerp(r, spec.stoneLo[0] * 0.7, wet); gr = lerp(gr, spec.stoneLo[1] * 0.7, wet); b = lerp(b, spec.stoneLo[2] * 0.7, wet);
         r = lerp(r, spec.stoneHi[0], spoil * 0.42); gr = lerp(gr, spec.stoneHi[1], spoil * 0.42); b = lerp(b, spec.stoneHi[2], spoil * 0.42);
-        rel -= core * q.depth;
-        rel += spoil * q.depth * 0.22;
+        rel -= core * hq.depth; wrel -= core * hq.depth;
+        rel += spoil * hq.depth * 0.22;
+        gloss += core * 0.12;
       }
 
-      const gk = clamp(grass[px] * (0.78 + 0.85 * nfield(m, mz, 0.7, 2.4, spec.seed + 7, 2, pmax)), 0, 1);
+      const gk = clamp(grass[px] * (0.78 + 0.85 * F.c2[i]), 0, 1);
       if (gk > 0.004) {
         r = lerp(r, spec.grass[0], gk); gr = lerp(gr, spec.grass[1], gk); b = lerp(b, spec.grass[2], gk);
         rel += gk * 0.020;
+        gloss *= 1 - gk;
       }
 
-      const o = (py * w + px) * 4;
-      d[o] = r; d[o + 1] = gr; d[o + 2] = b; d[o + 3] = 255;
-      H[py * w + px] = rel;
+      const o = i * 4;
+      d[o] = clamp(r, 0, 255); d[o + 1] = clamp(gr, 0, 255); d[o + 2] = clamp(b, 0, 255);
+      d[o + 3] = clamp(gloss, 0, 1) * 255;
+      H[i] = rel;
+      Hw[i] = wrel;
+      Pm[i] = 0;
     }
   }
 }
 
 /** Concrete paving slabs. U runs from the kerb outward. */
-function paintWalk(spec, w, h, img, H, mPerX, mPerY) {
-  const d = img.data;
-  // The finest lengthwise noise period this row can hold. 2.6 texels per cell
-  // is the smallest that does not visibly beat against the pixel grid.
-  const pmax = Math.max(2, Math.floor(h / 2.6));
-  const microS = 2.5 * mPerX, microH = 0.30 * mPerX;
+function paintWalk(spec, V, F, out, w, h) {
+  const d = out.rgba, H = out.H, Hw = out.Hw, Pm = out.Pm;
+  const mPerX = spec.width / w, mPerY = TILE / h;
   const tone = new Float32Array(w), rel0 = new Float32Array(w);
   for (let px = 0; px < w; px++) {
     const m = (px + 0.5) * mPerX;
@@ -921,22 +1158,12 @@ function paintWalk(spec, w, h, img, H, mPerX, mPerY) {
     tone[px] = t; rel0[px] = rel;
   }
 
+  // A slab joint is about a texel wide, so it is INTEGRATED over the texel
+  // rather than point-sampled: `jrow` is the exact fraction of the texel a
+  // groove of half-width `jhw` covers, which sums to the same total for every
+  // joint whatever its phase against the texel grid.
   const jrow = new Float32Array(h), slabT = new Float32Array(h), crackA = new Float32Array(h);
   const crackB = new Float32Array(h);
-  // Twenty joints have to fit into eighty-odd texels, so a joint IS about a
-  // texel wide — and at that size POINT-sampling it makes the answer depend on
-  // where the texel centre happens to land relative to the groove. 1.2 m is
-  // not a whole number of texels, so that phase walks along the row: some
-  // joints came out full strength, some half, some vanished while the slab
-  // tone either side of them still stepped, and the beat between the two
-  // periods crawled along the pavement.
-  //
-  // So the groove is INTEGRATED, not sampled. `jrow` is the exact fraction of
-  // the texel a groove of half-width `jhw` covers, which sums to the same
-  // total for every joint whatever its phase — measured, 0.0% spread against
-  // the sampled version's 13.8%. The per-texel peak still varies, as it must
-  // for anything this narrow, but that is what the mip chain averages out and
-  // the integral is what it averages to.
   const jhw = Math.max(0.006, 0.5 * mPerY);
   const jspan = 1 / mPerY;
   for (let py = 0; py < h; py++) {
@@ -955,18 +1182,17 @@ function paintWalk(spec, w, h, img, H, mPerX, mPerY) {
   }
 
   for (let py = 0; py < h; py++) {
-    const mz = (py + 0.5) * mPerY;
     const jv = jrow[py], sv = slabT[py];
+    const row = py * w;
     for (let px = 0; px < w; px++) {
+      const i = row + px;
       const m = (px + 0.5) * mPerX;
       let t = tone[px] * sv * (1 - 0.32 * jv);
       let rel = rel0[px] - spec.jointH * jv;
 
-      const g = nfield(m, mz, spec.gx, spec.gz, spec.seed, 3, pmax);
+      const g = F.g[i], bn = F.bn[i];
       t *= 1 + g * spec.grainAmt;
       rel += g * spec.grainH;
-      rel += nfield(m, mz, microS, microS * 4, spec.seed + 877, 1, pmax) * microH;
-      const bn = nfield(m, mz, spec.bx, spec.bz, spec.seed + 91, 2, pmax);
       t *= 1 + bn * spec.blotchAmt;
 
       let r = spec.base[0] * t, gr = spec.base[1] * t, b = spec.base[2] * t;
@@ -981,19 +1207,18 @@ function paintWalk(spec, w, h, img, H, mPerX, mPerY) {
       const wk = clamp((jv - 0.45) * 1.8, 0, 1) * smoothstep(0.4, 2.2, m) * (0.35 + 0.65 * bn);
       if (wk > 0.004) { r = lerp(r, spec.grass[0], wk); gr = lerp(gr, spec.grass[1], wk); b = lerp(b, spec.grass[2], wk); }
 
-      const o = (py * w + px) * 4;
-      d[o] = r; d[o + 1] = gr; d[o + 2] = b; d[o + 3] = 255;
-      H[py * w + px] = rel;
+      const o = i * 4;
+      d[o] = clamp(r, 0, 255); d[o + 1] = clamp(gr, 0, 255); d[o + 2] = clamp(b, 0, 255);
+      d[o + 3] = spec.gloss * 255;
+      H[i] = rel; Hw[i] = rel; Pm[i] = 0;
     }
   }
 }
 
 /** The kerb face. U runs UP the face: 0 is the gutter, 1 the pavement edge. */
-function paintKerb(spec, w, h, img, H, mPerX, mPerY) {
-  const d = img.data;
-  // The finest lengthwise noise period this row can hold. 2.6 texels per cell
-  // is the smallest that does not visibly beat against the pixel grid.
-  const pmax = Math.max(2, Math.floor(h / 2.6));
+function paintKerb(spec, V, F, out, w, h) {
+  const d = out.rgba, H = out.H, Hw = out.Hw, Pm = out.Pm;
+  const mPerY = TILE / h;
   const tone = new Float32Array(w), rel0 = new Float32Array(w), bright = new Float32Array(w);
   for (let px = 0; px < w; px++) {
     const u = (px + 0.5) / w;
@@ -1011,13 +1236,9 @@ function paintKerb(spec, w, h, img, H, mPerX, mPerY) {
     tone[px] = t; rel0[px] = rel;
   }
 
+  // Same integrated-joint rule as the pavement; this is where it bites
+  // hardest, because a 1.2 m unit joint is the kerb's only lengthwise feature.
   const jrow = new Float32Array(h), unitT = new Float32Array(h);
-  // Same rule as the pavement, and the kerb is where it bites hardest: this is
-  // the shortest row in the atlas, so a 1.2 m unit is barely four texels and
-  // the point-sampled joint aliased into a moire that crawled along the kerb.
-  // The groove is integrated instead — `jrow` is the exact fraction of the
-  // texel it covers, so every unit joint carries the same weight whatever its
-  // phase, and the tone step between two units always has a joint under it.
   const jhw = Math.max(0.006, 0.5 * mPerY);
   const jspan = 1 / mPerY;
   for (let py = 0; py < h; py++) {
@@ -1027,62 +1248,72 @@ function paintKerb(spec, w, h, img, H, mPerX, mPerY) {
     unitT[py] = 0.955 + hash1(Math.floor(mz / spec.slab), spec.seed) * 0.09;
   }
 
-  const SC = spec.scuffs, nsc = SC.length;
+  const SC = V.scuffs, nsc = SC.length;
   for (let py = 0; py < h; py++) {
     const mz = (py + 0.5) * mPerY;
     const jv = jrow[py], uv = unitT[py];
+    const row = py * w;
     for (let px = 0; px < w; px++) {
+      const i = row + px;
       const u = (px + 0.5) / w;
-      const m = u * spec.width;
       let t = tone[px] * uv * (1 - 0.42 * jv);
       let rel = rel0[px] - spec.jointH * jv;
 
-      const g = nfield(m, mz, spec.gx * spec.width, spec.gz, spec.seed, 3, pmax);
+      const g = F.g[i], bn = F.bn[i];
       t *= 1 + g * spec.grainAmt;
       rel += g * spec.grainH;
-      const bn = nfield(m, mz, spec.bx * spec.width, spec.bz, spec.seed + 91, 2, pmax);
       t *= 1 + bn * spec.blotchAmt;
 
       let r = spec.base[0] * t, gr = spec.base[1] * t, b = spec.base[2] * t;
       const ak = 0.14 * bright[px] * clamp(0.4 + 0.9 * g, 0, 1);
       r = lerp(r, spec.agg[0], ak); gr = lerp(gr, spec.agg[1], ak); b = lerp(b, spec.agg[2], ak);
 
-      for (let i = 0; i < nsc; i++) {
-        const q = SC[i];
+      for (let k = 0; k < nsc; k++) {
+        const q = SC[k];
         const du = Math.abs(u - q.u) - q.hu;
         if (du > 0.02) continue;
-        let dz = mz - q.z; dz -= TILE * Math.round(dz / TILE);
-        const dzz = Math.abs(dz) - q.hz;
+        const dzz = Math.abs(mz - q.z) - q.hz;
         if (dzz > 0.02) continue;
-        const k = (1 - smoothstep(-0.03, 0.01, (du > dzz ? du : dzz) + bn * 0.02)) * q.k;
-        if (k < 0.004) continue;
+        const kk = (1 - smoothstep(-0.03, 0.01, (du > dzz ? du : dzz) + bn * 0.02)) * q.k;
+        if (kk < 0.004) continue;
         if (q.chip) {
           // A chipped arris shows the pale aggregate inside the concrete.
-          r = lerp(r, spec.agg[0] * 1.12, k); gr = lerp(gr, spec.agg[1] * 1.12, k); b = lerp(b, spec.agg[2] * 1.12, k);
-          rel -= k * 0.007;
+          r = lerp(r, spec.agg[0] * 1.12, kk); gr = lerp(gr, spec.agg[1] * 1.12, kk); b = lerp(b, spec.agg[2] * 1.12, kk);
+          rel -= kk * 0.007;
         } else {
-          r = lerp(r, spec.tar[0], k * 0.8); gr = lerp(gr, spec.tar[1], k * 0.8); b = lerp(b, spec.tar[2], k * 0.8);
+          r = lerp(r, spec.tar[0], kk * 0.8); gr = lerp(gr, spec.tar[1], kk * 0.8); b = lerp(b, spec.tar[2], kk * 0.8);
         }
       }
 
-      const o = (py * w + px) * 4;
-      d[o] = r; d[o + 1] = gr; d[o + 2] = b; d[o + 3] = 255;
-      H[py * w + px] = rel;
+      const o = i * 4;
+      d[o] = clamp(r, 0, 255); d[o + 1] = clamp(gr, 0, 255); d[o + 2] = clamp(b, 0, 255);
+      d[o + 3] = spec.gloss * 255;
+      H[i] = rel; Hw[i] = rel; Pm[i] = 0;
     }
   }
 }
 
 /**
- * Turns the relief buffer into a tangent-space normal map.
+ * Relief to the second texture: tangent-space normal in RG, standing water in
+ * B, painted line in A.
  *
- * Central differences in METRES, not texels, so a 2 cm stone on a gravel lane
- * and a 2 cm stone on a highway tilt the normal by the same angle even though
- * the two rows have different texel sizes. Y wraps with the tile and X clamps,
- * matching the sampler: V wraps by hand in the UVs, U is ClampToEdge.
+ * Central differences in METRES, not texels, so a 2 cm stone tilts the normal
+ * by the same angle on every row whatever its texel size. Y wraps with the tile
+ * and X clamps, matching the sampler. Z is not stored — it is rebuilt in the
+ * shader — which frees B for water.
+ *
+ * Water is how far a texel sits below the surface around it, measured on the
+ * relief WITHOUT the camber, fine grain or proud features: ruts, potholes,
+ * settled repairs and open cracks. 12 mm of depression is a full puddle.
  */
-function reliefToNormal(Hb, nrm, w, h, mPerX, mPerY) {
-  const d = nrm.data;
+function finishLayer(out, w, h, mPerX, mPerY, nrm, o4) {
+  const Hb = out.H, Hw = out.Hw, Pm = out.Pm;
   const sx = 1 / (2 * mPerX), sz = 1 / (2 * mPerY);
+  // The reference the water is measured against: the mean water relief of the
+  // layer, so a road whose every texel is a little low is not all puddle.
+  let mean = 0;
+  for (let i = 0; i < Hw.length; i++) mean += Hw[i];
+  mean /= Hw.length;
   for (let py = 0; py < h; py++) {
     const up = (py === 0 ? h - 1 : py - 1) * w;
     const dn = (py === h - 1 ? 0 : py + 1) * w;
@@ -1092,106 +1323,420 @@ function reliefToNormal(Hb, nrm, w, h, mPerX, mPerY) {
       const du = (Hb[cur + xr] - Hb[cur + xl]) * ((px > 0 && px < w - 1) ? sx : sx * 2);
       const dv = (Hb[dn + px] - Hb[up + px]) * sz;
       const inv = 1 / Math.sqrt(du * du + dv * dv + 1);
-      const o = (cur + px) * 4;
-      d[o] = (0.5 - du * inv * 0.5) * 255;
-      d[o + 1] = (0.5 - dv * inv * 0.5) * 255;
-      d[o + 2] = (0.5 + inv * 0.5) * 255;
-      d[o + 3] = 255;
+      const o = o4 + (cur + px) * 4;
+      nrm[o] = clamp((0.5 - du * inv * 0.5) * 255 + 0.5, 0, 255);
+      nrm[o + 1] = clamp((0.5 - dv * inv * 0.5) * 255 + 0.5, 0, 255);
+      nrm[o + 2] = clamp((mean - Hw[cur + px] - 0.0015) / 0.012, 0, 1) * 255;
+      nrm[o + 3] = Pm[cur + px] * 255;
     }
   }
-}
-
-/** Paints one atlas row's colour and normal into the two scratch contexts. */
-function paintRow(ctx, nctx, w, h, spec, Hb) {
-  const img = ctx.createImageData(w, h);
-  const nrm = nctx.createImageData(w, h);
-  const mPerX = spec.width / w, mPerY = TILE / h;
-  if (spec.paint === 'paved') paintPaved(spec, w, h, img, Hb, mPerX, mPerY);
-  else if (spec.paint === 'loose') paintLoose(spec, w, h, img, Hb, mPerX, mPerY);
-  else if (spec.paint === 'walk') paintWalk(spec, w, h, img, Hb, mPerX, mPerY);
-  else paintKerb(spec, w, h, img, Hb, mPerX, mPerY);
-  reliefToNormal(Hb, nrm, w, h, mPerX, mPerY);
-  ctx.putImageData(img, 0, 0);
-  nctx.putImageData(nrm, 0, 0);
 }
 
 /**
- * Stacks every row into TWO canvases — albedo and normal — and returns the V
- * range of each row, which is shared by both.
- *
- * Row height is proportional to spec.weight rather than uniform, because the
- * along-road axis is the scarce one and the rows need wildly different amounts
- * of it. The proportional share is clamped at both ends and the total is scaled
- * down if the clamps push it over, so the atlas can never exceed the 2048 px
- * that WebGL2 guarantees no matter how many rows a world asks for.
+ * Paints every family into two texture arrays and returns, per family, the
+ * index of its first layer. Variants of a family occupy consecutive layers.
  */
-function buildAtlas(specs) {
-  const rows = specs.length;
-  let sum = 0;
-  for (const s of specs) sum += s.weight;
-
-  const slots = new Int32Array(rows);
-  let H = 0;
-  for (let r = 0; r < rows; r++) {
-    slots[r] = clamp(Math.floor(ATLAS_MAX * specs[r].weight / sum), SLOT_MIN, SLOT_MAX);
-    H += slots[r];
-  }
-  if (H > ATLAS_MAX) {
-    // Rescale — but against a minimum that itself fits. A FIXED floor times
-    // enough rows overruns 2048 again, which would break the one guarantee
-    // this function exists to make, quietly, on the first world that asked for
-    // more than sixty-odd rows. Nothing does today; that is exactly why it has
-    // to be right here rather than noticed later.
-    const floor = Math.max(GUARD * 2 + 2, Math.min(GUARD * 2 + 16, Math.floor(ATLAS_MAX / rows)));
-    const k = ATLAS_MAX / H;
-    H = 0;
-    for (let r = 0; r < rows; r++) { slots[r] = Math.max(floor, Math.floor(slots[r] * k)); H += slots[r]; }
-    // Rounding up to the floor can still leave a handful of texels over. Take
-    // them off the tallest rows, which are the ones that miss them least.
-    while (H > ATLAS_MAX) {
-      let big = 0;
-      for (let r = 1; r < rows; r++) if (slots[r] > slots[big]) big = r;
-      if (slots[big] <= GUARD * 2 + 2) break;          // cannot shrink further
-      slots[big]--; H--;
+function buildLayers(specs, w, defer) {
+  const h = LAYER_H;
+  let layers = 0;
+  const first = [];
+  for (const s of specs) { first.push(layers); layers += s.variants; }
+  const per = w * h * 4;
+  const alb = new Uint8Array(per * layers);
+  const nrm = new Uint8Array(per * layers);
+  const out = {
+    rgba: null,
+    H: new Float32Array(w * h), Hw: new Float32Array(w * h), Pm: new Float32Array(w * h),
+  };
+  const paint = { paved: paintPaved, loose: paintLoose, walk: paintWalk, kerb: paintKerb };
+  const paintOne = (f, v, F) => {
+    const spec = specs[f], L = first[f] + v;
+    out.rgba = alb.subarray(L * per, (L + 1) * per);
+    paint[spec.paint](spec, spec.variant(v), F, out, w, h);
+    finishLayer(out, w, h, spec.width / w, TILE / h, nrm, L * per);
+    return L;
+  };
+  // Deferred variants start life as copies of the first, so every tile has a
+  // correct surface from the first frame and the second copy's own repairs
+  // and potholes simply arrive a moment later.
+  const later = [];
+  for (let f = 0; f < specs.length; f++) {
+    const spec = specs[f];
+    const F = fieldsFor(spec, w, h);
+    paintOne(f, 0, F);
+    for (let v = 1; v < spec.variants; v++) {
+      if (defer) {
+        const L0 = first[f] * per, L = (first[f] + v) * per;
+        alb.copyWithin(L, L0, L0 + per);
+        nrm.copyWithin(L, L0, L0 + per);
+        later.push({ f, v });
+      } else {
+        paintOne(f, v, F);
+      }
     }
   }
-  let maxContent = 0;
-  for (let r = 0; r < rows; r++) maxContent = Math.max(maxContent, slots[r] - GUARD * 2);
-
-  const canvas = document.createElement('canvas');
-  canvas.width = ATLAS_W; canvas.height = H;
-  const ctx = canvas.getContext('2d');
-  const ncanvas = document.createElement('canvas');
-  ncanvas.width = ATLAS_W; ncanvas.height = H;
-  const nctx = ncanvas.getContext('2d');
-
-  // One scratch pair and one relief buffer at the tallest row, reused by all of
-  // them — eleven rows is eleven canvases otherwise, at load, for nothing.
-  const scratch = document.createElement('canvas');
-  scratch.width = ATLAS_W; scratch.height = maxContent;
-  const sctx = scratch.getContext('2d');
-  const nscratch = document.createElement('canvas');
-  nscratch.width = ATLAS_W; nscratch.height = maxContent;
-  const nsctx = nscratch.getContext('2d');
-  const Hb = new Float32Array(ATLAS_W * maxContent);
-
-  const ranges = [];
-  let top = 0;
-  for (let r = 0; r < rows; r++) {
-    const slot = slots[r], contentH = slot - GUARD * 2;
-    paintRow(sctx, nsctx, ATLAS_W, contentH, specs[r], Hb);
-    for (const [dst, src] of [[ctx, scratch], [nctx, nscratch]]) {
-      dst.drawImage(src, 0, 0, ATLAS_W, contentH, 0, top + GUARD, ATLAS_W, contentH);
-      // Guards carry the tile across the seam so bilinear filtering has the right
-      // neighbours at both ends of the row.
-      dst.drawImage(src, 0, contentH - GUARD, ATLAS_W, GUARD, 0, top, ATLAS_W, GUARD);
-      dst.drawImage(src, 0, 0, ATLAS_W, GUARD, 0, top + GUARD + contentH, ATLAS_W, GUARD);
-    }
-    ranges.push({ v0: (top + GUARD) / H, v1: (top + GUARD + contentH) / H, px: contentH });
-    top += slot;
-  }
-  return { canvas, ncanvas, ranges, width: ATLAS_W, height: H };
+  // One deferred variant per call, fields recomputed: holding every family's
+  // fields until the idle queue drains would keep 30 MB alive for a second.
+  const paintLater = (job) => paintOne(job.f, job.v, fieldsFor(specs[job.f], w, h));
+  return { alb, nrm, first, layers, width: w, height: h, later, paintLater };
 }
+
+// ---------------------------------------------------------------------------
+// Detail layers
+// ---------------------------------------------------------------------------
+//
+// Four tiles, 512 texels over 1.6 m of WORLD space: asphalt chippings, loose
+// gravel, earth, concrete. RG is a normal in world X/Z, B an albedo multiplier
+// centred on 0.5 (x2 in the shader, so 0.5 changes nothing), A how exposed the
+// texel is — 1 on top of a stone, 0 down in the gaps — which the shader uses
+// for where water sits first and where the verge edge breaks up.
+//
+// The stones are cells of a periodic Worley pattern. Crushed aggregate is
+// angular, and Voronoi cells are angular for free; the distance to the cell
+// border gives each stone a dome and the binder or dust between them.
+
+function worley(N, cells, seed) {
+  // Feature points on a grid padded by one cell all round, with the wrap
+  // already applied to the padding — so the 3x3 search needs no modulo and no
+  // branch, which is most of what makes a million of them affordable at load.
+  const P = cells + 2;
+  const fx = new Float32Array(P * P), fy = new Float32Array(P * P), id = new Float32Array(P * P);
+  for (let j = 0; j < P; j++) {
+    const sj = (j - 1 + cells) % cells;
+    for (let i = 0; i < P; i++) {
+      const si = (i - 1 + cells) % cells;
+      const k = j * P + i;
+      fx[k] = (i - 1) + hash2(si, sj, seed);
+      fy[k] = (j - 1) + hash2(si, sj, seed + 1);
+      id[k] = hash2(si, sj, seed + 2);
+    }
+  }
+  const F1 = new Float32Array(N * N), E = new Float32Array(N * N), ID = new Float32Array(N * N);
+  const s = cells / N;
+  for (let py = 0; py < N; py++) {
+    const y = (py + 0.5) * s, cy = Math.floor(y) + 1;
+    for (let px = 0; px < N; px++) {
+      const x = (px + 0.5) * s, cx = Math.floor(x) + 1;
+      let d1 = 9, d2 = 9, best = 0;
+      for (let jy = cy - 1; jy <= cy + 1; jy++) {
+        const row = jy * P;
+        for (let jx = cx - 1; jx <= cx + 1; jx++) {
+          const k = row + jx;
+          const ddx = fx[k] - x, ddy = fy[k] - y;
+          const dd = ddx * ddx + ddy * ddy;
+          if (dd < d1) { d2 = d1; d1 = dd; best = k; } else if (dd < d2) d2 = dd;
+        }
+      }
+      const i = py * N + px;
+      const r1 = Math.sqrt(d1);
+      F1[i] = r1;
+      E[i] = Math.sqrt(d2) - r1;                 // 0 on a cell border
+      ID[i] = id[best];
+    }
+  }
+  return { F1, E, ID };
+}
+
+/** Periodic value noise on the detail tile, `cells` lattice cells per side. */
+function tileNoise(N, cells, seed, oct) {
+  const out = new Float32Array(N * N);
+  let amp = 1, norm = 0;
+  for (let o = 0; o < oct; o++) {
+    const c = cells << o, s = c / N, sd = seed + o * 131;
+    const L = new Float32Array((c + 1) * (c + 1));
+    for (let j = 0; j <= c; j++) for (let i = 0; i <= c; i++) L[j * (c + 1) + i] = hash2(i % c, j % c, sd) * 2 - 1;
+    for (let py = 0; py < N; py++) {
+      const y = (py + 0.5) * s, y0 = Math.floor(y), v = quinticT(y - y0);
+      const ra = y0 * (c + 1), rb = ra + c + 1;
+      for (let px = 0; px < N; px++) {
+        const x = (px + 0.5) * s, x0 = Math.floor(x), u = quinticT(x - x0);
+        const a = L[ra + x0], b = L[ra + x0 + 1], cc = L[rb + x0], dd = L[rb + x0 + 1];
+        const top = a + (b - a) * u, bot = cc + (dd - cc) * u;
+        out[py * N + px] += (top + (bot - top) * v) * amp;
+      }
+    }
+    norm += amp; amp *= 0.5;
+  }
+  for (let i = 0; i < out.length; i++) out[i] /= norm;
+  return out;
+}
+
+function buildDetail(seed, want, defer) {
+  const N = DETAIL_PX, texel = DETAIL_M / N;
+  const per = N * N * 4;
+  const data = new Uint8Array(per * 4);
+  const hgt = new Float32Array(N * N), alb = new Float32Array(N * N), top = new Float32Array(N * N);
+  const cellsFor = (metres) => Math.max(2, Math.round(DETAIL_M / metres));
+
+  const recipes = [
+    // Asphalt: 6-14 mm chippings bound in bitumen, the tops worn flat and the
+    // odd pale quartz stone that catches the light.
+    () => {
+      const W = worley(N, cellsFor(0.0105), seed + 11);
+      const sand = tileNoise(N, 256, seed + 12, 1);
+      for (let i = 0; i < N * N; i++) {
+        const e = W.E[i], id = W.ID[i];
+        const stone = smoothstep(0.04, 0.24, e);
+        // One stone in eighty is a pale quartz chip. More than that and the
+        // road glitters like a pavement in a cartoon.
+        const quartz = id < 0.012 ? 1 : 0;
+        hgt[i] = stone * (0.55 + 0.45 * id) * 0.0016 + sand[i] * 0.00015;
+        alb[i] = lerp(0.72 + 0.06 * sand[i], 0.84 + 0.46 * id * id + quartz * 0.45, stone);
+        top[i] = stone * (0.6 + 0.4 * id);
+      }
+    },
+    // Gravel: 12-40 mm stones lying loose on each other. What makes loose
+    // stone read as loose stone under a high sun is not the relief — a noon
+    // sun barely shades it — but the TONE: every stone is a slightly different
+    // rock, and the voids between them are deep enough to be in shadow.
+    () => {
+      const B = worley(N, cellsFor(0.028), seed + 21);
+      const S = worley(N, cellsFor(0.010), seed + 22);
+      const tint = tileNoise(N, 12, seed + 23, 2);
+      for (let i = 0; i < N * N; i++) {
+        const id = B.ID[i];
+        const r = 0.36 + 0.26 * id;
+        const big = smoothstep(r, r * 0.62, B.F1[i]) * smoothstep(0.015, 0.09, B.E[i]);
+        const dome = Math.sqrt(clamp(1 - (B.F1[i] / r) * (B.F1[i] / r), 0, 1));
+        const grit = smoothstep(0.03, 0.18, S.E[i]) * (1 - big);
+        // Mostly one pale stone, a tenth of it a darker rock, the odd white one.
+        const h2 = (id * 7.31) % 1;
+        const tone = id < 0.10 ? 0.52 + 0.2 * h2 : id > 0.94 ? 1.30 : 0.84 + 0.34 * h2;
+        const voidDark = 0.40 + 0.25 * S.ID[i];
+        hgt[i] = big * dome * (0.007 + 0.009 * id) + grit * 0.0014 * (0.5 + S.ID[i]);
+        alb[i] = lerp(lerp(voidDark, 0.78 + 0.22 * S.ID[i], grit), tone * (0.86 + 0.14 * dome), big)
+          * (1 + 0.08 * tint[i]);
+        top[i] = Math.max(big * dome, grit * 0.45);
+      }
+    },
+    // Earth: fine crumb and a scatter of small pebbles, with the faint
+    // hairline cracking of a surface that has dried out since it last rained —
+    // only in patches, because a whole road of it reads as crazy paving.
+    () => {
+      const crumb = tileNoise(N, 96, seed + 31, 3);
+      const P = worley(N, cellsFor(0.024), seed + 32);
+      const C = worley(N, cellsFor(0.30), seed + 33);
+      const mask = tileNoise(N, 4, seed + 34, 2);
+      for (let i = 0; i < N * N; i++) {
+        const r = 0.30;
+        const peb = P.ID[i] < 0.34 ? smoothstep(r, r * 0.5, P.F1[i]) : 0;
+        const crack = (1 - smoothstep(0.0, 0.022, C.E[i])) * smoothstep(0.10, 0.45, mask[i]);
+        hgt[i] = crumb[i] * 0.0011 + peb * 0.004 - crack * 0.0008;
+        alb[i] = (0.95 + 0.16 * crumb[i]) * (1 - 0.14 * crack) + peb * (0.08 + 0.34 * (P.ID[i] - 0.17));
+        top[i] = clamp(0.5 + crumb[i] * 0.6 + peb * 0.5 - crack, 0, 1);
+      }
+    },
+    // Concrete: fine exposed aggregate and pinholes.
+    () => {
+      const A = worley(N, cellsFor(0.006), seed + 41);
+      const pores = tileNoise(N, 160, seed + 42, 2);
+      for (let i = 0; i < N * N; i++) {
+        const stone = smoothstep(0.05, 0.25, A.E[i]);
+        const pore = smoothstep(0.55, 0.75, pores[i]);
+        hgt[i] = stone * 0.0004 - pore * 0.0006;
+        alb[i] = (0.92 + 0.16 * stone * A.ID[i]) * (1 - 0.35 * pore);
+        top[i] = clamp(stone - pore, 0, 1);
+      }
+    },
+  ];
+
+  const means = [1, 1, 1, 1];
+  // Every layer starts flat and neutral — which the shader reads as "no
+  // detail" — and a layer some road uses is filled in by build(L), now or
+  // shortly after load.
+  data.fill(128);
+  const build = (L) => {
+    recipes[L]();
+    // Normalise the albedo multiplier to a mean of exactly 1, so the detail
+    // adds grain without moving the colour the macro layer chose.
+    let mean = 0;
+    for (let i = 0; i < N * N; i++) mean += alb[i];
+    mean /= N * N;
+    means[L] = mean;
+    const o0 = L * per;
+    for (let py = 0; py < N; py++) {
+      const up = ((py + N - 1) % N) * N, dn = ((py + 1) % N) * N, cur = py * N;
+      for (let px = 0; px < N; px++) {
+        const xl = (px + N - 1) % N, xr = (px + 1) % N;
+        // Relief is exaggerated about 0.6x of true slope: real chippings are
+        // steeper than this, but at a texel of 3 mm the full slope reads as
+        // noise under a low sun rather than as stone.
+        const dx = (hgt[cur + xr] - hgt[cur + xl]) / (2 * texel) * 0.6;
+        const dz = (hgt[dn + px] - hgt[up + px]) / (2 * texel) * 0.6;
+        const inv = 1 / Math.sqrt(dx * dx + dz * dz + 1);
+        const o = o0 + (cur + px) * 4;
+        data[o] = clamp((0.5 - dx * inv * 0.5) * 255 + 0.5, 0, 255);
+        data[o + 1] = clamp((0.5 - dz * inv * 0.5) * 255 + 0.5, 0, 255);
+        data[o + 2] = clamp((alb[cur + px] / mean) * 0.5 * 255 + 0.5, 0, 255);
+        data[o + 3] = clamp(top[cur + px], 0, 1) * 255;
+      }
+    }
+    return L;
+  };
+  const later = [];
+  for (let L = 0; L < recipes.length; L++) {
+    if (want && !want.has(L)) continue;       // never sampled in this world
+    if (defer) later.push(L); else build(L);
+  }
+  return { data, size: N, layers: recipes.length, means, later, build };
+}
+
+// ---------------------------------------------------------------------------
+// Shader
+// ---------------------------------------------------------------------------
+//
+// Patched into a MeshStandardMaterial rather than written as a ShaderMaterial,
+// so the roads keep three's lights, shadows, fog and tone mapping without any
+// of it being reimplemented here.
+
+const V_PARS = /* glsl */`
+attribute vec3 aRoad;        // x macro layer, y detail layer (-1 none), z fringe 0..1
+uniform vec2 uPull;          // x fraction of distance, y cap in metres
+varying vec3 vRoad;
+varying vec2 vRoadUv;
+varying vec2 vRoadXZ;
+`;
+
+
+const V_MAIN = /* glsl */`
+vRoad = aRoad;
+vRoadUv = uv;
+vRoadXZ = ( modelMatrix * vec4( position, 1.0 ) ).xz;
+`;
+
+// Appended after <project_vertex>: draw the road a little nearer the eye in
+// DEPTH only. Scaling the view-space position toward the camera leaves x/z
+// and y/z untouched, so nothing moves on screen; only the depth test sees it.
+//
+// The terrain mesh is a linear interpolation of the same field between
+// vertices 1.3-16 m apart, and where a flat carriageway meets a rising verge
+// the interpolation rides above the true surface by more than the 4 cm the
+// road is drawn at — worst on the low tier, whose near grid is 2.7 m. Polygon
+// offset cannot help: its units are depth-buffer steps, which are fractions of
+// a millimetre near the car. A pull of 0.4% of the distance does, and it is
+// capped at 15 cm so a road behind the crest of a hill can never show through
+// it: the only thing the cap lets the road win against is something within
+// 15 cm of lying on it.
+const V_PULL = /* glsl */`
+{
+  float roadLen = length( mvPosition.xyz );
+  float roadPull = min( uPull.x * roadLen, uPull.y );
+  mvPosition.xyz *= 1.0 - roadPull / max( roadLen, 1e-3 );
+  gl_Position = projectionMatrix * mvPosition;
+}
+`;
+
+const F_PARS = /* glsl */`
+uniform sampler2DArray uRoadAlb;
+uniform sampler2DArray uRoadNrm;
+uniform sampler2DArray uRoadDet;
+uniform float uDetScale;
+uniform float uWet;
+uniform vec3 uSkyZenith;
+uniform vec3 uSkyHorizon;
+uniform vec3 uVerge;
+varying vec3 vRoad;
+varying vec2 vRoadUv;
+varying vec2 vRoadXZ;
+vec4 roadAlb;
+vec4 roadNrm;
+vec4 roadDet;
+float roadPuddle;
+
+// The tangent frame from screen-space derivatives, as three builds it for its
+// own normal maps. A copy, because three only defines it when a material has
+// a normalMap, and this one samples an array texture three does not know about.
+mat3 roadFrame( vec3 eye, vec3 n, vec2 uv ) {
+  vec3 q0 = dFdx( eye ), q1 = dFdy( eye );
+  vec2 st0 = dFdx( uv ), st1 = dFdy( uv );
+  vec3 q1perp = cross( q1, n ), q0perp = cross( n, q0 );
+  vec3 T = q1perp * st0.x + q0perp * st1.x;
+  vec3 B = q1perp * st0.y + q0perp * st1.y;
+  float det = max( dot( T, T ), dot( B, B ) );
+  float scale = ( det == 0.0 ) ? 0.0 : inversesqrt( det );
+  return mat3( T * scale, B * scale, n );
+}
+`;
+
+// Replaces <map_fragment>.
+const F_MAP = /* glsl */`
+roadAlb = texture( uRoadAlb, vec3( vRoadUv, vRoad.x ) );
+roadNrm = texture( uRoadNrm, vec3( vRoadUv, vRoad.x ) );
+{
+  float hasDet = step( -0.5, vRoad.y );
+  roadDet = mix( vec4( 0.5, 0.5, 0.5, 0.6 ),
+    texture( uRoadDet, vec3( vRoadXZ * uDetScale, max( vRoad.y, 0.0 ) ) ), hasDet );
+}
+// The ragged edge. Across the fringe the surface thins out into the verge: a
+// coarse blotch sets where the edge bulges and the detail's own stones decide
+// which texels survive at the boundary, so the break-up happens stone by stone.
+if ( vRoad.z > 0.0 ) {
+  float coarse = textureLod( uRoadDet, vec3( vRoadXZ * 0.085, 2.0 ), 3.0 ).b;
+  float keep = 0.55 + ( coarse - 0.5 ) * 1.4 + ( roadDet.a - 0.5 ) * 0.55 - vRoad.z * 1.25;
+  if ( keep < 0.0 ) discard;
+  roadAlb.rgb = mix( roadAlb.rgb, uVerge, smoothstep( 0.0, 0.9, vRoad.z ) * 0.8 );
+  roadAlb.a *= 1.0 - vRoad.z;
+}
+diffuseColor.rgb *= roadAlb.rgb * ( roadDet.b * 2.0 );
+`;
+
+// Replaces <roughnessmap_fragment>. Wetness is applied here because it has to
+// change the albedo and the roughness together.
+const F_ROUGH = /* glsl */`
+float roughnessFactor = mix( 0.94, 0.40, roadAlb.a );
+roughnessFactor = clamp( roughnessFactor + ( 0.55 - roadDet.a ) * 0.10, 0.08, 1.0 );
+// Standing water fills the lowest relief first: ruts, potholes, open cracks,
+// and the gaps between stones before the stones themselves.
+roadPuddle = uWet * smoothstep( 0.30, 0.70,
+  roadNrm.b * 1.15 + ( uWet - 1.0 ) * 0.55 + ( 0.5 - roadDet.a ) * 0.35 );
+// A wet porous surface darkens by about 40%; a polished one much less.
+diffuseColor.rgb *= mix( 1.0, 0.60, uWet * ( 1.0 - 0.5 * roadAlb.a ) );
+diffuseColor.rgb *= 1.0 - 0.18 * roadPuddle;
+roughnessFactor = mix( roughnessFactor, 0.32, uWet * 0.85 );
+roughnessFactor = mix( roughnessFactor, 0.045, roadPuddle );
+`;
+
+// Replaces <normal_fragment_maps>.
+const F_NORMAL = /* glsl */`
+#ifdef ROAD_NORMALS
+{
+  vec3 mapN = vec3( roadNrm.xy * 2.0 - 1.0, 0.0 );
+  mapN.z = sqrt( max( 0.0, 1.0 - dot( mapN.xy, mapN.xy ) ) );
+  mat3 tbn = roadFrame( - vViewPosition, normal, vRoadUv );
+  tbn[ 0 ] *= faceDirection;
+  tbn[ 1 ] *= faceDirection;
+  normal = normalize( tbn * mapN );
+  // The detail normal is in world X/Z, and roads are near enough horizontal
+  // that adding it in world space and rotating into view is exact to within
+  // the grade. Water is flat, so a puddle loses both.
+  vec2 dn = ( roadDet.rg * 2.0 - 1.0 ) * ( 1.0 - roadPuddle );
+  normal = normalize( normal + ( viewMatrix * vec4( dn.x, 0.0, dn.y, 0.0 ) ).xyz );
+  normal = normalize( mix( normal, nonPerturbedNormal, roadPuddle ) );
+}
+#endif
+`;
+
+// Appended after <lights_fragment_maps>: the sky, as the road sees it.
+//
+// There is no environment map in this game, so without this the only specular
+// a road gets is the sun's highlight, and a wet road reflects nothing at all.
+// The sky module hands over its zenith and horizon radiance every frame; this
+// looks the reflected ray up in that gradient, blurred toward the average sky
+// as the surface gets rougher. three's own split-sum Fresnel then decides how
+// much of it a road at this angle actually returns — which is why dry tarmac
+// goes pale and silvery far ahead of the car, exactly as it does in life.
+const F_ENV = /* glsl */`
+#if defined( RE_IndirectSpecular )
+{
+  vec3 rw = inverseTransformDirection( reflect( - geometryViewDir, geometryNormal ), viewMatrix );
+  vec3 skyRad = mix( uSkyHorizon, uSkyZenith, smoothstep( 0.0, 0.55, rw.y ) );
+  skyRad = mix( skyRad, ( uSkyHorizon * 0.6 + uSkyZenith * 0.4 ), roughnessFactor * roughnessFactor );
+  // Below the horizon the reflection is the ground, which is dark.
+  skyRad *= mix( 0.18, 1.0, smoothstep( -0.12, 0.02, rw.y ) );
+  radiance += skyRad;
+}
+#endif
+`;
 
 // ---------------------------------------------------------------------------
 // Geometry buffers
@@ -1209,11 +1754,19 @@ function V(o, x, y, z, u, v, t) {
   return o;
 }
 
-function vert(bk, x, y, z, nx, ny, nz, u, v, t) {
+// The layer, detail and fringe values every vertex pushed next will carry.
+// Set once per strip rather than threaded through every call.
+const cur = { layer: 0, detail: 0, fringe: 0 };
+
+/** Appends one vertex and returns its index in the bucket. */
+function vert(bk, x, y, z, nx, ny, nz, u, v, t, fringe = 0) {
+  const i = bk.pos.length / 3;
   bk.pos.push(x, y, z);
   bk.nor.push(nx, ny, nz);
   bk.uv.push(u, v);
   bk.col.push(t, t, t);
+  bk.road.push(cur.layer, cur.detail, fringe);
+  return i;
 }
 
 /**
@@ -1235,9 +1788,10 @@ function tri(bk, p, q, r, ux, uy, uz) {
     nx = -nx; ny = -ny; nz = -nz;
     const s = q; q = r; r = s;
   }
-  vert(bk, p.x, p.y, p.z, nx, ny, nz, p.u, p.v, p.t);
-  vert(bk, q.x, q.y, q.z, nx, ny, nz, q.u, q.v, q.t);
-  vert(bk, r.x, r.y, r.z, nx, ny, nz, r.u, r.v, r.t);
+  bk.idx.push(
+    vert(bk, p.x, p.y, p.z, nx, ny, nz, p.u, p.v, p.t),
+    vert(bk, q.x, q.y, q.z, nx, ny, nz, q.u, q.v, q.t),
+    vert(bk, r.x, r.y, r.z, nx, ny, nz, r.u, r.v, r.t));
 }
 
 function quad(bk, p, q, r, s, ux, uy, uz) {
@@ -1257,40 +1811,40 @@ export function createRoads(world, ground, opts = {}) {
   const GRID = Math.ceil((half * 2) / REGION);
   const CITY = { street: 1, avenue: 1, link: 1 };   // kinds that get sidewalks
 
-  // ---- atlas rows -------------------------------------------------------
+  // ---- families -----------------------------------------------------------
   // Registered in a fixed pass over the world so the layout is deterministic
-  // and the atlas holds nothing the map does not actually use. The key carries
-  // the road KIND as well as its dimensions, because two kinds that happen to
-  // share a profile do not share a history: wear, cracking, patching and how
-  // far the paint has faded all key off the kind alone.
+  // and the textures hold nothing the map does not actually use. The key
+  // carries the road KIND as well as its dimensions, because two kinds that
+  // happen to share a profile do not share a history.
   const specs = [];
-  const rowOf = new Map();
-  function row(key, make) {
-    let r = rowOf.get(key);
-    if (r === undefined) { r = specs.length; specs.push(make()); rowOf.set(key, r); }
-    return r;
+  const famOf = new Map();
+  function family(key, make) {
+    let f = famOf.get(key);
+    if (f === undefined) { f = specs.length; specs.push(make()); famOf.set(key, f); }
+    return f;
   }
 
-  const edgeRow = new Int16Array(world.edges.length);
-  let anyCity = false;
+  const edgeFam = new Int16Array(world.edges.length);
+  let anyCity = false, maxWidth = 0;
   for (const e of world.edges) {
     const key = `${e.kind}|${e.markings}|${e.width}|${e.lanes}|${e.surface}`;
     // Anything layout.js does not call asphalt is an unpaved lane, so a surface
     // added to ROAD later gets the loose painter by default rather than being
     // silently drawn as tarmac.
-    edgeRow[e.i] = row(key, () => (e.surface === 'asphalt'
+    edgeFam[e.i] = family(key, () => (e.surface === 'asphalt'
       ? pavedSpec(e.kind, e.markings, e.width, e.lanes, seed + rowSeed(e.kind, e.width))
       : looseSpec(e.kind, e.width, seed + rowSeed(e.kind, e.width))));
     if (CITY[e.kind] === 1) anyCity = true;
+    if (e.width > maxWidth) maxWidth = e.width;
   }
-  const walkRow = anyCity ? row('walk', () => walkSpec(seed + 311)) : -1;
-  const kerbRow = anyCity ? row('kerb', () => kerbSpec(seed + 733)) : -1;
+  const walkFam = anyCity ? family('walk', () => walkSpec(seed + 311)) : -1;
+  const kerbFam = anyCity ? family('kerb', () => kerbSpec(seed + 733)) : -1;
 
   // A junction takes the surface most of its arms are made of; a gravel lane
   // meeting a dirt one gives a gravel fill, because the dressing is what gets
   // dragged across the mouth.
   const junctions = world.nodes.filter((n) => n.edges.length >= 3);
-  const patchRow = new Map();
+  const patchFam = new Map();
   const patchKind = new Map();
   for (const n of junctions) {
     let loose = 0, gravel = 0;
@@ -1300,11 +1854,30 @@ export function createRoads(world, ground, opts = {}) {
     }
     const s = loose * 2 > n.edges.length ? (gravel * 2 > loose ? 'gravel' : 'dirt') : 'asphalt';
     patchKind.set(n.i, s);
-    if (!patchRow.has(s)) patchRow.set(s, row('patch:' + s, () => patchSpec(s, seed + 977)));
+    if (!patchFam.has(s)) patchFam.set(s, family('patch:' + s, () => patchSpec(s, seed + 977)));
   }
 
-  const atlas = buildAtlas(specs);
-  const ranges = atlas.ranges;
+  // LOAD TIME. Painting every layer and the detail up front made the roads
+  // the slowest stage of loading. In a browser only what the first frame needs
+  // is painted now: the first copy of every surface. The detail layers and the
+  // second copies follow one at a time in idle time over the next second or
+  // so, while the player is still on the title screen. Headless (the
+  // harnesses) everything is built synchronously, so what is measured is
+  // exactly what is drawn.
+  const defer = opts.defer ?? (typeof window !== 'undefined');
+  const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+  const tPaint = now();
+  const layerW = maxWidth > 13 ? LAYER_W_WIDE : LAYER_W_NARROW;
+  const atlas = buildLayers(specs, layerW, defer);
+  const tDetail = now();
+  // Only the detail layers some road actually uses are generated; the rest are
+  // left neutral, which the shader reads as "no detail".
+  const wantDetail = new Set(specs.map((s) => DETAIL[s.surface]).filter((d) => d >= 0));
+  const detail = buildDetail(seed + 5021, wantDetail, defer);
+  const tDone = now();
+  const paintMs = tDetail - tPaint, detailMs = tDone - tDetail;
+
+  const detailOf = (spec) => DETAIL[spec.surface] ?? DETAIL.none;
 
   // ---- buckets ----------------------------------------------------------
   const buckets = new Map();
@@ -1314,7 +1887,7 @@ export function createRoads(world, ground, opts = {}) {
     const k = j * GRID + i;
     let bk = buckets.get(k);
     if (!bk) {
-      bk = { cx: (i + 0.5) * REGION - half, cz: (j + 0.5) * REGION - half, pos: [], nor: [], uv: [], col: [] };
+      bk = { cx: (i + 0.5) * REGION - half, cz: (j + 0.5) * REGION - half, pos: [], nor: [], uv: [], col: [], road: [], idx: [] };
       buckets.set(k, bk);
     }
     return bk;
@@ -1323,9 +1896,7 @@ export function createRoads(world, ground, opts = {}) {
   // Low-frequency patchiness in world space. The texture repeats every 24 m;
   // this does not, which is what stops the eye locking onto the tile.
   const tseed = (seed + 4021) | 0;
-  const tint = (x, z) => 1 + fbm(x * 0.0143, z * 0.0143, tseed, 2) * 0.055;
-
-  const vOf = (r, v) => ranges[r].v0 + v * (ranges[r].v1 - ranges[r].v0);
+  const tint = (x, z) => 1 + fbm(x * 0.0143, z * 0.0143, tseed, 2) * 0.06;
 
   // ---- junction setbacks ------------------------------------------------
   // Ribbons are pulled back from every junction and the gap is filled with a
@@ -1350,7 +1921,7 @@ export function createRoads(world, ground, opts = {}) {
     trim[e.i * 2] = s0; trim[e.i * 2 + 1] = s1;
   }
 
-  // ---- carriageway ribbons, kerbs and sidewalks --------------------------
+  // ---- carriageway ribbons, fringes, kerbs and sidewalks -----------------
   // Strips are capped at 7 m across. The road profile the ground field is
   // stamped from has no camber, so a carriageway IS flat across and two
   // vertices would in principle be exact — but where two roads overlap the
@@ -1370,13 +1941,85 @@ export function createRoads(world, ground, opts = {}) {
         X: new Float64Array(MAX_CROSS), Y: new Float64Array(MAX_CROSS),
         Z: new Float64Array(MAX_CROSS), T: new Float64Array(MAX_CROSS),
         ox: 0, oy: 0, oz: 0, qx: 0, qy: 0, qz: 0,
+        // Fringe outer points, left and right.
+        lx: 0, ly: 0, lz: 0, rx: 0, ry: 0, rz: 0,
+        // The row of vertices this station last emitted, and for which bucket
+        // and tile, so the next quad can share it instead of repeating it.
+        rowBk: null, rowTile: -1, row: 0,
       };
     }
     return s;
   }
 
+  /**
+   * Splits any 8 m quad whose chord strays from the height field.
+   *
+   * The ribbon is linear between stations, and on a crest a straight chord
+   * runs BELOW the curved surface: the sagitta of an 8 m chord over a 100 m
+   * vertical curve is 8 cm, twice the clearance the road is drawn with. The
+   * terrain mesh is 1.6 m between vertices near the car, so it follows the
+   * crest and came up THROUGH the tarmac mid-quad — the dark hexagons that sat
+   * in the middle of country roads on every brow. Halving a quad quarters its
+   * sagitta, so a quad is split until the field rises no more than 2.2 cm
+   * above its midpoint at the centre line or either edge, down to 1 m. That
+   * leaves 1.8 cm of the 4 cm clearance for the terrain mesh's own error.
+   */
+  const TOL = 0.022;
+  const refined = [];
+  function refine(e, list) {
+    const hw = e.width / 2;
+    refined.length = 0;
+    refined.push(list[0]);
+    let ya = cross3(e, hw, list[0], [0, 0, 0]);
+    for (let i = 0; i + 1 < list.length; i++) {
+      const yb = cross3(e, hw, list[i + 1], [0, 0, 0]);
+      split(e, hw, list[i], list[i + 1], ya, yb, 0);
+      ya = yb;
+    }
+    list.length = 0;
+    for (const x of refined) list.push(x);
+  }
+  /** Field heights at the left edge, the centre line and the right edge. */
+  function cross3(e, hw, s, out) {
+    const p = pointOnEdge(e, s);
+    for (let k = -1; k <= 1; k++) out[k + 1] = ground.heightAt(p.x + p.nx * k * hw, p.z + p.nz * k * hw);
+    return out;
+  }
+  /**
+   * Quarter points as well as the middle: the height field is stamped on a
+   * 3 m grid, so it carries bumps shorter than the quad, and a midpoint alone
+   * can land on the one sample that happens to agree. The endpoint heights
+   * are handed down, so each test costs nine field samples, not fifteen.
+   */
+  function split(e, hw, a, b, ya, yb, depth) {
+    if (depth < 3 && b - a > 1.9) {
+      const q1 = cross3(e, hw, a + (b - a) * 0.25, [0, 0, 0]);
+      const q2 = cross3(e, hw, (a + b) * 0.5, [0, 0, 0]);
+      const q3 = cross3(e, hw, a + (b - a) * 0.75, [0, 0, 0]);
+      let worst = 0;
+      for (let k = 0; k < 3; k++) {
+        // Only a surface ABOVE the chord matters: that is the terrain coming
+        // up through the road. A chord above a sag just floats a centimetre
+        // or two, which the drawn clearance already allows for.
+        worst = Math.max(worst,
+          q1[k] - (ya[k] * 0.75 + yb[k] * 0.25),
+          q2[k] - (ya[k] + yb[k]) * 0.5,
+          q3[k] - (ya[k] * 0.25 + yb[k] * 0.75));
+      }
+      if (worst > TOL) {
+        const m = (a + b) * 0.5;
+        split(e, hw, a, m, ya, q2, depth + 1);
+        split(e, hw, m, b, q2, yb, depth + 1);
+        return;
+      }
+    }
+    refined.push(b);
+  }
+
   const arcs = [];
-  let quads = 0;
+  const cols = [];
+  let quads = 0, fringeQuads = 0;
+  const variantUse = new Map();
 
   for (const e of world.edges) {
     if (!e.pts || e.pts.length < 2 || e.length < 0.5) continue;
@@ -1390,27 +2033,58 @@ export function createRoads(world, ground, opts = {}) {
     for (let i = 0; i <= nFull; i++) arcs.push(s0 + i * STEP);
     // The ribbon has to end EXACTLY where the junction patch starts, so a short
     // remainder is absorbed into the last quad rather than dropped. V then runs
-    // a little past 1, which is precisely what the guard band is there for.
+    // a little past 1, which the sampler's own wrap handles.
     if (rem > 0.4) arcs.push(s1); else arcs[arcs.length - 1] = s1;
     if (arcs.length < 2) continue;
+    refine(e, arcs);
 
     const h = e.width / 2;
-    const rr = edgeRow[e.i];
-    const strips = Math.min(MAX_CROSS - 1, Math.max(1, Math.ceil(e.width / MAX_STRIP)));
-    const walk = walkRow >= 0 && CITY[e.kind] === 1;
+    const fam = edgeFam[e.i];
+    const spec = specs[fam];
+    const layer0 = atlas.first[fam];
+    // Columns across the road, as fractions of the half-width. There is always
+    // one at 70% each side: the ground is flat across the carriageway but its
+    // outer 15% blends toward the verge, so a vertex where the flat part ends
+    // keeps the chord from cutting under it.
+    cols.length = 0;
+    cols.push(-1);
+    if (e.width >= 5) {
+      const inner = Math.max(1, Math.ceil((1.4 * h) / MAX_STRIP));
+      for (let k = 0; k <= inner; k++) cols.push(-0.7 + (1.4 * k) / inner);
+    } else {
+      const inner = Math.max(1, Math.ceil(e.width / MAX_STRIP));
+      for (let k = 1; k < inner; k++) cols.push(-1 + (2 * k) / inner);
+    }
+    cols.push(1);
+    const strips = cols.length - 1;
+    const walk = walkFam >= 0 && CITY[e.kind] === 1;
+    const fw = walk ? 0 : e.kind === 'circuit' ? FRINGE.circuit
+      : spec.paint === 'loose' ? FRINGE.loose : FRINGE.paved;
+    // Mirror the whole road across its width on half the edges. Every marking
+    // plan is symmetric, so the paint does not notice, and it doubles the
+    // number of distinct-looking roads for nothing. Per edge, never per tile:
+    // the noise is not symmetric, so mirroring mid-edge would open a seam.
+    const flip = hash1(e.i, seed + 17) < 0.5;
+    const U = (u) => (flip ? 1 - u : u);
 
     for (let i = 0; i < arcs.length; i++) {
       const p = pointOnEdge(e, arcs[i]);
       const st = station(i);
       st.ax = p.nx; st.az = p.nz;                 // right-hand normal of the road
       for (let k = 0; k <= strips; k++) {
-        const f = (2 * k / strips - 1) * h;
+        const f = cols[k] * h;
         const x = p.x + p.nx * f, z = p.z + p.nz * f;
         st.X[k] = x; st.Z[k] = z;
         st.Y[k] = ground.heightAt(x, z) + LIFT;
         st.T[k] = tint(x, z);
       }
       st.cx = p.x; st.cz = p.z; st.cy = (st.Y[0] + st.Y[strips]) * 0.5;
+      if (fw > 0) {
+        const lx = p.x - p.nx * (h + fw), lz = p.z - p.nz * (h + fw);
+        const rx = p.x + p.nx * (h + fw), rz = p.z + p.nz * (h + fw);
+        st.lx = lx; st.lz = lz; st.ly = ground.heightAt(lx, lz) + LIFT;
+        st.rx = rx; st.rz = rz; st.ry = ground.heightAt(rx, rz) + LIFT;
+      }
       if (walk) {
         const ox = p.x - p.nx * (h + WALK_W), oz = p.z - p.nz * (h + WALK_W);
         const qx = p.x + p.nx * (h + WALK_W), qz = p.z + p.nz * (h + WALK_W);
@@ -1433,55 +2107,92 @@ export function createRoads(world, ground, opts = {}) {
       st.nx = nx / len; st.ny = ny / len; st.nz = nz / len;
     }
 
+    const fu = fw / e.width;                      // fringe width in U
+    for (let i = 0; i <= last; i++) pool[i].rowBk = null;
+    // One station's row of vertices, emitted at most once per bucket and tile.
+    // U continues past the carriageway for the fringe; the sampler clamps it
+    // back to the edge column, so the ravelled edge of the texture is what
+    // breaks up into the verge.
+    const rowFor = (st, bk, tile, v) => {
+      if (st.rowBk === bk && st.rowTile === tile) return st.row;
+      const base = bk.pos.length / 3;
+      for (let k = 0; k <= strips; k++) {
+        vert(bk, st.X[k], st.Y[k], st.Z[k], st.nx, st.ny, st.nz, U((cols[k] + 1) * 0.5), v, st.T[k], 0);
+      }
+      if (fw > 0) {
+        vert(bk, st.lx, st.ly, st.lz, st.nx, st.ny, st.nz, U(-fu), v, st.T[0], 1);
+        vert(bk, st.rx, st.ry, st.rz, st.nx, st.ny, st.nz, U(1 + fu), v, st.T[strips], 1);
+      }
+      st.rowBk = bk; st.rowTile = tile; st.row = base;
+      return base;
+    };
     for (let i = 0; i < last; i++) {
       const A = pool[i], B = pool[i + 1];
       const bk = bucket((A.cx + B.cx) * 0.5, (A.cz + B.cz) * 0.5);
-      const v0 = (i % VSTEPS) / VSTEPS;
-      const va = vOf(rr, v0);
-      const vb = vOf(rr, v0 + (arcs[i + 1] - arcs[i]) / TILE);
+      // V restarts at every tile boundary, and every boundary is a station,
+      // so no quad ever straddles two tiles. The last quad of an edge may run
+      // a little past 1, which the sampler's own wrap handles.
+      const tileIdx = Math.floor((arcs[i] - s0 + 1e-6) / TILE);
+      const tileStart = s0 + tileIdx * TILE;
+      const va = (arcs[i] - tileStart) / TILE;
+      const vb = (arcs[i + 1] - tileStart) / TILE;
+      // Which worn copy this 24 m tile uses. Hashed on the edge and the tile,
+      // so it is fixed for the life of the world and different on every road.
+      const variant = spec.variants > 1 ? Math.floor(hash2(e.i, tileIdx, seed + 29) * spec.variants) : 0;
+      cur.layer = layer0 + variant;
+      cur.detail = detailOf(spec);
+      variantUse.set(cur.layer, (variantUse.get(cur.layer) || 0) + 1);
 
       // Winding verified against forward = -Z, right = +X: index 0 is the left
       // kerb, index `strips` the right, and (left, right, right') faces up.
+      // Vertex rows are shared between consecutive quads of the same tile and
+      // bucket, so a station costs its vertices once rather than twice.
+      const a = rowFor(A, bk, tileIdx, va), b = rowFor(B, bk, tileIdx, vb);
+      const I = bk.idx;
       for (let k = 0; k < strips; k++) {
-        const u0 = k / strips, u1 = (k + 1) / strips;
-        vert(bk, A.X[k], A.Y[k], A.Z[k], A.nx, A.ny, A.nz, u0, va, A.T[k]);
-        vert(bk, A.X[k + 1], A.Y[k + 1], A.Z[k + 1], A.nx, A.ny, A.nz, u1, va, A.T[k + 1]);
-        vert(bk, B.X[k + 1], B.Y[k + 1], B.Z[k + 1], B.nx, B.ny, B.nz, u1, vb, B.T[k + 1]);
-        vert(bk, A.X[k], A.Y[k], A.Z[k], A.nx, A.ny, A.nz, u0, va, A.T[k]);
-        vert(bk, B.X[k + 1], B.Y[k + 1], B.Z[k + 1], B.nx, B.ny, B.nz, u1, vb, B.T[k + 1]);
-        vert(bk, B.X[k], B.Y[k], B.Z[k], B.nx, B.ny, B.nz, u0, vb, B.T[k]);
+        I.push(a + k, a + k + 1, b + k + 1, a + k, b + k + 1, b + k);
         quads++;
+      }
+      if (fw > 0) {
+        // Row layout: strips + 1 carriageway vertices, then the left and the
+        // right fringe outer points. The fringe's inner edge IS the
+        // carriageway's edge vertex — same position, same U, fringe 0.
+        const aL = a + strips + 1, aR = a + strips + 2, bL = b + strips + 1, bR = b + strips + 2;
+        I.push(aL, a, b, aL, b, bL);
+        I.push(a + strips, aR, bR, a + strips, bR, b + strips);
+        fringeQuads += 2;
       }
 
       if (!walk) continue;
       const R = strips;
-      const kva = vOf(kerbRow, v0), kvb = vOf(kerbRow, v0 + (arcs[i + 1] - arcs[i]) / TILE);
-      const wva = vOf(walkRow, v0), wvb = vOf(walkRow, v0 + (arcs[i + 1] - arcs[i]) / TILE);
+      const kl = atlas.first[kerbFam], wl = atlas.first[walkFam];
 
       // Left side, then right. The kerb face points away from the carriageway.
+      cur.layer = kl; cur.detail = DETAIL.none;
       quad(bk,
-        V(_a, A.X[0], A.Y[0], A.Z[0], 0, kva, A.T[0]),
-        V(_b, A.X[0], A.Y[0] + KERB, A.Z[0], 1, kva, A.T[0]),
-        V(_c, B.X[0], B.Y[0] + KERB, B.Z[0], 1, kvb, B.T[0]),
-        V(_d, B.X[0], B.Y[0], B.Z[0], 0, kvb, B.T[0]),
+        V(_a, A.X[0], A.Y[0], A.Z[0], 0, va, A.T[0]),
+        V(_b, A.X[0], A.Y[0] + KERB, A.Z[0], 1, va, A.T[0]),
+        V(_c, B.X[0], B.Y[0] + KERB, B.Z[0], 1, vb, B.T[0]),
+        V(_d, B.X[0], B.Y[0], B.Z[0], 0, vb, B.T[0]),
         -A.ax, 0, -A.az);
       quad(bk,
-        V(_a, A.X[0], A.Y[0] + KERB, A.Z[0], 0, wva, A.T[0]),
-        V(_b, A.ox, A.oy, A.oz, 1, wva, A.T[0]),
-        V(_c, B.ox, B.oy, B.oz, 1, wvb, B.T[0]),
-        V(_d, B.X[0], B.Y[0] + KERB, B.Z[0], 0, wvb, B.T[0]),
+        V(_a, A.X[R], A.Y[R], A.Z[R], 0, va, A.T[R]),
+        V(_b, A.X[R], A.Y[R] + KERB, A.Z[R], 1, va, A.T[R]),
+        V(_c, B.X[R], B.Y[R] + KERB, B.Z[R], 1, vb, B.T[R]),
+        V(_d, B.X[R], B.Y[R], B.Z[R], 0, vb, B.T[R]),
+        A.ax, 0, A.az);
+      cur.layer = wl; cur.detail = DETAIL.concrete;
+      quad(bk,
+        V(_a, A.X[0], A.Y[0] + KERB, A.Z[0], 0, va, A.T[0]),
+        V(_b, A.ox, A.oy, A.oz, 1, va, A.T[0]),
+        V(_c, B.ox, B.oy, B.oz, 1, vb, B.T[0]),
+        V(_d, B.X[0], B.Y[0] + KERB, B.Z[0], 0, vb, B.T[0]),
         0, 1, 0);
       quad(bk,
-        V(_a, A.X[R], A.Y[R], A.Z[R], 0, kva, A.T[R]),
-        V(_b, A.X[R], A.Y[R] + KERB, A.Z[R], 1, kva, A.T[R]),
-        V(_c, B.X[R], B.Y[R] + KERB, B.Z[R], 1, kvb, B.T[R]),
-        V(_d, B.X[R], B.Y[R], B.Z[R], 0, kvb, B.T[R]),
-        A.ax, 0, A.az);
-      quad(bk,
-        V(_a, A.X[R], A.Y[R] + KERB, A.Z[R], 0, wva, A.T[R]),
-        V(_b, A.qx, A.qy, A.qz, 1, wva, A.T[R]),
-        V(_c, B.qx, B.qy, B.qz, 1, wvb, B.T[R]),
-        V(_d, B.X[R], B.Y[R] + KERB, B.Z[R], 0, wvb, B.T[R]),
+        V(_a, A.X[R], A.Y[R] + KERB, A.Z[R], 0, va, A.T[R]),
+        V(_b, A.qx, A.qy, A.qz, 1, va, A.T[R]),
+        V(_c, B.qx, B.qy, B.qz, 1, vb, B.T[R]),
+        V(_d, B.X[R], B.Y[R] + KERB, B.Z[R], 0, vb, B.T[R]),
         0, 1, 0);
       quads += 4;
     }
@@ -1490,6 +2201,31 @@ export function createRoads(world, ground, opts = {}) {
   // ---- junction patches and kerb returns ---------------------------------
   const arms = [];
   let patches = 0;
+
+  /**
+   * One triangle of a junction fan, split into four while the ground bulges
+   * through it. A junction is where several graded roads are blended into one
+   * surface, so it is the least planar ground in the network, and a fan of
+   * flat 15 m triangles sank under it — measured, one fan sample in eight was
+   * within 1.5 cm of the surface. Heights are ground heights; LIFT is added
+   * when the vertex is written.
+   */
+  function fan(bk, ax, ay, az, bx, by, bz, cx, cy2, cz, uvP, depth) {
+    const mx = (ax + bx + cx) / 3, mz = (az + bz + cz) / 3;
+    const bulge = ground.heightAt(mx, mz) - (ay + by + cy2) / 3;
+    const size = Math.max(Math.hypot(bx - ax, bz - az), Math.hypot(cx - ax, cz - az), Math.hypot(cx - bx, cz - bz));
+    if (depth < 3 && size > 2.5 && bulge > LIFT - 0.022) {
+      const abx = (ax + bx) / 2, abz = (az + bz) / 2, aby = ground.heightAt(abx, abz);
+      const bcx = (bx + cx) / 2, bcz = (bz + cz) / 2, bcy = ground.heightAt(bcx, bcz);
+      const cax = (cx + ax) / 2, caz = (cz + az) / 2, cay = ground.heightAt(cax, caz);
+      fan(bk, ax, ay, az, abx, aby, abz, cax, cay, caz, uvP, depth + 1);
+      fan(bk, abx, aby, abz, bx, by, bz, bcx, bcy, bcz, uvP, depth + 1);
+      fan(bk, cax, cay, caz, bcx, bcy, bcz, cx, cy2, cz, uvP, depth + 1);
+      fan(bk, abx, aby, abz, bcx, bcy, bcz, cax, cay, caz, uvP, depth + 1);
+      return;
+    }
+    tri(bk, uvP(_a, ax, ay + LIFT, az), uvP(_b, bx, by + LIFT, bz), uvP(_c, cx, cy2 + LIFT, cz), 0, 1, 0);
+  }
 
   for (const n of junctions) {
     arms.length = 0;
@@ -1518,7 +2254,9 @@ export function createRoads(world, ground, opts = {}) {
     const bk = bucket(n.x, n.z);
     const cy = ground.heightAt(n.x, n.z) + LIFT;
     const ct = tint(n.x, n.z);
-    const pr = patchRow.get(patchKind.get(n.i));
+    const pf = patchFam.get(patchKind.get(n.i));
+    cur.layer = atlas.first[pf];
+    cur.detail = detailOf(specs[pf]);
 
     // Fan from the node out to every mouth corner in turn. Sorted by the angle
     // the road leaves at, the corners form a star-shaped ring around the node,
@@ -1530,21 +2268,18 @@ export function createRoads(world, ground, opts = {}) {
     const inv = 0.5 / R;
     const uvP = (o, x, y, z) => V(o, x, y, z,
       clamp(0.5 + (x - n.x) * inv, 0, 1),
-      vOf(pr, clamp(0.5 + (z - n.z) * inv, 0, 1)), tint(x, z));
+      clamp(0.5 + (z - n.z) * inv, 0, 1), tint(x, z));
 
     for (let k = 0; k < arms.length * 2; k++) {
       const m0 = arms[(k >> 1) % arms.length], m1 = arms[((k + 1) >> 1) % arms.length];
       const x0 = (k & 1) ? m0.bx : m0.ax, z0 = (k & 1) ? m0.bz : m0.az;
       const x1 = (k & 1) ? m1.ax : m1.bx, z1 = (k & 1) ? m1.az : m1.bz;
-      tri(bk,
-        V(_a, n.x, cy, n.z, 0.5, vOf(pr, 0.5), ct),
-        uvP(_b, x0, ground.heightAt(x0, z0) + LIFT, z0),
-        uvP(_c, x1, ground.heightAt(x1, z1) + LIFT, z1),
-        0, 1, 0);
+      fan(bk, n.x, cy - LIFT, n.z, x0, ground.heightAt(x0, z0), z0,
+        x1, ground.heightAt(x1, z1), z1, uvP, 0);
     }
     patches++;
 
-    if (walkRow < 0) continue;
+    if (walkFam < 0) continue;
     // Kerb returns. Without them every city intersection has a four-way gap in
     // the pavement, which is far more noticeable than the corners themselves.
     for (let k = 0; k < arms.length; k++) {
@@ -1552,61 +2287,118 @@ export function createRoads(world, ground, opts = {}) {
       if (!m0.city || !m1.city) continue;
       const chord = Math.hypot(m1.ax - m0.bx, m1.az - m0.bz);
       if (chord < 0.4) continue;
-      const wv = vOf(walkRow, Math.min(1, chord / TILE)), wv0 = vOf(walkRow, 0);
-      const kv = vOf(kerbRow, Math.min(1, chord / TILE)), kv0 = vOf(kerbRow, 0);
+      const vv = Math.min(1, chord / TILE);
       const y0 = ground.heightAt(m0.bx, m0.bz) + LIFT;
       const y1 = ground.heightAt(m1.ax, m1.az) + LIFT;
       // The face has to look away from the junction, whichever way round the
       // wedge happens to be wound.
       const mx = (m0.bx + m1.ax) * 0.5 - n.x, mz = (m0.bz + m1.az) * 0.5 - n.z;
 
-      const t0 = tint(m0.bx, m0.bz), t1 = tint(m1.ax, m1.az);
+      const t0v = tint(m0.bx, m0.bz), t1v = tint(m1.ax, m1.az);
+      cur.layer = atlas.first[kerbFam]; cur.detail = DETAIL.none;
       quad(bk,
-        V(_a, m0.bx, y0, m0.bz, 0, kv0, t0), V(_b, m0.bx, y0 + KERB, m0.bz, 1, kv0, t0),
-        V(_c, m1.ax, y1 + KERB, m1.az, 1, kv, t1), V(_d, m1.ax, y1, m1.az, 0, kv, t1),
+        V(_a, m0.bx, y0, m0.bz, 0, 0, t0v), V(_b, m0.bx, y0 + KERB, m0.bz, 1, 0, t0v),
+        V(_c, m1.ax, y1 + KERB, m1.az, 1, vv, t1v), V(_d, m1.ax, y1, m1.az, 0, vv, t1v),
         mx, 0, mz);
+      cur.layer = atlas.first[walkFam]; cur.detail = DETAIL.concrete;
       quad(bk,
-        V(_a, m0.bx, y0 + KERB, m0.bz, 0, wv0, t0),
-        V(_b, m0.qx, ground.heightAt(m0.qx, m0.qz) + LIFT + KERB, m0.qz, 1, wv0, tint(m0.qx, m0.qz)),
-        V(_c, m1.ox, ground.heightAt(m1.ox, m1.oz) + LIFT + KERB, m1.oz, 1, wv, tint(m1.ox, m1.oz)),
-        V(_d, m1.ax, y1 + KERB, m1.az, 0, wv, t1),
+        V(_a, m0.bx, y0 + KERB, m0.bz, 0, 0, t0v),
+        V(_b, m0.qx, ground.heightAt(m0.qx, m0.qz) + LIFT + KERB, m0.qz, 1, 0, tint(m0.qx, m0.qz)),
+        V(_c, m1.ox, ground.heightAt(m1.ox, m1.oz) + LIFT + KERB, m1.oz, 1, vv, tint(m1.ox, m1.oz)),
+        V(_d, m1.ax, y1 + KERB, m1.az, 0, vv, t1v),
         0, 1, 0);
     }
   }
 
-  // ---- material and meshes -----------------------------------------------
-  // buildAtlas() measures each row's v-range from the TOP of the canvas, which
-  // is the only sane way to stack rows you are drawing with a 2D context. A
-  // CanvasTexture flips Y by default, so without flipY = false every road
-  // samples the MIRROR of its own row — asphalt streets came out as the dirt
-  // patch tile and sidewalks appeared in the middle of the carriageway. Both
-  // atlases are stacked identically, so both need the same treatment; a normal
-  // map flipped against its albedo would light every kerb from underneath.
-  function makeTex(canvas, space) {
-    const t = new THREE.CanvasTexture(canvas);
+  // ---- textures and material ----------------------------------------------
+  // Both macro textures are the same stack of layers. V wraps in the sampler;
+  // U clamps, which is also what turns the fringe's out-of-range U into the
+  // ravelled edge column.
+  function arrayTex(data, w, h, d, space, wrapS) {
+    const t = new THREE.DataArrayTexture(data, w, h, d);
+    t.format = THREE.RGBAFormat;
+    t.type = THREE.UnsignedByteType;
     t.colorSpace = space;
-    t.flipY = false;
-    // U spans the carriageway and V never leaves its row, so both axes clamp.
-    // The tiling along the road is done in the UVs, not by the sampler.
-    t.wrapS = THREE.ClampToEdgeWrapping;
-    t.wrapT = THREE.ClampToEdgeWrapping;
+    t.wrapS = wrapS;
+    t.wrapT = THREE.RepeatWrapping;
     t.magFilter = THREE.LinearFilter;
     t.minFilter = THREE.LinearMipmapLinearFilter;
     t.generateMipmaps = true;
-    t.anisotropy = opts.anisotropy ?? 8;
+    t.anisotropy = opts.anisotropy ?? QUALITY.medium.anisotropy;
+    t.needsUpdate = true;
     return t;
   }
-  const texture = makeTex(atlas.canvas, THREE.SRGBColorSpace);
-  const normalTex = makeTex(atlas.ncanvas, THREE.NoColorSpace);
+  const albedoTex = arrayTex(atlas.alb, atlas.width, atlas.height, atlas.layers, THREE.SRGBColorSpace, THREE.ClampToEdgeWrapping);
+  const normalTex = arrayTex(atlas.nrm, atlas.width, atlas.height, atlas.layers, THREE.NoColorSpace, THREE.ClampToEdgeWrapping);
+  const detailTex = arrayTex(detail.data, detail.size, detail.size, detail.layers, THREE.NoColorSpace, THREE.RepeatWrapping);
+  const textures = [albedoTex, normalTex, detailTex];
 
-  const material = new THREE.MeshLambertMaterial({
-    map: texture,
-    // Lambert carries a full tangent-space normal map, and derives the tangent
-    // frame from screen-space derivatives, so no tangent attribute is needed —
-    // which matters, because adding one would be a fourth buffer over a hundred
-    // thousand triangles for something the fragment shader can reconstruct.
-    normalMap: normalTex,
-    normalScale: new THREE.Vector2(1, 1),
+  // The idle queue: detail first, because it is what the camera sits on, then
+  // the second copies. One job per idle slot, each 10-40 ms; only the layer
+  // that changed is re-uploaded.
+  //
+  // A partial upload is only safe onto storage that already holds every other
+  // layer. The FIRST upload allocates the storage, and so does any upload
+  // after a sampler change (anisotropy is part of three's texture cache key,
+  // so changing it makes a new GL texture) — a layer update riding either of
+  // those uploads every layer but one as black. Measured: switching quality
+  // while the queue was still running blacked out every road but one. So a
+  // texture waiting on a full upload takes no layer updates; the data array
+  // is shared, and the full upload carries the new layer anyway.
+  const fullPending = new Set();
+  const expectFull = (tex) => {
+    tex.clearLayerUpdates();
+    fullPending.add(tex);
+    tex.onUpdate = () => fullPending.delete(tex);
+  };
+  const touch = (tex, L) => {
+    if (!fullPending.has(tex)) tex.addLayerUpdate(L);
+    tex.needsUpdate = true;
+  };
+  for (const tex of textures) expectFull(tex);
+  const jobs = [];
+  for (const L of detail.later) {
+    jobs.push(() => touch(detailTex, detail.build(L)));
+  }
+  for (const job of atlas.later) {
+    jobs.push(() => {
+      const L = atlas.paintLater(job);
+      touch(albedoTex, L);
+      touch(normalTex, L);
+    });
+  }
+  let disposed = false;
+  const idle = typeof requestIdleCallback === 'function'
+    ? (fn) => requestIdleCallback(fn, { timeout: 500 })
+    : (fn) => setTimeout(fn, 40);
+  const pump = () => {
+    if (disposed || !jobs.length) return;
+    jobs.shift()();
+    if (jobs.length) idle(pump);
+  };
+  if (jobs.length) idle(pump);
+  /** Runs whatever is still queued, now. For harnesses and captures. */
+  function finishNow() { while (jobs.length && !disposed) jobs.shift()(); }
+
+  const verge = surfaceRGB('gravel', 1.0);
+  const uniforms = {
+    uRoadAlb: { value: albedoTex },
+    uRoadNrm: { value: normalTex },
+    uRoadDet: { value: detailTex },
+    uDetScale: { value: 1 / DETAIL_M },
+    uWet: { value: 0 },
+    // A clear late-morning sky until the sky module says otherwise; linear.
+    uSkyZenith: { value: new THREE.Color(0.30, 0.52, 0.95) },
+    uSkyHorizon: { value: new THREE.Color(0.95, 1.10, 1.25) },
+    uVerge: { value: new THREE.Color(lin(verge[0]), lin(verge[1]), lin(verge[2])) },
+    uPull: { value: new THREE.Vector2(0.004, 0.15) },
+  };
+
+  let normalsOn = true;
+  const material = new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    roughness: 0.9,
+    metalness: 0,
     vertexColors: true,
     // Belt and braces with the 4 cm lift: the terrain mesh is built from the
     // same height field, so at grazing angles a metre away the two surfaces are
@@ -1615,6 +2407,22 @@ export function createRoads(world, ground, opts = {}) {
     polygonOffsetFactor: -2,
     polygonOffsetUnits: -4,
   });
+  material.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, uniforms);
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\n' + V_PARS)
+      .replace('#include <uv_vertex>', '#include <uv_vertex>\n' + V_MAIN)
+      .replace('#include <project_vertex>', '#include <project_vertex>\n' + V_PULL);
+    shader.fragmentShader = (normalsOn ? '#define ROAD_NORMALS\n' : '') + shader.fragmentShader
+      .replace('#include <common>', '#include <common>\n' + F_PARS)
+      .replace('#include <map_fragment>', F_MAP)
+      .replace('#include <roughnessmap_fragment>', F_ROUGH)
+      .replace('#include <normal_fragment_maps>', F_NORMAL)
+      .replace('#include <lights_fragment_maps>', '#include <lights_fragment_maps>\n' + F_ENV);
+  };
+  // The program key has to carry the normals switch, or three reuses whichever
+  // variant happened to compile first.
+  material.customProgramCacheKey = () => 'openroad-roads-v2' + (normalsOn ? '-n' : '');
 
   const group = new THREE.Group();
   group.name = 'roads';
@@ -1626,12 +2434,15 @@ export function createRoads(world, ground, opts = {}) {
   let triangles = 0, vertices = 0;
 
   for (const bk of buckets.values()) {
-    if (bk.pos.length < 9) continue;
+    if (bk.idx.length < 3) continue;
     const g = new THREE.BufferGeometry();
+    const nv = bk.pos.length / 3;
+    g.setIndex(nv > 65535 ? new THREE.Uint32BufferAttribute(bk.idx, 1) : new THREE.Uint16BufferAttribute(bk.idx, 1));
     g.setAttribute('position', new THREE.Float32BufferAttribute(bk.pos, 3));
     g.setAttribute('normal', new THREE.Float32BufferAttribute(bk.nor, 3));
     g.setAttribute('uv', new THREE.Float32BufferAttribute(bk.uv, 2));
     g.setAttribute('color', new THREE.Float32BufferAttribute(bk.col, 3));
+    g.setAttribute('aRoad', new THREE.Float32BufferAttribute(bk.road, 3));
     g.computeBoundingSphere();
 
     const mesh = new THREE.Mesh(g, material);
@@ -1644,26 +2455,42 @@ export function createRoads(world, ground, opts = {}) {
     centreZ[meshes.length] = bk.cz;
     meshes.push(mesh);
     group.add(mesh);
-    vertices += bk.pos.length / 3;
-    triangles += bk.pos.length / 9;
+    vertices += nv;
+    triangles += bk.idx.length / 3;
   }
   group.updateMatrix();
   buckets.clear();
 
   // ---- runtime ------------------------------------------------------------
-  // Defaults to the 'high' row above. main.js never calls roads.setQuality(),
-  // so whatever is chosen here is what actually ships.
   let cullDist = opts.drawDistance ?? QUALITY.high.drawDistance;
   const regionRadius = REGION * Math.SQRT1_2;
   let acc = 1;                               // forces a pass on the first frame
 
   /**
-   * Distance culling only — the roads never move, so there is nothing else to
-   * do here. Re-evaluated at 20 Hz rather than every frame: a region's
-   * visibility cannot change meaningfully in 50 ms at any speed the car can
-   * reach, and toggling on the frame boundary makes the horizon flicker.
+   * Reads what the sky published this frame — the colours the road reflects
+   * and how wet the world is — off the scene the roads were added to. The
+   * contract is a plain object on scene.userData, so there is no import and
+   * no ordering between the modules: with no sky it stays a dry clear day.
+   * The sky already lags wetness behind the rain (half a minute to wet, some
+   * minutes to dry), so a shower that has passed leaves the road glistening.
+   */
+  function readSky() {
+    const scene = group.parent;
+    const sky = scene && scene.userData ? scene.userData.sky : null;
+    if (!sky) return;
+    if (sky.zenith) uniforms.uSkyZenith.value.copy(sky.zenith);
+    if (sky.horizon) uniforms.uSkyHorizon.value.copy(sky.horizon);
+    uniforms.uWet.value = clamp(sky.wetness ?? sky.rain ?? 0, 0, 1);
+  }
+
+  /**
+   * Distance culling — the roads never move, so there is nothing else to do
+   * here. Re-evaluated at 20 Hz rather than every frame: a region's visibility
+   * cannot change meaningfully in 50 ms at any speed the car can reach, and
+   * toggling on the frame boundary makes the horizon flicker.
    */
   function update(cameraPos, dt) {
+    readSky();
     // A caller that passes no dt (or a paused dt of 0) would otherwise never
     // reach the threshold again after the first pass and freeze the culling
     // wherever it happened to be. Re-evaluating every call instead is 55
@@ -1685,44 +2512,53 @@ export function createRoads(world, ground, opts = {}) {
     const t = typeof q === 'string' ? QUALITY[q] : q;
     if (!t) return;
     if (t.drawDistance !== undefined) cullDist = t.drawDistance;
-    if (t.anisotropy !== undefined && t.anisotropy !== texture.anisotropy) {
-      texture.anisotropy = t.anisotropy;
-      normalTex.anisotropy = t.anisotropy;
-      texture.needsUpdate = true;            // sampler state is set on upload
-      normalTex.needsUpdate = true;
+    if (t.anisotropy !== undefined && t.anisotropy !== albedoTex.anisotropy) {
+      // Sampler state is set on upload, so this re-uploads — on a settings
+      // change, never per frame — and it is a full upload into new storage.
+      for (const tex of textures) { tex.anisotropy = t.anisotropy; expectFull(tex); tex.needsUpdate = true; }
     }
-    if (t.normals !== undefined) {
-      // Attaching or removing a map recompiles the shader, so this may only
-      // ever run on a quality switch. The texture itself is kept either way —
-      // the player can switch back, and rebuilding the atlas would cost a
-      // second of stall for a setting that is toggled in a menu.
-      const want = t.normals ? normalTex : null;
-      if (material.normalMap !== want) { material.normalMap = want; material.needsUpdate = true; }
+    if (t.normals !== undefined && t.normals !== normalsOn) {
+      normalsOn = t.normals;
+      material.needsUpdate = true;
     }
     acc = 1;
   }
 
   function dispose() {
+    disposed = true;
     for (const m of meshes) m.geometry.dispose();
     group.clear();
     meshes.length = 0;
     material.dispose();
-    texture.dispose();
-    normalTex.dispose();
+    for (const t of textures) t.dispose();
   }
 
+  const layerBytes = atlas.width * atlas.height * 4 * atlas.layers * 2;
+  const detailBytes = detail.size * detail.size * 4 * detail.layers;
+
   return {
-    group, update, setQuality, dispose,
+    group, update, setQuality, dispose, material, uniforms, finishNow,
+    get pending() { return jobs.length; },
     stats: {
       drawCalls: meshes.length,
-      triangles, vertices, quads, patches,
-      atlasRows: specs.length,
-      atlas: `${atlas.width}x${atlas.height}`,
-      atlasMaps: 2,
-      // Along-road texels per metre, which is the resolution that actually
-      // limits how small a pothole or a joint can be and still read.
-      rowPx: ranges.map((r) => r.px),
+      triangles, vertices, quads, fringeQuads, patches,
+      families: specs.length,
+      layers: atlas.layers,
+      layer: `${atlas.width}x${atlas.height}`,
+      // Texels per metre along the road, which is the resolution that decides
+      // whether a pothole or a joint can read at all — 43, up from 6 to 13.
+      alongTexelsPerMetre: atlas.height / TILE,
+      // Megabytes of texture, mips included.
+      textureMB: +(((layerBytes + detailBytes) * 4 / 3) / 1048576).toFixed(1),
+      paintMs: Math.round(paintMs),
+      detailMs: Math.round(detailMs),
       buildMs: Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0),
+    },
+    // For the harness: exactly what was painted, and what every family is.
+    debug: {
+      specs, atlas, detail, variantUse,
+      layerOfEdge: (ei) => atlas.first[edgeFam[ei]],
+      familyOfEdge: (ei) => specs[edgeFam[ei]],
     },
   };
 }

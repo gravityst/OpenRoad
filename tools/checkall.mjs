@@ -22,6 +22,7 @@ const CHECKS = [
   ['model', 'imported cars match the rig, and a missing one is harmless'],
   ['traffic', 'the other cars behave like traffic'],
   ['drift', 'sideways scores, straight does not, and the detector never flickers'],
+  ['atmosphere', 'roads are sharp and seamless, and the air hides the edge of the world'],
   ['brand', 'every name in the game is invented'],
   ['nature', 'trees, rocks and grass grow where they should and cost what they say'],
 ];

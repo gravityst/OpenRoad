@@ -34,6 +34,31 @@
 // a different pattern per building, out of one 512x512 texture and one uniform.
 //
 // Every business name on a shopfront is invented. That is a hard requirement.
+//
+// THE COUNTRY
+//
+// There is no city in this world any more: it is farmhouses, sheds and barns,
+// seen at 30 m/s across a field. At that distance what makes a building read
+// as a building is not texture detail but a handful of big cues, and the
+// flat-painted boxes had none of them:
+//
+//   * DEPTH. Every facade is drawn twice — once in colour, once as relief in
+//     the same metre space — and the relief becomes a normal map. Windows sit
+//     back in their reveals, sills and lintels stand proud, boards and battens
+//     and brick courses catch a low sun. It costs one texture fetch.
+//   * MATERIAL. A farmhouse is lap board, render over a brick plinth, brick,
+//     or stone; a barn is stained board-and-batten or profiled steel. Each is
+//     its own texture rather than one texture tinted five ways.
+//   * SILHOUETTE. Hip roofs as well as gables, chimneys, a fascia along the
+//     eaves, barn roofs pitched like barns (27 degrees, not 9), big sliding
+//     doors on a barn's gable end and a hay-loft door above them.
+//   * GROUNDING. The bottom metre of every wall darkens toward the ground. It
+//     is the cheapest possible ambient occlusion — computed in the vertex
+//     shader from the instance's own height — and it is most of what stops a
+//     box looking pasted onto the grass.
+//
+// Small "houses" (under 4.5 m) are sheds and are built as sheds: timber, one
+// door, no windows, no porch, no garden wall, and dark at night.
 
 import * as THREE from 'three';
 import { mulberry, clamp } from '../world/noise.js';
@@ -55,6 +80,8 @@ const TILE = {
   metal: { u: 4.0,  v: 4.0  },
   trim:  { u: 4.0,  v: 4.0  },
   flat:  { u: 16.0, v: 16.0 },
+  timber: { u: 4.0, v: 4.0 },    // board-and-batten, 0.22 m boards
+  brick: { u: 2.0, v: 2.0 },     // plain brick for chimneys
 };
 
 // Draw distance in metres, per instance rather than per mesh, so a house's
@@ -71,7 +98,9 @@ const CULL = {
 
 const QUALITY = {
   low:    { distance: 0.55, anisotropy: 1,  shadows: false },
-  medium: { distance: 0.80, anisotropy: 4,  shadows: false },
+  // Buildings cast on medium too: they are a handful of instanced boxes, and a
+  // barn with no shadow on the lane beside it reads as a sticker.
+  medium: { distance: 0.80, anisotropy: 4,  shadows: true  },
   high:   { distance: 1.00, anisotropy: 8,  shadows: true  },
   ultra:  { distance: 1.30, anisotropy: 16, shadows: true  },
 };
@@ -101,6 +130,12 @@ const WARE_PAINT = [0xb9bec4, 0xa7b2b8, 0xc2c0b6, 0x9aa6ae, 0xb0aca2, 0x8f9aa2];
 const TRIM_TINT = [0xd8d5cf, 0xcfccc6, 0xc4c2bd, 0xdedbd4];
 const GLASS_TINT = [0xffffff, 0xe8f0f4, 0xf4ece0, 0xdfe8ee];
 const MASONRY_TINT = [0xffffff, 0xf2e8dc, 0xe8eaec, 0xf6eee4];
+// Brick and stone carry their own colour; the tint only nudges it.
+const STONE_TINT = [0xffffff, 0xf4efe8, 0xece8e2, 0xfaf4ec];
+// Stained and weathered board: barn red, tar black, silvered, brown, and the
+// green some farms paint everything.
+const TIMBER_TINT = [0x8e3a2c, 0x7c3326, 0x3a3634, 0x2e2c2b, 0xa39c92, 0x8a8278, 0x6e5440, 0x4f5a45];
+const DOOR_TINT = [0xf4f1ea, 0x3d4f3a, 0x7a2e26, 0x2e3a4a, 0x2b2927];
 
 // Face codes carried per vertex. The vertex shader uses them to choose which
 // pair of repeat counts applies to the face being drawn.
@@ -180,6 +215,55 @@ function texture(ctx, srgb, anisotropy) {
   return t;
 }
 
+/**
+ * The relief half of a facade: a second canvas in the same metre space as its
+ * colour, where grey 128 is the wall face and every step of grey is `depth` /
+ * 255 metres in or out. Drawing both from the same numbers is what keeps the
+ * window you see and the recess it sits in in the same place.
+ */
+function reliefCtx(pxW, pxH, tileW, tileH) {
+  const ctx = tileCtx(pxW, pxH, tileW, tileH);
+  ctx.fillStyle = 'rgb(128,128,128)';
+  ctx.fillRect(0, 0, tileW, tileH);
+  return ctx;
+}
+const G = (v) => `rgb(${v | 0},${v | 0},${v | 0})`;
+
+/**
+ * Relief to a tangent-space normal map. Heights wrap, because every facade
+ * tiles. Slopes are in metres per metre, so a 3 cm sill is the same bevel on
+ * a 512 px texture and a 128 px one.
+ */
+function normalMap(rel, tileW, tileH, depth, aniso) {
+  const w = rel.canvas.width, h = rel.canvas.height;
+  const src = rel.getImageData(0, 0, w, h).data;
+  const canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  const img = ctx.createImageData(w, h);
+  const d = img.data;
+  const k = depth / 255;
+  const sx = k / (2 * tileW / w), sy = k / (2 * tileH / h);
+  for (let y = 0; y < h; y++) {
+    // Canvas rows run DOWN the wall and texture v runs UP it (flipY), so the
+    // row above is the +v neighbour.
+    const up = ((y - 1 + h) % h) * w, dn = ((y + 1) % h) * w, row = y * w;
+    for (let x = 0; x < w; x++) {
+      const xl = (x - 1 + w) % w, xr = (x + 1) % w;
+      const du = (src[(row + xr) * 4] - src[(row + xl) * 4]) * sx;
+      const dv = (src[(up + x) * 4] - src[(dn + x) * 4]) * sy;
+      const inv = 1 / Math.sqrt(du * du + dv * dv + 1);
+      const o = (row + x) * 4;
+      d[o] = (0.5 - 0.5 * du * inv) * 255;
+      d[o + 1] = (0.5 - 0.5 * dv * inv) * 255;
+      d[o + 2] = (0.5 + 0.5 * inv) * 255;
+      d[o + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return texture(ctx, false, aniso);
+}
+
 // ---------------------------------------------------------------------------
 // Unit shells
 // ---------------------------------------------------------------------------
@@ -244,7 +328,30 @@ function buildShells() {
     { p: [[-Q, -Q, -Q], [-Q, -Q, Q], [-Q, Q, 0]], n: [-1, 0, 0], axis: AXIS_X, uv: [[0, 0], [1, 0], [0.5, 1]] },
   ]);
 
-  return { sides, cap, panel, slopes, ends };
+  // Hip roof: the ridge stops 30% of the length short of each end, and the
+  // ends slope too. The inset is a fraction of the length because the shell is
+  // scaled per instance; across real farmhouse proportions that gives hips
+  // between 35 and 50 degrees, which is the range real ones are built at.
+  const I = 0.3;
+  const hn = (a, b, c) => {
+    const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
+    const vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
+    const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    const l = Math.hypot(nx, ny, nz) || 1;
+    return [nx / l, ny / l, nz / l];
+  };
+  const hf = [[-Q, -Q, Q], [Q, -Q, Q], [Q - I, Q, 0], [-Q + I, Q, 0]];
+  const hb = [[Q, -Q, -Q], [-Q, -Q, -Q], [-Q + I, Q, 0], [Q - I, Q, 0]];
+  const he = [[Q, -Q, Q], [Q, -Q, -Q], [Q - I, Q, 0]];
+  const hw = [[-Q, -Q, -Q], [-Q, -Q, Q], [-Q + I, Q, 0]];
+  const hips = shell([
+    { p: hf, n: hn(hf[0], hf[1], hf[2]), axis: AXIS_Z, uv: [[0, 0], [1, 0], [1 - I, 1], [I, 1]] },
+    { p: hb, n: hn(hb[0], hb[1], hb[2]), axis: AXIS_Z, uv: [[0, 0], [1, 0], [1 - I, 1], [I, 1]] },
+    { p: he, n: hn(he[0], he[1], he[2]), axis: AXIS_X, uv: [[0, 0], [1, 0], [0.5, 1]] },
+    { p: hw, n: hn(hw[0], hw[1], hw[2]), axis: AXIS_X, uv: [[0, 0], [1, 0], [0.5, 1]] },
+  ]);
+
+  return { sides, cap, panel, slopes, ends, hips };
 }
 
 // ---------------------------------------------------------------------------
@@ -473,51 +580,173 @@ function shopWindows(rnd, aniso) {
   return texture(ctx, false, aniso);
 }
 
+// The farmhouse wall. Four constructions, one window layout — the emissive
+// map below lights the same rectangles whichever wall they are cut into.
+//
+//   0  painted lap board
+//   1  render over a brick plinth
+//   2  brick, with soldier-course lintels and stone sills
+//   3  coursed stone, with dressed quoin-like surrounds
+//
+// Each is drawn in colour and in relief. The relief is what a low sun and a
+// headlight actually find: the glass sits 12 cm back in its reveal, the sill
+// stands out 5 cm, the boards step, the mortar is a groove.
 function houseWall(v, rnd, aniso) {
   const T = TILE.house, bays = 2, floors = 2;
-  const ctx = tileCtx(256, 192, T.u, T.v);
+  const W = 512, Hp = 384;
+  const ctx = tileCtx(W, Hp, T.u, T.v);
+  const rel = reliefCtx(W, Hp, T.u, T.v);
   const bw = T.u / bays, fh = T.v / floors;
+  const glassX = (b) => b * bw + (bw - 1.25) / 2, glassY = (f) => f * fh + 1.05;
 
-  ctx.fillStyle = '#efece4';
-  ctx.fillRect(0, 0, T.u, T.v);
   if (v === 0) {
-    // Lap siding.
-    for (let y = 0; y < T.v; y += 0.24) {
-      ctx.fillStyle = 'rgba(0,0,0,0.10)';
-      ctx.fillRect(0, y, T.u, 0.05);
-      ctx.fillStyle = 'rgba(255,255,255,0.16)';
-      ctx.fillRect(0, y + 0.05, T.u, 0.04);
+    // Lap board: each board overlaps the one below, so its bottom edge stands
+    // proud and throws a thin shadow line. Painted white; the instance tints it.
+    ctx.fillStyle = '#efece4';
+    ctx.fillRect(0, 0, T.u, T.v);
+    for (let y = 0; y < T.v; y += 0.20) {
+      const g = ctx.createLinearGradient(0, y, 0, y + 0.20);
+      g.addColorStop(0, 'rgba(0,0,0,0.16)');
+      g.addColorStop(0.18, 'rgba(0,0,0,0.02)');
+      g.addColorStop(1, 'rgba(255,255,255,0.10)');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, y, T.u, 0.20);
+      const r = rel.createLinearGradient(0, y, 0, y + 0.20);
+      r.addColorStop(0, G(150));
+      r.addColorStop(1, G(118));
+      rel.fillStyle = r;
+      rel.fillRect(0, y, T.u, 0.20);
     }
+    grain(ctx, rnd, T.u, T.v, 1800, 0.08, 0.04);
+  } else if (v === 1) {
+    // Render: a fine float-finish, with a dark brick plinth to the pavement.
+    ctx.fillStyle = '#efece4';
+    ctx.fillRect(0, 0, T.u, T.v);
+    grain(ctx, rnd, T.u, T.v, 5200, 0.16, 0.035);
+    for (let i = 0; i < 1400; i++) {
+      rel.fillStyle = G(120 + rnd() * 16);
+      rel.fillRect(rnd() * T.u, rnd() * T.v, 0.04, 0.04);
+    }
+    brickCourse(ctx, rel, rnd, 0, 0.72, T.u, [118, 74, 58], 0.85);
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    ctx.fillRect(0, 0.70, T.u, 0.04);                      // drip at the plinth
+    rel.fillStyle = G(150);
+    rel.fillRect(0, 0.72, T.u, 0.03);
+  } else if (v === 2) {
+    brickCourse(ctx, rel, rnd, 0, T.v, T.u, [148, 82, 60], 1);
   } else {
-    // Render over a brick plinth. Houses come out one tile tall, so the plinth
-    // lands at the pavement rather than halfway up the wall.
-    grain(ctx, rnd, T.u, T.v, 2600, 0.20, 0.05);
-    ctx.fillStyle = 'rgba(96,74,62,0.55)';
-    ctx.fillRect(0, 0, T.u, 0.85);
-    for (let y = 0; y < 0.85; y += 0.14) {
-      ctx.fillStyle = 'rgba(0,0,0,0.10)';
-      ctx.fillRect(0, y, T.u, 0.03);
-    }
+    stoneCourse(ctx, rel, rnd, T.u, T.v);
   }
 
   for (let f = 0; f < floors; f++) {
     for (let b = 0; b < bays; b++) {
-      const x = b * bw + (bw - 1.25) / 2, y = f * fh + 1.05;
-      ctx.fillStyle = '#f7f5f0';
-      ctx.fillRect(x - 0.11, y - 0.13, 1.47, 1.62);          // frame
-      ctx.fillStyle = 'rgba(0,0,0,0.30)';
-      ctx.fillRect(x - 0.05, y - 0.05, 1.35, 1.5);
+      const x = glassX(b), y = glassY(f);
+      // Surround: painted timber on board and render, dressed stone on brick
+      // and stone. Drawn first so the reveal cuts into it.
+      if (v === 2 || v === 3) {
+        ctx.fillStyle = v === 2 ? '#d9d2c3' : '#cfc8b9';
+        ctx.fillRect(x - 0.14, y - 0.20, 1.53, 0.14);           // sill
+        ctx.fillStyle = v === 2 ? '#8a4a36' : '#bdb5a5';
+        ctx.fillRect(x - 0.10, y + 1.35, 1.45, 0.22);           // lintel
+        if (v === 2) {
+          for (let k = 0; k < 14; k++) {                        // soldier course
+            ctx.fillStyle = 'rgba(40,20,14,0.5)';
+            ctx.fillRect(x - 0.10 + k * 0.104, y + 1.35, 0.012, 0.22);
+          }
+        }
+        rel.fillStyle = G(170);
+        rel.fillRect(x - 0.14, y - 0.20, 1.53, 0.14);
+        rel.fillStyle = G(142);
+        rel.fillRect(x - 0.10, y + 1.35, 1.45, 0.22);
+      } else {
+        ctx.fillStyle = '#f7f5f0';
+        ctx.fillRect(x - 0.11, y - 0.13, 1.47, 1.62);           // frame
+        ctx.fillRect(x - 0.16, y - 0.22, 1.57, 0.11);           // sill
+        rel.fillStyle = G(146);
+        rel.fillRect(x - 0.11, y - 0.13, 1.47, 1.62);
+        rel.fillStyle = G(176);
+        rel.fillRect(x - 0.16, y - 0.22, 1.57, 0.11);
+      }
+      // The reveal: the wall's thickness, lit on its sill and in shadow under
+      // its head. That shadow strip is what reads as depth from a car.
+      ctx.fillStyle = 'rgba(0,0,0,0.42)';
+      ctx.fillRect(x - 0.05, y + 1.20, 1.35, 0.15);
+      ctx.fillStyle = 'rgba(0,0,0,0.22)';
+      ctx.fillRect(x - 0.05, y - 0.05, 0.08, 1.40);
       const g = ctx.createLinearGradient(0, y, 0, y + 1.35);
-      g.addColorStop(0, '#232b30');
-      g.addColorStop(1, '#5b6c76');
+      g.addColorStop(0, '#1c2226');
+      g.addColorStop(0.6, '#2c363d');
+      g.addColorStop(1, '#5d6e79');
       ctx.fillStyle = g;
       ctx.fillRect(x, y, 1.25, 1.35);
-      ctx.fillStyle = '#f7f5f0';
-      ctx.fillRect(x + 0.59, y, 0.08, 1.35);                 // centre mullion
-      ctx.fillRect(x - 0.16, y - 0.22, 1.57, 0.11);          // sill
+      // Sky caught in the upper panes.
+      ctx.fillStyle = 'rgba(200,215,228,0.14)';
+      ctx.fillRect(x + 0.05, y + 0.85, 1.15, 0.42);
+      // Casement bars.
+      ctx.fillStyle = v === 2 || v === 3 ? '#ece8e0' : '#f7f5f0';
+      ctx.fillRect(x + 0.585, y, 0.08, 1.35);
+      ctx.fillRect(x, y + 0.86, 1.25, 0.06);
+      rel.fillStyle = G(96);
+      rel.fillRect(x, y, 1.25, 1.35);
+      rel.fillStyle = G(112);
+      rel.fillRect(x + 0.585, y, 0.08, 1.35);
+      rel.fillRect(x, y + 0.86, 1.25, 0.06);
+      // Weather streaks under the sill corners.
+      ctx.fillStyle = 'rgba(40,34,28,0.07)';
+      ctx.fillRect(x - 0.1, y - 0.9, 0.12, 0.68);
+      ctx.fillRect(x + 1.2, y - 0.8, 0.10, 0.58);
     }
   }
-  return texture(ctx, true, aniso);
+  return { map: texture(ctx, true, aniso), normal: normalMap(rel, T.u, T.v, 0.30, aniso) };
+}
+
+/** Stretcher-bond brick from y0 to y1, drawn into both the colour and relief. */
+function brickCourse(ctx, rel, rnd, y0, y1, w, rgb, weight) {
+  const bh = 0.075, bl = 0.225, mortar = 0.011;
+  ctx.fillStyle = `rgb(${Math.round(rgb[0] * 1.35)},${Math.round(rgb[1] * 1.55)},${Math.round(rgb[2] * 1.6)})`;
+  ctx.fillRect(0, y0, w, y1 - y0);
+  rel.fillStyle = G(116);
+  rel.fillRect(0, y0, w, y1 - y0);
+  let row = 0;
+  for (let y = y0; y < y1 - 0.01; y += bh, row++) {
+    for (let x = (row % 2) * -bl * 0.5; x < w; x += bl) {
+      const k = 0.78 + rnd() * 0.36;
+      const burnt = rnd() < 0.08 ? 0.62 : 1;
+      ctx.fillStyle = `rgba(${Math.round(rgb[0] * k * burnt)},${Math.round(rgb[1] * k * burnt)},${Math.round(rgb[2] * k * burnt)},${weight})`;
+      ctx.fillRect(x + mortar * 0.5, y + mortar * 0.5, bl - mortar, Math.min(bh, y1 - y) - mortar);
+      rel.fillStyle = G(132 + rnd() * 8);
+      rel.fillRect(x + mortar * 0.5, y + mortar * 0.5, bl - mortar, Math.min(bh, y1 - y) - mortar);
+    }
+  }
+}
+
+/** Coursed rubble: stone rows of varying height, stones of varying length. */
+function stoneCourse(ctx, rel, rnd, w, h) {
+  ctx.fillStyle = '#9d9587';                       // lime mortar
+  ctx.fillRect(0, 0, w, h);
+  rel.fillStyle = G(110);
+  rel.fillRect(0, 0, w, h);
+  let y = 0;
+  while (y < h) {
+    const rh = 0.16 + rnd() * 0.22;
+    let x = -rnd() * 0.4;
+    while (x < w) {
+      const sl = 0.25 + rnd() * 0.55;
+      const t = 0.72 + rnd() * 0.32;
+      const warm = rnd();
+      const r = (156 + 30 * warm) * t, g = (148 + 18 * warm) * t, b = (132 + 6 * warm) * t;
+      ctx.fillStyle = `rgb(${r | 0},${g | 0},${b | 0})`;
+      ctx.fillRect(x + 0.015, y + 0.015, sl - 0.03, Math.min(rh, h - y) - 0.03);
+      // A stone is domed, not flat: brighter relief in its middle.
+      rel.fillStyle = G(136 + rnd() * 10);
+      rel.fillRect(x + 0.015, y + 0.015, sl - 0.03, Math.min(rh, h - y) - 0.03);
+      rel.fillStyle = G(150 + rnd() * 10);
+      rel.fillRect(x + sl * 0.2, y + rh * 0.25, sl * 0.6, rh * 0.5);
+      x += sl;
+    }
+    y += rh;
+  }
+  grain(ctx, rnd, w, h, 3000, 0.10, 0.03);
 }
 
 function houseWindows(rnd, aniso) {
@@ -536,12 +765,97 @@ function houseWindows(rnd, aniso) {
   return texture(ctx, false, aniso);
 }
 
+/**
+ * Board-and-batten, the barn and shed wall. Drawn pale and neutral so the
+ * instance colour stains it: barn red, tar black, silvered grey.
+ */
+function timberWall(rnd, aniso) {
+  const T = TILE.timber;
+  const ctx = tileCtx(256, 256, T.u, T.v);
+  const rel = reliefCtx(256, 256, T.u, T.v);
+  const board = 0.22, batten = 0.06;
+  for (let x = 0; x < T.u; x += board) {
+    const k = 0.86 + rnd() * 0.2;
+    ctx.fillStyle = `rgb(${(226 * k) | 0},${(220 * k) | 0},${(212 * k) | 0})`;
+    ctx.fillRect(x, 0, board, T.v);
+    // Grain runs up the board.
+    for (let i = 0; i < 7; i++) {
+      ctx.fillStyle = `rgba(60,48,36,${0.04 + rnd() * 0.08})`;
+      ctx.fillRect(x + rnd() * board, 0, 0.008 + rnd() * 0.012, T.v);
+    }
+    rel.fillStyle = G(124);
+    rel.fillRect(x, 0, board, T.v);
+    ctx.fillStyle = 'rgba(0,0,0,0.30)';
+    ctx.fillRect(x - 0.008, 0, 0.016, T.v);                 // the joint
+    rel.fillStyle = G(96);
+    rel.fillRect(x - 0.008, 0, 0.016, T.v);
+    // The batten over it, proud of the boards and throwing a thin shadow.
+    ctx.fillStyle = `rgb(${(236 * k) | 0},${(230 * k) | 0},${(222 * k) | 0})`;
+    ctx.fillRect(x - batten / 2, 0, batten, T.v);
+    ctx.fillStyle = 'rgba(0,0,0,0.22)';
+    ctx.fillRect(x + batten / 2, 0, 0.02, T.v);
+    rel.fillStyle = G(170);
+    rel.fillRect(x - batten / 2, 0, batten, T.v);
+  }
+  // No splash band at the foot: this tile repeats up a barn wall and across
+  // its gable, and a band would repeat with it. The foot of the wall is
+  // darkened in the shader instead, once, where the ground actually is.
+  grain(ctx, rnd, T.u, T.v, 1200, 0.10, 0.03);
+  return { map: texture(ctx, true, aniso), normal: normalMap(rel, T.u, T.v, 0.12, aniso) };
+}
+
+/** Plain brick, for chimneys. */
+function brickPlain(rnd, aniso) {
+  const T = TILE.brick;
+  const ctx = tileCtx(128, 128, T.u, T.v);
+  const rel = reliefCtx(128, 128, T.u, T.v);
+  brickCourse(ctx, rel, rnd, 0, T.v, T.u, [140, 78, 58], 1);
+  return { map: texture(ctx, true, aniso), normal: normalMap(rel, T.u, T.v, 0.12, aniso) };
+}
+
+/**
+ * A sliding barn door: a frame of rails and stiles, boards, and the Z brace
+ * every farm child could draw. One wrap covers the whole leaf.
+ */
+function barnDoor(rnd, aniso) {
+  const ctx = tileCtx(128, 128, 1, 1);
+  const rel = reliefCtx(128, 128, 1, 1);
+  ctx.fillStyle = '#d8cfc2';
+  ctx.fillRect(0, 0, 1, 1);
+  for (let x = 0; x < 1; x += 0.083) {
+    ctx.fillStyle = 'rgba(0,0,0,0.28)';
+    ctx.fillRect(x, 0, 0.008, 1);
+    rel.fillStyle = G(100);
+    rel.fillRect(x, 0, 0.008, 1);
+  }
+  const frame = (x, y, w, h) => {
+    ctx.fillStyle = '#ece6dc'; ctx.fillRect(x, y, w, h);
+    rel.fillStyle = G(172); rel.fillRect(x, y, w, h);
+  };
+  frame(0, 0, 1, 0.07); frame(0, 0.93, 1, 0.07); frame(0, 0.46, 1, 0.07);
+  frame(0, 0, 0.07, 1); frame(0.93, 0, 0.07, 1);
+  // The brace, stepped along its length because a canvas has no rotated rect
+  // that survives the metre transform cleanly.
+  for (let i = 0; i < 40; i++) {
+    const t = i / 40;
+    frame(0.07 + t * 0.82, 0.07 + t * 0.39, 0.05, 0.035);
+    frame(0.07 + t * 0.82, 0.53 + t * 0.39, 0.05, 0.035);
+  }
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.fillRect(0, 0.985, 1, 0.015);                         // track shadow
+  grain(ctx, rnd, 1, 1, 400, 0.12, 0.012);
+  return { map: texture(ctx, true, aniso), normal: normalMap(rel, 1, 1, 0.08, aniso) };
+}
+
 function wareWall(v, rnd, aniso) {
   const T = TILE.ware;
   const ctx = tileCtx(256, 256, T.u, T.v);
+  const rel = reliefCtx(256, 256, T.u, T.v);
   ctx.fillStyle = '#dcdcd8';
   ctx.fillRect(0, 0, T.u, T.v);
   // Trapezoidal profile sheeting: a light face, a shaded return, a dark valley.
+  // The relief carries the same profile, which is what makes a steel shed
+  // shimmer in stripes as the sun moves round it.
   const pitch = v === 0 ? 0.26 : 0.34;
   for (let x = 0; x < T.u; x += pitch) {
     ctx.fillStyle = 'rgba(255,255,255,0.34)';
@@ -550,52 +864,81 @@ function wareWall(v, rnd, aniso) {
     ctx.fillRect(x + pitch * 0.58, 0, pitch * 0.26, T.v);
     ctx.fillStyle = 'rgba(0,0,0,0.30)';
     ctx.fillRect(x + pitch * 0.84, 0, pitch * 0.16, T.v);
+    rel.fillStyle = G(160); rel.fillRect(x, 0, pitch * 0.32, T.v);
+    rel.fillStyle = G(140); rel.fillRect(x + pitch * 0.32, 0, pitch * 0.26, T.v);
+    rel.fillStyle = G(112); rel.fillRect(x + pitch * 0.58, 0, pitch * 0.26, T.v);
+    rel.fillStyle = G(96); rel.fillRect(x + pitch * 0.84, 0, pitch * 0.16, T.v);
   }
   ctx.fillStyle = 'rgba(0,0,0,0.22)';
   ctx.fillRect(0, T.v * 0.5 - 0.05, T.u, 0.10);              // sheet lap
   ctx.fillStyle = 'rgba(60,58,54,0.5)';
   ctx.fillRect(0, 0, T.u, 0.7);                              // grubby plinth
+  // Rust streaks under the fixings, which is what a shed's age looks like.
+  for (let i = 0; i < 10; i++) {
+    ctx.fillStyle = `rgba(122,74,42,${0.04 + rnd() * 0.08})`;
+    ctx.fillRect(rnd() * T.u, rnd() * T.v, 0.04, 0.4 + rnd() * 1.2);
+  }
   grain(ctx, rnd, T.u, T.v, 900, 0.14, 0.07);
-  return texture(ctx, true, aniso);
+  return { map: texture(ctx, true, aniso), normal: normalMap(rel, T.u, T.v, 0.06, aniso) };
 }
 
 function gableSkin(rnd, aniso) {
   const T = TILE.gable;
   const ctx = tileCtx(128, 128, T.u, T.v);
+  const rel = reliefCtx(128, 128, T.u, T.v);
   ctx.fillStyle = '#efece4';
   ctx.fillRect(0, 0, T.u, T.v);
-  for (let y = 0; y < T.v; y += 0.24) {
-    ctx.fillStyle = 'rgba(0,0,0,0.09)';
-    ctx.fillRect(0, y, T.u, 0.05);
+  for (let y = 0; y < T.v; y += 0.20) {
+    ctx.fillStyle = 'rgba(0,0,0,0.10)';
+    ctx.fillRect(0, y, T.u, 0.04);
+    const r = rel.createLinearGradient(0, y, 0, y + 0.20);
+    r.addColorStop(0, G(150));
+    r.addColorStop(1, G(118));
+    rel.fillStyle = r;
+    rel.fillRect(0, y, T.u, 0.20);
   }
   grain(ctx, rnd, T.u, T.v, 500, 0.12, 0.06);
-  return texture(ctx, true, aniso);
+  return { map: texture(ctx, true, aniso), normal: normalMap(rel, T.u, T.v, 0.25, aniso) };
 }
 
 function roofTiles(rnd, aniso) {
   const T = TILE.tiles;
   const ctx = tileCtx(256, 256, T.u, T.v);
+  const rel = reliefCtx(256, 256, T.u, T.v);
   ctx.fillStyle = '#e6e2dc';
   ctx.fillRect(0, 0, T.u, T.v);
   const course = 0.3, tile = 0.32;
   for (let y = 0, row = 0; y < T.v; y += course, row++) {
+    // Each course laps the one below: its lower edge is proud and shadowed.
+    const r = rel.createLinearGradient(0, y, 0, y + course);
+    r.addColorStop(0, G(168));
+    r.addColorStop(1, G(112));
+    rel.fillStyle = r;
+    rel.fillRect(0, y, T.u, course);
     ctx.fillStyle = 'rgba(0,0,0,0.30)';
     ctx.fillRect(0, y, T.u, 0.07);                            // course shadow
     for (let x = (row % 2) * tile * 0.5; x < T.u; x += tile) {
       ctx.fillStyle = `rgba(0,0,0,${0.05 + rnd() * 0.13})`;
       ctx.fillRect(x, y, 0.035, course);                      // joint
+      rel.fillStyle = G(100);
+      rel.fillRect(x, y, 0.025, course);
       if (rnd() < 0.22) {
         ctx.fillStyle = `rgba(255,255,255,${0.06 + rnd() * 0.1})`;
         ctx.fillRect(x + 0.04, y + 0.08, tile - 0.08, course - 0.12);
       }
+      if (rnd() < 0.06) {                                     // lichen
+        ctx.fillStyle = `rgba(92,104,66,${0.15 + rnd() * 0.2})`;
+        ctx.fillRect(x + rnd() * 0.2, y + rnd() * 0.2, 0.1, 0.08);
+      }
     }
   }
-  return texture(ctx, true, aniso);
+  return { map: texture(ctx, true, aniso), normal: normalMap(rel, T.u, T.v, 0.18, aniso) };
 }
 
 function roofMetal(rnd, aniso) {
   const T = TILE.metal;
   const ctx = tileCtx(256, 256, T.u, T.v);
+  const rel = reliefCtx(256, 256, T.u, T.v);
   ctx.fillStyle = '#d6d8d6';
   ctx.fillRect(0, 0, T.u, T.v);
   for (let x = 0; x < T.u; x += 0.24) {
@@ -603,12 +946,15 @@ function roofMetal(rnd, aniso) {
     ctx.fillRect(x, 0, 0.07, T.v);
     ctx.fillStyle = 'rgba(0,0,0,0.22)';
     ctx.fillRect(x + 0.15, 0, 0.06, T.v);
+    rel.fillStyle = G(176); rel.fillRect(x, 0, 0.05, T.v);
+    rel.fillStyle = G(150); rel.fillRect(x + 0.05, 0, 0.03, T.v);
+    rel.fillStyle = G(120); rel.fillRect(x + 0.15, 0, 0.06, T.v);
   }
   for (let i = 0; i < 14; i++) {                              // rust down a rib
     ctx.fillStyle = `rgba(122,74,42,${0.05 + rnd() * 0.12})`;
     ctx.fillRect(rnd() * T.u, rnd() * T.v, 0.07, 0.5 + rnd() * 1.6);
   }
-  return texture(ctx, true, aniso);
+  return { map: texture(ctx, true, aniso), normal: normalMap(rel, T.u, T.v, 0.05, aniso) };
 }
 
 function roofFlat(rnd, aniso) {
@@ -665,7 +1011,14 @@ function doorPanel(rnd, aniso) {
   ctx.fillRect(0, 0.985, 1, 0.015);
   ctx.fillRect(0.86, 0.45, 0.05, 0.09);                       // handle
   grain(ctx, rnd, 1, 1, 240, 0.10, 0.02);
-  return texture(ctx, true, aniso);
+  // Raised and fielded: each panel sits back in its frame.
+  const rel = reliefCtx(128, 128, 1, 1);
+  for (let i = 0; i < 4; i++) {
+    const y = 0.06 + i * 0.235;
+    rel.fillStyle = G(100); rel.fillRect(0.09, y, 0.82, 0.185);
+    rel.fillStyle = G(128); rel.fillRect(0.12, y + 0.03, 0.76, 0.125);
+  }
+  return { map: texture(ctx, true, aniso), normal: normalMap(rel, 1, 1, 0.06, aniso) };
 }
 
 /** A roller shutter, for loading docks. */
@@ -686,7 +1039,13 @@ function doorRoller(rnd, aniso) {
   ctx.fillStyle = 'rgba(0,0,0,0.35)';
   ctx.fillRect(0.04, 0, 0.92, 0.03);
   grain(ctx, rnd, 1, 1, 300, 0.14, 0.02);
-  return texture(ctx, true, aniso);
+  const rel = reliefCtx(128, 128, 1, 1);
+  for (let y = 0; y < 1; y += 0.052) {
+    rel.fillStyle = G(150); rel.fillRect(0.04, y, 0.92, 0.026);
+    rel.fillStyle = G(110); rel.fillRect(0.04, y + 0.03, 0.92, 0.014);
+  }
+  rel.fillStyle = G(170); rel.fillRect(0, 0, 0.045, 1); rel.fillRect(0.955, 0, 0.045, 1);
+  return { map: texture(ctx, true, aniso), normal: normalMap(rel, 1, 1, 0.05, aniso) };
 }
 
 // ---------------------------------------------------------------------------
@@ -712,6 +1071,27 @@ vec2 cityRepeat =
 #ifdef USE_EMISSIVEMAP
   vEmissiveMapUv *= cityRepeat;
 #endif
+#ifdef USE_NORMALMAP
+  vNormalMapUv *= cityRepeat;
+#endif
+`;
+
+// Ground occlusion. The instance matrix's Y column is the building's height in
+// metres, so this is the height of the vertex above the building's own base —
+// which seatY() puts 0.35 m under the lowest corner of the ground.
+const VERT_AO = /* glsl */`
+#ifdef USE_INSTANCING
+  vCityBase = ( position.y + 0.5 ) * length( instanceMatrix[ 1 ].xyz );
+#else
+  vCityBase = 10.0;
+#endif
+`;
+
+// Applied to the diffuse colour, so light and shadow both see it: the foot of
+// a wall is where the ground and the building shade each other, and where rain
+// splashes it dark. 1.4 m of falloff, to about 60% at the ground.
+const FRAG_AO = /* glsl */`
+diffuseColor.rgb *= mix( 0.58, 1.0, smoothstep( 0.2, 1.6, vCityBase ) );
 `;
 
 const FRAG_WINDOWS = /* glsl */`
@@ -729,16 +1109,22 @@ totalEmissiveRadiance = uGlow * uEmScale * cityLit *
  * the dusk threshold. `night` and `glow` are shared uniform objects, so the
  * whole city changes hour on two writes.
  */
-function patchCity(material, windows, night, glow, emScale = 1) {
+function patchCity(material, windows, night, glow, emScale = 1, ao = false) {
   // The cache key has to carry the scale, or three reuses one compiled program
   // for every facade type and they all inherit whichever was compiled first.
-  material.customProgramCacheKey = () => (windows ? 'city-win-' + emScale : 'city');
+  material.customProgramCacheKey = () => (windows ? 'city-win-' + emScale : 'city') + (ao ? '-ao' : '');
   material.onBeforeCompile = (shader) => {
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', '#include <common>\n' + VERT_DECL +
-        (windows ? 'attribute float aOccupancy;\nvarying float vOccupancy;\n' : ''))
+        (windows ? 'attribute float aOccupancy;\nvarying float vOccupancy;\n' : '') +
+        (ao ? 'varying float vCityBase;\n' : ''))
       .replace('#include <uv_vertex>', '#include <uv_vertex>\n' + VERT_UV +
-        (windows ? 'vOccupancy = aOccupancy;\n' : ''));
+        (windows ? 'vOccupancy = aOccupancy;\n' : '') + (ao ? VERT_AO : ''));
+    if (ao) {
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', '#include <common>\nvarying float vCityBase;\n')
+        .replace('#include <map_fragment>', '#include <map_fragment>\n' + FRAG_AO);
+    }
 
     if (!windows) return;
     shader.uniforms.uNight = night;
@@ -826,23 +1212,32 @@ export function createCity(world, ground, opts = {}) {
   const trnd = mulberry(world.seed ^ 0x51ce7);
   const textures = [];
   const keep = (t) => { textures.push(t); return t; };
+  const keepPair = (p) => { keep(p.map); keep(p.normal); return p; };
+  // Only paint what this world builds. The town families are a quarter of a
+  // second of canvas work at load for a map that has no town.
+  const lots = world.lots || [];
+  const has = new Set(lots.map((l) => l.kind));
+  const town = has.has('tower') || has.has('block');
 
-  const towerMap = [0, 1, 2].map((v) => keep(towerFacade(v, trnd, aniso)));
-  const towerWin = [0, 1, 2].map(() => keep(towerWindows(trnd, aniso)));
-  const blockMap = [0, 1, 2].map((v) => keep(blockFacade(v, trnd, aniso)));
-  const blockWin = [0, 1, 2].map(() => keep(blockWindows(trnd, aniso)));
-  const shopMap = [0, 1].map((v) => keep(shopFacade(v, trnd, aniso)));
-  const shopWin = [0, 1].map(() => keep(shopWindows(trnd, aniso)));
-  const houseMap = [0, 1].map((v) => keep(houseWall(v, trnd, aniso)));
-  const houseWin = [0, 1].map(() => keep(houseWindows(trnd, aniso)));
-  const wareMap = [0, 1].map((v) => keep(wareWall(v, trnd, aniso)));
-  const gableMap = keep(gableSkin(trnd, aniso));
-  const tilesMap = keep(roofTiles(trnd, aniso));
-  const metalMap = keep(roofMetal(trnd, aniso));
+  const towerMap = has.has('tower') ? [0, 1, 2].map((v) => keep(towerFacade(v, trnd, aniso))) : [null, null, null];
+  const towerWin = has.has('tower') ? [0, 1, 2].map(() => keep(towerWindows(trnd, aniso))) : [null, null, null];
+  const blockMap = town ? [0, 1, 2].map((v) => keep(blockFacade(v, trnd, aniso))) : [null, null, null];
+  const blockWin = town ? [0, 1, 2].map(() => keep(blockWindows(trnd, aniso))) : [null, null, null];
+  const shopMap = town ? [0, 1].map((v) => keep(shopFacade(v, trnd, aniso))) : [null, null];
+  const shopWin = town ? [0, 1].map(() => keep(shopWindows(trnd, aniso))) : [null, null];
+  const houseMap = [0, 1, 2, 3].map((v) => keepPair(houseWall(v, trnd, aniso)));
+  const houseWin = [0, 1, 2, 3].map(() => keep(houseWindows(trnd, aniso)));
+  const wareMap = [0, 1].map((v) => keepPair(wareWall(v, trnd, aniso)));
+  const timberMap = keepPair(timberWall(trnd, aniso));
+  const brickMap = keepPair(brickPlain(trnd, aniso));
+  const gableMap = keepPair(gableSkin(trnd, aniso));
+  const tilesMap = keepPair(roofTiles(trnd, aniso));
+  const metalMap = keepPair(roofMetal(trnd, aniso));
   const flatMap = keep(roofFlat(trnd, aniso));
   const trimMap = keep(trimSkin(trnd, aniso));
-  const panelMap = keep(doorPanel(trnd, aniso));
-  const rollerMap = keep(doorRoller(trnd, aniso));
+  const panelMap = keepPair(doorPanel(trnd, aniso));
+  const rollerMap = keepPair(doorRoller(trnd, aniso));
+  const barnDoorMap = keepPair(barnDoor(trnd, aniso));
 
   // ---- materials ---------------------------------------------------------
   const materials = [];
@@ -851,20 +1246,24 @@ export function createCity(world, ground, opts = {}) {
    * Shopfronts need it: their emissive map is a near-continuous strip of
    * glazing rather than a grid of separate windows, so at the same glow as a
    * tower the whole ground floor of every mid-rise blows out into one solid
-   * band of light. The shared uGlow uniform cannot express that, and the
-   * material's own emissive colour is not read at all — the patched shader
-   * computes totalEmissiveRadiance from scratch.
+   * band of light. The patched shader computes totalEmissiveRadiance from
+   * scratch, so the material's own emissive colour is not read at all.
+   *
+   * `tex` is a texture or a { map, normal } pair; `ao` darkens the foot of the
+   * wall, and belongs on walls only — a roof has no foot.
    */
-  function facade(map, win, shininess, specular, emScale = 1) {
+  function facade(tex, win, shininess, specular, emScale = 1, ao = false) {
+    const pair = tex && tex.map ? tex : { map: tex, normal: null };
     const m = new THREE.MeshPhongMaterial({
-      map,
+      map: pair.map,
+      normalMap: pair.normal || null,
       emissiveMap: win || null,
       emissive: win ? 0xffffff : 0x000000,
       specular,
       shininess,
       fog: true,
     });
-    patchCity(m, !!win, nightU, glowU, emScale);
+    patchCity(m, !!win, nightU, glowU, emScale, ao);
     materials.push(m);
     return m;
   }
@@ -872,18 +1271,22 @@ export function createCity(world, ground, opts = {}) {
   // Phong rather than Standard: with no environment map a metallic workflow
   // renders glass black, and a specular highlight is exactly what sells a
   // curtain wall in daylight. It is also markedly cheaper per pixel.
-  const matTower = [0, 1, 2].map((v) => facade(towerMap[v], towerWin[v], 74, 0x525a63));
-  const matBlock = [0, 1, 2].map((v) => facade(blockMap[v], blockWin[v], 9, 0x14140f));
-  const matShop = [0, 1].map((v) => facade(shopMap[v], shopWin[v], 46, 0x3a3f44, 0.30));
-  const matHouse = [0, 1].map((v) => facade(houseMap[v], houseWin[v], 7, 0x121210));
-  const matWare = [0, 1].map((v) => facade(wareMap[v], null, 26, 0x2b2e30));
+  const matTower = [0, 1, 2].map((v) => facade(towerMap[v], towerWin[v], 74, 0x525a63, 1, true));
+  const matBlock = [0, 1, 2].map((v) => facade(blockMap[v], blockWin[v], 9, 0x14140f, 1, true));
+  const matShop = [0, 1].map((v) => facade(shopMap[v], shopWin[v], 46, 0x3a3f44, 0.30, true));
+  const matHouse = [0, 1, 2, 3].map((v) => facade(houseMap[v], houseWin[v], v === 0 ? 10 : 6, 0x151513, 1, true));
+  const matWare = [0, 1].map((v) => facade(wareMap[v], null, 34, 0x3a3d40, 1, true));
+  const matTimber = facade(timberMap, null, 5, 0x0c0c0a, 1, true);
+  const matBrick = facade(brickMap, null, 5, 0x0e0c0a, 1, false);
   const matGable = facade(gableMap, null, 6, 0x101010);
-  const matTiles = facade(tilesMap, null, 5, 0x0e0e0c);
-  const matMetal = facade(metalMap, null, 30, 0x2e3134);
+  const matTimberGable = facade(timberMap, null, 5, 0x0c0c0a);
+  const matTiles = facade(tilesMap, null, 7, 0x16140f);
+  const matMetal = facade(metalMap, null, 36, 0x3c3f42);
   const matFlat = facade(flatMap, null, 4, 0x0c0c0c);
   const matTrim = facade(trimMap, null, 6, 0x121212);
   const matPanel = facade(panelMap, null, 22, 0x24242a);
   const matRoller = facade(rollerMap, null, 24, 0x2a2d30);
+  const matBarnDoor = facade(barnDoorMap, null, 5, 0x0c0c0a);
 
   const matBeacon = new THREE.MeshBasicMaterial({ color: 0x2a0604, fog: true });
   materials.push(matBeacon);
@@ -892,17 +1295,22 @@ export function createCity(world, ground, opts = {}) {
   const pTower = [makePile(), makePile(), makePile()];
   const pBlock = [makePile(), makePile(), makePile()];
   const pShop = [makePile(), makePile()];
-  const pHouse = [makePile(), makePile()];
+  const pHouse = [makePile(), makePile(), makePile(), makePile()];
   const pWare = [makePile(), makePile()];
+  const pTimber = makePile();
+  const pBrick = makePile();
   const pGable = makePile();
+  const pTimberGable = makePile();
   const pWareGable = [makePile(), makePile()];
   const pTiles = makePile();
+  const pHipTiles = makePile();
   const pMetal = makePile();
   const pFlat = makePile();
   const pTrim = makePile();
   const pTrimCap = makePile();
   const pPanel = makePile();
   const pRoller = makePile();
+  const pBarnDoor = makePile();
   const pBeacon = makePile();
 
   // ---- placement scratch --------------------------------------------------
@@ -1041,31 +1449,13 @@ export function createCity(world, ground, opts = {}) {
       rep4(1, 1, 1, reps(Math.min(w, d), TILE.flat.u)), 0, CULL.block);
   }
 
-  function emitHouse(lot, rnd, occ) {
-    const v = (rnd() * 2) | 0;
-    const paint = HOUSE_PAINT[(rnd() * HOUSE_PAINT.length) | 0];
-    const roofCol = ROOF_PAINT[(rnd() * ROOF_PAINT.length) | 0];
-    const trim = TRIM_TINT[(rnd() * TRIM_TINT.length) | 0];
-    const T = TILE.house, w = lot.w, d = lot.d;
-    const h = Math.max(5, lot.height);
-    const roofH = clamp(h * 0.3, 1.7, 3.6);
-    const wallH = h - roofH;
-
-    put(pHouse[v], 0, wallH / 2, 0, 0, w, wallH, d, paint,
-      rep4(reps(w, T.u), reps(d, T.u), reps(wallH, T.v), 1), occ, CULL.house);
-
-    // The ridge runs along the longer side, with a 0.45 m overhang all round.
-    const alongX = w >= d;
-    const ridge = (alongX ? w : d) + 0.9;
-    const span = (alongX ? d : w) + 0.9;
-    const ry = alongX ? 0 : Math.PI / 2;
-    const slope = Math.hypot(span / 2, roofH);
-    put(pTiles, 0, wallH + roofH / 2, 0, ry, ridge, roofH, span, roofCol,
-      rep4(reps(ridge, TILE.tiles.u), 1, reps(slope, TILE.tiles.v), 1), 0, CULL.house);
-    put(pGable, 0, wallH + roofH / 2, 0, ry, ridge, roofH, span, paint,
-      rep4(1, reps(span, TILE.gable.u), reps(roofH, TILE.gable.v), 1), 0, CULL.house);
-
-    // Front-garden clutter, all of it on the street side.
+  /**
+   * Where the street side of a lot is, as the helpers every family uses to put
+   * things on it: `at(along, away)` is a point `away` metres in front of the
+   * front wall, `along` metres across it; `boxScale` orients a footprint.
+   */
+  function frontal(lot) {
+    const w = lot.w, d = lot.d;
     const face = frontFace(lot);
     const ox = face === 0 ? 1 : face === 1 ? -1 : 0;
     const oz = face === 2 ? 1 : face === 3 ? -1 : 0;
@@ -1076,52 +1466,214 @@ export function createCity(world, ground, opts = {}) {
     const at = (along, away) => [ox * (out + away) + (sideways ? 0 : along),
       oz * (out + away) + (sideways ? along : 0)];
     const boxScale = (across, deep) => (sideways ? [deep, across] : [across, deep]);
+    return { face, ox, oz, yaw, sideways, out, front, at, boxScale };
+  }
 
-    const garage = front > 10.5 && rnd() < 0.62;
+  /**
+   * A pitched roof over a w x d footprint: gable or hip, with a fascia board
+   * along every eave. The ridge runs along the longer side.
+   */
+  function pitchedRoof(w, d, wallH, roofH, over, hip, pile, gablePile, roofCol, gableCol, fascia, cull) {
+    const alongX = w >= d;
+    const ridge = (alongX ? w : d) + over * 2;
+    const span = (alongX ? d : w) + over * 2;
+    const ry = alongX ? 0 : Math.PI / 2;
+    const slope = Math.hypot(span / 2, roofH);
+    if (hip) {
+      put(pHipTiles, 0, wallH + roofH / 2, 0, ry, ridge, roofH, span, roofCol,
+        rep4(reps(ridge, TILE.tiles.u), reps(span, TILE.tiles.u), reps(slope, TILE.tiles.v), 1), 0, cull);
+    } else {
+      put(pile, 0, wallH + roofH / 2, 0, ry, ridge, roofH, span, roofCol,
+        rep4(reps(ridge, TILE.tiles.u), 1, reps(slope, TILE.tiles.v), 1), 0, cull);
+      if (gablePile) {
+        // The gable sits in the plane of the end wall, under the overhang, and
+        // is as wide as the roof so its edges meet the roof's underside.
+        put(gablePile, 0, wallH + roofH / 2, 0, ry, ridge - over * 2 + 0.02, roofH, span, gableCol,
+          rep4(1, reps(span, TILE.gable.u), reps(roofH, TILE.gable.v), 1), 0, cull);
+      }
+    }
+    if (fascia) {
+      // The fascia board is the dark line that separates roof from wall at a
+      // distance; without it the roof reads as a hat sitting on a box.
+      const ey = wallH - 0.08;
+      const lx = alongX ? 0 : span / 2 - 0.03, lz = alongX ? span / 2 - 0.03 : 0;
+      const sx = alongX ? ridge : 0.06, sz = alongX ? 0.06 : ridge;
+      put(pTrim, lx, ey, lz, 0, sx, 0.24, sz, fascia, rep4(1, 1, 1, 1), 0, CULL.detail * 2);
+      put(pTrim, -lx, ey, -lz, 0, sx, 0.24, sz, fascia, rep4(1, 1, 1, 1), 0, CULL.detail * 2);
+      if (hip) {
+        const hx = alongX ? ridge / 2 - 0.03 : 0, hz = alongX ? 0 : ridge / 2 - 0.03;
+        const hsx = alongX ? 0.06 : span, hsz = alongX ? span : 0.06;
+        put(pTrim, hx, ey, hz, 0, hsx, 0.24, hsz, fascia, rep4(1, 1, 1, 1), 0, CULL.detail * 2);
+        put(pTrim, -hx, ey, -hz, 0, hsx, 0.24, hsz, fascia, rep4(1, 1, 1, 1), 0, CULL.detail * 2);
+      }
+    }
+    return { alongX, ridge, span };
+  }
+
+  // Pitches, in degrees, by what the roof is made of.
+  const TAN = (deg) => Math.tan(deg * Math.PI / 180);
+
+  function emitHouse(lot, rnd, occ) {
+    if (lot.height < 4.5) { emitShed(lot, rnd); return; }
+    // Board and render are the commonest; brick and stone the old farmhouses.
+    const pickV = rnd();
+    const v = pickV < 0.30 ? 0 : pickV < 0.58 ? 1 : pickV < 0.82 ? 2 : 3;
+    const masonry = v >= 2;
+    const paint = masonry ? STONE_TINT[(rnd() * STONE_TINT.length) | 0] : HOUSE_PAINT[(rnd() * HOUSE_PAINT.length) | 0];
+    const roofCol = ROOF_PAINT[(rnd() * ROOF_PAINT.length) | 0];
+    const trim = TRIM_TINT[(rnd() * TRIM_TINT.length) | 0];
+    const T = TILE.house, w = lot.w, d = lot.d;
+
+    // Whole storeys, so the windows are the height windows are: the facade
+    // tile is two floors of 2.9 m, and a bungalow shows the lower half of it.
+    const storeys = lot.height >= 6.4 ? 2 : 1;
+    const wallH = storeys * 2.9 + 0.12;
+    const span = Math.min(w, d);
+    const roofH = clamp((span / 2 + 0.45) * TAN(33 + rnd() * 12), 1.8, 4.6);
+    const hip = masonry ? rnd() < 0.7 : rnd() < 0.3;
+
+    put(pHouse[v], 0, wallH / 2, 0, 0, w, wallH, d, paint,
+      rep4(reps(w, T.u), reps(d, T.u), storeys * 0.5, 1), occ, CULL.house);
+
+    const roof = pitchedRoof(w, d, wallH, roofH, 0.45, hip, pTiles, pGable, roofCol, paint, 0x4a4642, CULL.house);
+
+    // A chimney on most of them, on the ridge near one end: nothing says
+    // "house" from half a mile away like a chimney.
+    if (rnd() < 0.75) {
+      const along = (hip ? roof.ridge * 0.16 : roof.ridge / 2 - 1.4) * (rnd() < 0.5 ? -1 : 1);
+      const top = wallH + roofH + 0.9 + rnd() * 0.5;
+      const cx = roof.alongX ? along : 0, cz = roof.alongX ? 0 : along;
+      const cw = 0.55 + rnd() * 0.25;
+      put(pBrick, cx, (wallH + top) / 2, cz, 0, cw, top - wallH, cw * 1.3, STONE_TINT[(rnd() * 4) | 0],
+        rep4(1, 1, reps(top - wallH, TILE.brick.v), 1), 0, CULL.house);
+      put(pTrimCap, cx, top + 0.05, cz, 0, cw + 0.12, 1, cw * 1.3 + 0.12, 0x6c6862,
+        rep4(1, 1, 1, 1), 0, CULL.house);
+    }
+
+    // Front-garden clutter, all of it on the street side.
+    const F = frontal(lot);
+    const garage = F.front > 10.5 && rnd() < 0.55;
     if (garage) {
       // Half-buried in the house, so it only projects as far as the front
       // garden and never over the kerb.
       const gw = 3.5, gd = 4.8, gh = 2.65;
-      const along = (front / 2 - gw / 2 - 0.5) * (rnd() < 0.5 ? -1 : 1);
-      const [gx, gz] = at(along, gd * 0.22);
-      const [sx, sz] = boxScale(gw, gd);
+      const along = (F.front / 2 - gw / 2 - 0.5) * (rnd() < 0.5 ? -1 : 1);
+      const [gx, gz] = F.at(along, gd * 0.22);
+      const [sx, sz] = F.boxScale(gw, gd);
       put(pHouse[v], gx, gh / 2, gz, 0, sx, gh, sz, paint,
-        rep4(reps(sx, T.u), reps(sz, T.u), 1, 1), 0, CULL.house);
+        rep4(reps(sx, T.u), reps(sz, T.u), 0.45, 1), 0, CULL.house);
       put(pTrimCap, gx, gh, gz, 0, sx + 0.35, 1, sz + 0.35, trim,
         rep4(1, 1, 1, 1), 0, CULL.house);
-      const [dx, dz] = at(along, gd * 0.72 + 0.03);
-      put(pPanel, dx, (gh - 0.3) / 2, dz, yaw, gw - 0.5, gh - 0.3, 1, 0xdadad4,
+      const [dx, dz] = F.at(along, gd * 0.72 + 0.03);
+      put(pRoller, dx, (gh - 0.3) / 2, dz, F.yaw, gw - 0.5, gh - 0.3, 1, 0xdcdcd6,
         rep4(1, 1, 1, 1), 0, CULL.detail);
     }
 
     const porchY = Math.min(wallH - 0.4, 2.55);
-    const [px, pz] = at(0, 0.85);
-    const [psx, psz] = boxScale(2.5, 1.7);
+    const [px, pz] = F.at(0, 0.85);
+    const [psx, psz] = F.boxScale(2.5, 1.7);
     put(pTrim, px, porchY, pz, 0, psx, 0.22, psz, trim, rep4(1, 1, 1, 1), 0, CULL.detail);
     for (const side of [-1, 1]) {
-      const [cx, cz] = at(side * 1.05, 1.5);
+      const [cx, cz] = F.at(side * 1.05, 1.5);
       put(pTrim, cx, porchY / 2, cz, 0, 0.16, porchY, 0.16, trim, rep4(1, 1, 1, 1), 0, CULL.detail);
     }
-    const [fx, fz] = at(0, 0.04);
-    put(pPanel, fx, 1.05, fz, yaw, 1.05, 2.1, 1, HOUSE_PAINT[(rnd() * 4) | 0],
+    // A front step, so the door does not open onto grass. The base of every
+    // building is 0.35 m under the ground (seatY), so the step's top is 0.15 m
+    // above it and the door stands on the step.
+    const [stx, stz] = F.at(0, 0.45);
+    const [ssx, ssz] = F.boxScale(1.6, 0.9);
+    put(pTrim, stx, 0.25, stz, 0, ssx, 0.5, ssz, 0xb8b4ac, rep4(1, 1, 1, 1), 0, CULL.detail);
+    const [fx, fz] = F.at(0, 0.04);
+    put(pPanel, fx, 0.5 + 1.05, fz, F.yaw, 1.0, 2.1, 1, DOOR_TINT[(rnd() * DOOR_TINT.length) | 0],
       rep4(1, 1, 1, 1), 0, CULL.detail);
 
     // Garden wall only where there is no garage: the two occupy the same strip
     // of front garden, and a wall crossing a garage door looks like a mistake.
     if (!garage && rnd() < 0.7) {
-      const [wx, wz] = at(0, 3.4);
-      const [wsx, wsz] = boxScale(front + 1.6, 0.3);
-      put(pTrim, wx, 0.28, wz, 0, wsx, 0.56, wsz, trim,
-        rep4(reps(wsx, TILE.trim.u), reps(wsz, TILE.trim.u), 1, 1), 0, CULL.detail);
+      const [wx, wz] = F.at(0, 3.4);
+      const [wsx, wsz] = F.boxScale(F.front + 1.6, 0.3);
+      put(masonry ? pBrick : pTrim, wx, 0.36, wz, 0, wsx, 0.72, wsz, masonry ? STONE_TINT[1] : trim,
+        rep4(reps(wsx, masonry ? TILE.brick.u : TILE.trim.u), reps(wsz, masonry ? TILE.brick.u : TILE.trim.u), masonry ? 0.36 : 1, 1),
+        0, CULL.detail);
     }
   }
 
+  /** A shed: stained board, one door, no windows, dark at night. */
+  function emitShed(lot, rnd) {
+    const w = lot.w, d = lot.d;
+    const tint = TIMBER_TINT[(rnd() * TIMBER_TINT.length) | 0];
+    const metalRoof = rnd() < 0.6;
+    const roofCol = metalRoof ? WARE_PAINT[(rnd() * WARE_PAINT.length) | 0] : ROOF_PAINT[(rnd() * ROOF_PAINT.length) | 0];
+    const span = Math.min(w, d);
+    const roofH = clamp((span / 2 + 0.3) * TAN(22 + rnd() * 12), 0.9, 2.4);
+    const wallH = Math.max(2.3, lot.height - roofH);
+    const T = TILE.timber;
+    put(pTimber, 0, wallH / 2, 0, 0, w, wallH, d, tint,
+      rep4(reps(w, T.u), reps(d, T.u), wallH / T.v, 1), 0, CULL.house);
+    pitchedRoof(w, d, wallH, roofH, 0.3, false, metalRoof ? pMetal : pTiles, pTimberGable, roofCol, tint, 0, CULL.house);
+    const F = frontal(lot);
+    const [dx, dz] = F.at((rnd() - 0.5) * Math.max(0, F.front - 3), 0.04);
+    put(pBarnDoor, dx, 1.1 + 0.35, dz, F.yaw, 1.7, 2.2, 1, tint, rep4(1, 1, 1, 1), 0, CULL.detail * 1.5);
+  }
+
   function emitWarehouse(lot, rnd) {
+    const w = lot.w, d = lot.d;
+    const big = Math.max(w, d) > 34 || lot.height > 12.5;
+    if (lot.district === 'garage' || big || rnd() < 0.35) emitSteelShed(lot, rnd);
+    else emitBarn(lot, rnd);
+  }
+
+  /**
+   * A barn: stained board-and-batten, a steep steel roof, big sliding doors on
+   * one gable end and a hay-loft door above them.
+   */
+  function emitBarn(lot, rnd) {
+    const w = lot.w, d = lot.d;
+    const tint = TIMBER_TINT[(rnd() * 4) | 0];               // the reds and blacks
+    const roofCol = [0x5a5e62, 0x6e3a30, 0x4c5a4a, 0x7c8084][(rnd() * 4) | 0];
+    const span = Math.min(w, d);
+    const roofH = clamp((span / 2 + 0.4) * TAN(24 + rnd() * 8), 2.2, 6.5);
+    const wallH = Math.max(3.8, lot.height - roofH * 0.6);
+    const T = TILE.timber;
+    put(pTimber, 0, wallH / 2, 0, 0, w, wallH, d, tint,
+      rep4(reps(w, T.u), reps(d, T.u), wallH / T.v, 1), 0, CULL.ware);
+    const roof = pitchedRoof(w, d, wallH, roofH, 0.4, false, pMetal, pTimberGable, roofCol, tint, 0, CULL.ware);
+
+    // Doors on the gable end nearer the road. The gable ends are the short
+    // walls, across the ridge.
+    const F = frontal(lot);
+    const endSign = roof.alongX ? (F.ox !== 0 ? F.ox : (rnd() < 0.5 ? 1 : -1))
+      : (F.oz !== 0 ? F.oz : (rnd() < 0.5 ? 1 : -1));
+    const half = (roof.alongX ? w : d) / 2 + 0.05;
+    const yaw = roof.alongX ? (endSign > 0 ? Math.PI / 2 : -Math.PI / 2) : (endSign > 0 ? 0 : Math.PI);
+    const dw = Math.min(span - 1.2, 5.2), dh = Math.min(wallH - 0.4, 4.4);
+    for (const s of [-1, 1]) {
+      const off = s * dw / 4;
+      const x = roof.alongX ? endSign * half : off, z = roof.alongX ? off : endSign * half;
+      put(pBarnDoor, x, dh / 2 + 0.35, z, yaw, dw / 2 - 0.05, dh, 1, tint, rep4(1, 1, 1, 1), 0, CULL.dock);
+    }
+    if (roofH > 2.6) {
+      const ly = wallH + Math.min(roofH * 0.35, 1.6);
+      const x = roof.alongX ? endSign * (half + 0.01) : 0, z = roof.alongX ? 0 : endSign * (half + 0.01);
+      put(pBarnDoor, x, ly + 0.35, z, yaw, 1.4, 1.5, 1, tint, rep4(1, 1, 1, 1), 0, CULL.dock);
+    }
+    // Ridge vents.
+    const vents = clamp(Math.round(roof.ridge / 12), 1, 3);
+    for (let i = 0; i < vents; i++) {
+      const along = (i - (vents - 1) / 2) * (roof.ridge / (vents + 0.6));
+      put(pTrim, roof.alongX ? along : 0, wallH + roofH + 0.35, roof.alongX ? 0 : along, 0, 1.1, 0.7, 1.1, 0x8c8e8e,
+        rep4(1, 1, 1, 1), 0, CULL.dock);
+    }
+  }
+
+  /** Portal-frame steel: profiled sheeting, a shallow roof, roller doors. */
+  function emitSteelShed(lot, rnd) {
     const v = (rnd() * 2) | 0;
     const tint = WARE_PAINT[(rnd() * WARE_PAINT.length) | 0];
     const T = TILE.ware, w = lot.w, d = lot.d;
     const h = Math.max(7, lot.height);
-    const roofH = clamp(h * 0.16, 1.0, 2.6);
+    const span = Math.min(w, d);
+    const roofH = clamp((span / 2 + 0.35) * TAN(10 + rnd() * 5), 1.0, 3.2);
     const wallH = h - roofH;
 
     put(pWare[v], 0, wallH / 2, 0, 0, w, wallH, d, tint,
@@ -1129,29 +1681,22 @@ export function createCity(world, ground, opts = {}) {
 
     const alongX = w >= d;
     const ridge = (alongX ? w : d) + 0.7;
-    const span = (alongX ? d : w) + 0.7;
+    const spanO = (alongX ? d : w) + 0.7;
     const ry = alongX ? 0 : Math.PI / 2;
-    const slope = Math.hypot(span / 2, roofH);
-    put(pMetal, 0, wallH + roofH / 2, 0, ry, ridge, roofH, span, tint,
+    const slope = Math.hypot(spanO / 2, roofH);
+    put(pMetal, 0, wallH + roofH / 2, 0, ry, ridge, roofH, spanO, tint,
       rep4(reps(ridge, TILE.metal.u), 1, reps(slope, TILE.metal.v), 1), 0, CULL.ware);
-    put(pWareGable[v], 0, wallH + roofH / 2, 0, ry, ridge, roofH, span, tint,
-      rep4(1, reps(span, T.u), 1, 1), 0, CULL.ware);
+    put(pWareGable[v], 0, wallH + roofH / 2, 0, ry, ridge - 0.68, roofH, spanO - 0.68, tint,
+      rep4(1, reps(spanO, T.u), 1, 1), 0, CULL.ware);
 
     // Loading docks along the street side.
-    const face = frontFace(lot);
-    const ox = face === 0 ? 1 : face === 1 ? -1 : 0;
-    const oz = face === 2 ? 1 : face === 3 ? -1 : 0;
-    const yaw = face === 0 ? Math.PI / 2 : face === 1 ? -Math.PI / 2 : face === 2 ? 0 : Math.PI;
-    const sideways = ox !== 0;
-    const out = sideways ? w / 2 : d / 2;
-    const front = sideways ? d : w;
-    const doors = clamp(Math.floor(front / 13), 1, 4);
+    const F = frontal(lot);
+    const doors = clamp(Math.floor(F.front / 13), 1, 4);
     const dh = Math.min(4.6, wallH - 0.9);
     for (let i = 0; i < doors; i++) {
-      const along = (i - (doors - 1) / 2) * (front / (doors + 0.35));
-      const dx = ox * (out + 0.05) + (sideways ? 0 : along);
-      const dz = oz * (out + 0.05) + (sideways ? along : 0);
-      put(pRoller, dx, dh / 2, dz, yaw, 4.2, dh, 1, 0xd2d4d4, rep4(1, 1, 1, 1), 0, CULL.dock);
+      const along = (i - (doors - 1) / 2) * (F.front / (doors + 0.35));
+      const [dx, dz] = F.at(along, 0.05);
+      put(pRoller, dx, dh / 2 + 0.35, dz, F.yaw, 4.2, dh, 1, 0xd2d4d4, rep4(1, 1, 1, 1), 0, CULL.dock);
     }
 
     // Ridge vents.
@@ -1166,7 +1711,6 @@ export function createCity(world, ground, opts = {}) {
   }
 
   // ---- walk the lots -----------------------------------------------------
-  const lots = world.lots || [];
   const counts = { tower: 0, block: 0, house: 0, warehouse: 0 };
 
   for (const lot of lots) {
@@ -1236,12 +1780,17 @@ export function createCity(world, ground, opts = {}) {
   for (let v = 0; v < 3; v++) mount(shells.sides, matTower[v], pTower[v], `tower${v}`, true);
   for (let v = 0; v < 3; v++) mount(shells.sides, matBlock[v], pBlock[v], `block${v}`, true);
   for (let v = 0; v < 2; v++) mount(shells.sides, matShop[v], pShop[v], `shop${v}`, false);
-  for (let v = 0; v < 2; v++) mount(shells.sides, matHouse[v], pHouse[v], `house${v}`, true);
+  for (let v = 0; v < 4; v++) mount(shells.sides, matHouse[v], pHouse[v], `house${v}`, true);
   for (let v = 0; v < 2; v++) mount(shells.sides, matWare[v], pWare[v], `warehouse${v}`, true);
-  for (let v = 0; v < 2; v++) mount(shells.ends, matWare[v], pWareGable[v], `waregable${v}`, false);
+  for (let v = 0; v < 2; v++) mount(shells.ends, matWare[v], pWareGable[v], `waregable${v}`, true);
+  mount(shells.sides, matTimber, pTimber, 'timber', true);
+  mount(shells.ends, matTimberGable, pTimberGable, 'timbergable', true);
+  mount(shells.sides, matBrick, pBrick, 'brick', true);
   mount(shells.ends, matGable, pGable, 'gable', false);
   mount(shells.slopes, matTiles, pTiles, 'tileroof', true);
+  mount(shells.hips, matTiles, pHipTiles, 'hiproof', true);
   mount(shells.slopes, matMetal, pMetal, 'metalroof', true);
+  mount(shells.panel, matBarnDoor, pBarnDoor, 'barndoors', false);
   mount(shells.cap, matFlat, pFlat, 'flatroof', false);
   mount(shells.sides, matTrim, pTrim, 'trim', false);
   mount(shells.cap, matTrim, pTrimCap, 'trimcap', false);

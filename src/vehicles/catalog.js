@@ -13,6 +13,12 @@
 //
 // tools/catalogcheck.mjs measures every one of them, so the figures shown in
 // the garage are the ones you actually get.
+//
+// Every handbrake can lock its own rear axle — at least 115% of what that
+// takes. Several could not: the pickup's managed 51%, so pulling it at 60 km/h
+// swung the tail 5 degrees. That used to be hidden by a flat 58% cut to rear
+// grip whenever the handbrake was touched; with the cut gone, the handbrake has
+// to be strong enough to do the job itself, and on a real car it is.
 
 import { DRIVE } from '../physics/vehicle.js';
 
@@ -52,7 +58,7 @@ export const CARS = [
       wheelRadius: 0.42, rideHeight: 0.52, drive: DRIVE.AWD,
       power: 172000, peakRpm: 5000, redline: 5600,
       gears: [4.62, 2.62, 1.62, 1.18, 0.88], finalDrive: 4.30,
-      brakeTorque: 3800, brakeBias: 0.58, handbrakeTorque: 2600,
+      brakeTorque: 3800, brakeBias: 0.58, handbrakeTorque: 4700,
       dragArea: 1.45, downforce: 0.02,
       gripFront: 0.98, gripRear: 1.05,
       springRate: 24000, damping: 3600, maxSteer: 0.66,
@@ -68,7 +74,7 @@ export const CARS = [
       wheelRadius: 0.45, rideHeight: 0.55, drive: DRIVE.AWD,
       power: 335000, peakRpm: 5400, redline: 6000,
       gears: [3.86, 2.28, 1.52, 1.16, 0.90, 0.72], finalDrive: 3.90,
-      brakeTorque: 4600, brakeBias: 0.60, handbrakeTorque: 2400,
+      brakeTorque: 4600, brakeBias: 0.60, handbrakeTorque: 5900,
       dragArea: 1.72, downforce: 0.02,
       gripFront: 1.00, gripRear: 1.07,
       springRate: 26000, damping: 3900, maxSteer: 0.62,
@@ -84,7 +90,7 @@ export const CARS = [
       wheelRadius: 0.33, rideHeight: 0.24, drive: DRIVE.AWD,
       power: 310000, peakRpm: 7200, redline: 8000,
       gears: [3.30, 2.16, 1.62, 1.28, 1.04, 0.86], finalDrive: 3.80,
-      brakeTorque: 4400, brakeBias: 0.60, handbrakeTorque: 2800,
+      brakeTorque: 4400, brakeBias: 0.60, handbrakeTorque: 3100,
       dragArea: 0.72, downforce: 0.42,
       gripFront: 1.18, gripRear: 1.25,
       springRate: 44000, damping: 5400, maxSteer: 0.60,
@@ -100,7 +106,7 @@ export const CARS = [
       wheelRadius: 0.33, rideHeight: 0.20, drive: DRIVE.RWD,
       power: 235000, peakRpm: 7400, redline: 8200,
       gears: [3.38, 2.10, 1.56, 1.22, 1.00, 0.82], finalDrive: 3.72,
-      brakeTorque: 4000, brakeBias: 0.61, handbrakeTorque: 2600,
+      brakeTorque: 4000, brakeBias: 0.61, handbrakeTorque: 2800,
       dragArea: 0.66, downforce: 0.34,
       gripFront: 1.13, gripRear: 1.17,
       springRate: 40000, damping: 5000, maxSteer: 0.62,
@@ -149,7 +155,7 @@ export const CARS = [
       wheelRadius: 0.35, rideHeight: 0.27, drive: DRIVE.RWD,
       power: 250000, peakRpm: 6200, redline: 6900,
       gears: [3.55, 2.05, 1.42, 1.05, 0.84, 0.68, 0.57], finalDrive: 3.31,
-      brakeTorque: 3900, brakeBias: 0.63, handbrakeTorque: 2500,
+      brakeTorque: 3900, brakeBias: 0.63, handbrakeTorque: 3500,
       dragArea: 0.78, downforce: 0.20,
       gripFront: 1.07, gripRear: 1.13,
       springRate: 36000, damping: 4600, maxSteer: 0.60,
@@ -165,7 +171,7 @@ export const CARS = [
       wheelRadius: 0.35, rideHeight: 0.16, drive: DRIVE.RWD,
       power: 449000, peakRpm: 7600, redline: 8400,
       gears: [3.21, 2.11, 1.58, 1.24, 1.00, 0.83, 0.70], finalDrive: 3.62,
-      brakeTorque: 5400, brakeBias: 0.60, handbrakeTorque: 2600,
+      brakeTorque: 5400, brakeBias: 0.60, handbrakeTorque: 4300,
       dragArea: 0.76, downforce: 0.62,
       gripFront: 1.24, gripRear: 1.31,
       springRate: 52000, damping: 6200, maxSteer: 0.58, steerRate: 4.0,
@@ -183,7 +189,7 @@ export const CARS = [
       // is only a limiter — it never shifts.
       power: 500000, peakRpm: 4200, redline: 14000, idleRpm: 0,
       gears: [1.00], finalDrive: 7.35, shiftTime: 0,
-      brakeTorque: 5200, brakeBias: 0.58, handbrakeTorque: 2400,
+      brakeTorque: 5200, brakeBias: 0.58, handbrakeTorque: 5400,
       dragArea: 0.54, downforce: 0.30,
       gripFront: 1.18, gripRear: 1.25,
       springRate: 46000, damping: 5800, maxSteer: 0.58,
@@ -199,7 +205,7 @@ export const CARS = [
       wheelRadius: 0.40, rideHeight: 0.42, drive: DRIVE.AWD,
       power: 224000, peakRpm: 5600, redline: 6200,
       gears: [4.17, 2.34, 1.52, 1.14, 0.87, 0.69], finalDrive: 3.73,
-      brakeTorque: 4200, brakeBias: 0.60, handbrakeTorque: 2200,
+      brakeTorque: 4200, brakeBias: 0.60, handbrakeTorque: 4800,
       dragArea: 1.18, downforce: 0.04,
       gripFront: 1.00, gripRear: 1.07,
       springRate: 30000, damping: 4400, maxSteer: 0.60,
@@ -233,7 +239,7 @@ export const CARS = [
       wheelRadius: 0.41, rideHeight: 0.40, drive: DRIVE.RWD,
       power: 246000, peakRpm: 5200, redline: 5800,
       gears: [3.97, 2.32, 1.52, 1.14, 0.86, 0.69], finalDrive: 3.55,
-      brakeTorque: 4300, brakeBias: 0.64, handbrakeTorque: 2000,
+      brakeTorque: 4300, brakeBias: 0.64, handbrakeTorque: 4500,
       dragArea: 1.62, downforce: 0.02,
       gripFront: 1.00, gripRear: 1.00,      // light tail: it will step out
       springRate: 31000, damping: 4300, maxSteer: 0.58,
@@ -249,7 +255,7 @@ export const CARS = [
       wheelRadius: 0.35, rideHeight: 0.33, drive: DRIVE.FWD,
       power: 105000, peakRpm: 4200, redline: 4800,
       gears: [3.82, 2.13, 1.36, 0.98, 0.76], finalDrive: 4.19,
-      brakeTorque: 3100, brakeBias: 0.66, handbrakeTorque: 1800,
+      brakeTorque: 3100, brakeBias: 0.66, handbrakeTorque: 3400,
       dragArea: 1.38, downforce: 0.02,
       gripFront: 0.95, gripRear: 1.01,
       springRate: 27000, damping: 3800, maxSteer: 0.60,
@@ -265,7 +271,7 @@ export const CARS = [
       wheelRadius: 0.37, rideHeight: 0.26, drive: DRIVE.AWD,
       power: 380000, peakRpm: 6000, redline: 6600,
       gears: [3.44, 2.05, 1.44, 1.09, 0.87, 0.72, 0.60], finalDrive: 3.15,
-      brakeTorque: 4700, brakeBias: 0.61, handbrakeTorque: 2400,
+      brakeTorque: 4700, brakeBias: 0.61, handbrakeTorque: 4800,
       dragArea: 0.96, downforce: 0.24,
       gripFront: 1.10, gripRear: 1.16,
       springRate: 38000, damping: 5000, maxSteer: 0.58,

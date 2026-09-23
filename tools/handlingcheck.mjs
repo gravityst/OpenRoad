@@ -18,6 +18,16 @@ import { SURFACES } from '../src/world/ground.js';
 
 const dt = 1 / 120;
 const DEG = 180 / Math.PI;
+
+// The car the detailed checks are run on, by NAME. It is the car the game
+// starts a new player in today, but it is pinned rather than read from
+// STARTER: several of these figures are properties of this particular car
+// (a 280 hp all-wheel-drive hatch — at 120 km/h the heading test sits right
+// at what its tyres allow), and a later change of starting car should not
+// silently turn them into claims about a different one. Every check that is a
+// claim about the whole garage loops over CARS instead.
+const REF = 'kaida2';
+if (REF !== STARTER) console.log(`note: the game now starts players in "${STARTER}"; detailed checks still use "${REF}"`);
 let fail = 0;
 const check = (name, ok, detail) => {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name.padEnd(50)} ${detail}`);
@@ -38,7 +48,7 @@ const flat = (name = 'asphalt') => {
 };
 const ASPHALT = flat('asphalt');
 
-function newCar(id = STARTER, ground = ASPHALT, settings = {}) {
+function newCar(id = REF, ground = ASPHALT, settings = {}) {
   const c = createVehicle({ ground, spec: id ? specFor(id) : undefined, isPlayer: true });
   c.setAssists(settings);                 // exactly what main.js does for a player
   c.reset(0, 0, 0);
@@ -77,7 +87,7 @@ function keyboard() {
 // ---------------------------------------------------------------------------
 // 1. STEERING LOCK FALLS WITH SPEED
 // ---------------------------------------------------------------------------
-console.log('road-wheel angle at full input, starter car, dry asphalt:');
+console.log(`road-wheel angle at full input, ${REF}, dry asphalt:`);
 {
   const car = newCar();
   const rows = [];
@@ -98,7 +108,8 @@ console.log('road-wheel angle at full input, starter car, dry asphalt:');
   check('lock is tens of degrees when parking', lockAt[0] >= 30 && lockAt[10] >= 30,
     `${lockAt[0].toFixed(1)} deg at rest, ${lockAt[10].toFixed(1)} at 10 km/h`);
   check('lock is a few degrees at speed', lockAt[80] <= 10 && lockAt[100] <= 9 && lockAt[120] <= 8.5,
-    `${lockAt[80].toFixed(1)} deg at 80 km/h (was 16.3 at 81), ${lockAt[100].toFixed(1)} at 100, ${lockAt[120].toFixed(1)} at 120`);
+    `${lockAt[80].toFixed(1)} deg at 80 km/h, ${lockAt[100].toFixed(1)} at 100, ${lockAt[120].toFixed(1)} at 120 ` +
+    `(were 16.4, 15.2 and 14.6)`);
   check('lock never grows with speed', monotone, monotone ? 'monotone from 0 to 200 km/h' : 'rises somewhere');
 }
 
@@ -137,7 +148,7 @@ console.log('road-wheel angle at full input, starter car, dry asphalt:');
 // Must still TURN (heading >= 20 deg during the input), stay composed (body
 // slip <= 6 deg), and within 0.8 s of release be straight (slip < 2 deg, yaw
 // rate < 0.1 rad/s) without wagging its tail (at most one sign change of slip).
-function stepSteer({ id = STARTER, kmh, key, throttle = 'hold', settings = {} }) {
+function stepSteer({ id = REF, kmh, key, throttle = 'hold', settings = {} }) {
   const car = newCar(id, ASPHALT, settings);
   const v0 = kmh / 3.6;
   car.vz = -v0;
@@ -170,7 +181,7 @@ function stepSteer({ id = STARTER, kmh, key, throttle = 'hold', settings = {} })
 const verdict = (r) => r.heading >= 20 && r.peak <= 6 && r.settle >= 0 && r.settle <= 0.8 && r.signs <= 1;
 const line = (r) => `heading ${r.heading.toFixed(1)} deg, peak slip ${r.peak.toFixed(1)} deg, ` +
   `straight ${r.settle < 0 ? 'NEVER' : `${r.settle.toFixed(2)} s`} after release, ${r.signs} sign change(s)`;
-console.log('\nhold a key for 1.0 s, then let go (starter car, default assists):');
+console.log(`\nhold a key for 1.0 s, then let go (${REF}, default assists):`);
 for (const kmh of [80, 120]) {
   for (const key of ['KeyD', 'KeyA']) {
     const r = stepSteer({ kmh, key });
@@ -251,7 +262,7 @@ for (const kmh of [80, 120]) {
 
 /** A car already sliding: 25 deg of body slip at 80 km/h, rotating into it. */
 function sliding(settings, countersteer = 1) {
-  const car = newCar(STARTER, ASPHALT, settings);
+  const car = newCar(REF, ASPHALT, settings);
   car.aids.countersteer = countersteer;
   const v = 80 / 3.6, b = 25 / DEG;
   // Travelling along -Z with the nose 25 deg to the right of it, still
@@ -289,22 +300,31 @@ function recoverTime(car, seconds = 4) {
 
 {
   // The handbrake still swings the tail, ESC on — and ESC then catches it.
-  const car = newCar();
-  car.vz = -60 / 3.6;
-  const kb = keyboard();
-  kb.down('KeyD'); kb.down('Space'); kb.down('KeyW');
-  let peak = 0;
-  for (let f = 0; f < 60 * 0.7; f++) { kb.frame(car); peak = Math.max(peak, Math.abs(car.bodySlip) * DEG); }
-  kb.up('Space'); kb.up('KeyD');
-  let back = -1;
-  for (let f = 0; f < 60 * 4; f++) {
-    kb.frame(car);
-    peak = Math.max(peak, Math.abs(car.bodySlip) * DEG);
-    if (back < 0 && Math.abs(car.bodySlip) < 3 / DEG && Math.abs(car.yawRate) < 0.15) back = (f + 1) / 60;
+  // Every car, driven the way a kid pulls one: W held, D and Space together.
+  let fewest = Infinity, slowest = 0, which = '', bad = [];
+  for (const c of CARS) {
+    const car = newCar(c.id);
+    car.vz = -60 / 3.6;
+    const kb = keyboard();
+    kb.down('KeyD'); kb.down('Space'); kb.down('KeyW');
+    let peak = 0;
+    for (let f = 0; f < 60 * 0.7; f++) { kb.frame(car); peak = Math.max(peak, Math.abs(car.bodySlip) * DEG); }
+    kb.up('Space'); kb.up('KeyD');
+    let back = -1;
+    for (let f = 0; f < 60 * 4; f++) {
+      kb.frame(car);
+      peak = Math.max(peak, Math.abs(car.bodySlip) * DEG);
+      if (back < 0 && Math.abs(car.bodySlip) < 3 / DEG && Math.abs(car.yawRate) < 0.15) back = (f + 1) / 60;
+    }
+    kb.up('KeyW');
+    if (peak < fewest) { fewest = peak; which = c.id; }
+    slowest = Math.max(slowest, back < 0 ? 9 : back);
+    if (!(peak >= 20 && back > 0 && back < 2.5)) bad.push(`${c.id} ${peak.toFixed(0)} deg, back ${back.toFixed(2)} s`);
   }
-  kb.up('KeyW');
-  check('the handbrake swings the rear, ESC on', peak >= 20 && back > 0 && back < 2.5,
-    `D + Space for 0.7 s at 60 km/h: ${peak.toFixed(0)} deg of slip, straight again ${back.toFixed(2)} s after letting go`);
+  check('every handbrake swings the rear, ESC on', bad.length === 0,
+    bad.length ? bad.join(', ') :
+      `W + D + Space for 0.7 s at 60 km/h, all 15 cars: at least ${fewest.toFixed(0)} deg (${which}), ` +
+      `caught and straight within ${slowest.toFixed(2)} s of letting go`);
 }
 
 {
@@ -360,12 +380,12 @@ function topSpeed(id, surface) {
   return car.speed * 3.6;
 }
 {
-  const tar = topSpeed(STARTER, 'asphalt');
-  const grass = topSpeed(STARTER, 'grass');
-  const gravel = topSpeed(STARTER, 'gravel');
-  const sand = topSpeed(STARTER, 'sand');
+  const tar = topSpeed(REF, 'asphalt');
+  const grass = topSpeed(REF, 'grass');
+  const gravel = topSpeed(REF, 'gravel');
+  const sand = topSpeed(REF, 'sand');
   check('a field cannot be taken at road speed', grass / tar <= 0.6 && grass / tar >= 0.35,
-    `starter flat out: asphalt ${tar.toFixed(0)}, gravel road ${gravel.toFixed(0)}, ` +
+    `${REF} flat out: asphalt ${tar.toFixed(0)}, gravel road ${gravel.toFixed(0)}, ` +
     `grass ${grass.toFixed(0)} (${(grass / tar * 100).toFixed(0)}%), sand ${sand.toFixed(0)} km/h`);
   const saloonTar = topSpeed('v340', 'asphalt'), saloonGrass = topSpeed('v340', 'grass');
   check('a road car is worse off the road than a rally car', saloonGrass / saloonTar < grass / tar,
@@ -375,7 +395,7 @@ function topSpeed(id, surface) {
   // And the lead's field run: off the road at road speed, sliding, W held.
   // It used to go from 81 km/h to 143 across the grass. Now the field takes
   // the speed off, however hard the throttle is pressed.
-  const car = newCar(STARTER, flat('grass'));
+  const car = newCar(REF, flat('grass'));
   car.vz = -140 / 3.6;
   car.yaw = -15 / DEG; car.yawRate = -0.3;
   let peakKmh = 0;
@@ -410,11 +430,11 @@ function launch(id) {
   return { t11, t100, weakest };
 }
 {
-  const s = launch(STARTER);
+  const s = launch(REF);
   check('pulling away has no dead spot', s.t11 > 0 && s.t11 < 0.5 && s.weakest > 0.2,
-    `starter from the title screen: 11 km/h in ${s.t11.toFixed(2)} s (was 1 s, then a stall), ` +
-    `never below ${s.weakest.toFixed(2)} g on the way to 50`);
-  check('the starter is quick, for what it is', s.t100 > 3 && s.t100 < 5,
+    `${REF} from the title screen: 11 km/h in ${s.t11.toFixed(2)} s (was 0.73), ` +
+    `never below ${s.weakest.toFixed(2)} g on the way to 50 (was 0.00 — a dead spot)`);
+  check('the rally hatch is quick, for what it is', s.t100 > 3 && s.t100 < 5,
     `0-100 in ${s.t100.toFixed(2)} s — a 280 hp all-wheel-drive homologation special`);
   const h = launch('lark');
   check('a small hatch takes 8-11 s to 100', h.t100 >= 8 && h.t100 <= 11,
@@ -442,7 +462,7 @@ function launch(id) {
   for (const settings of [{}, { esc: false }, { esc: false, tc: false, abs: false }]) {
     for (const [slipDeg, yawRate, kmh] of [[0, 0, 100], [20, -0.8, 90], [60, 1.5, 70], [120, -2, 60], [-35, 0.4, 120]]) {
       for (const steer of [0, 1, -0.5]) {
-        const car = newCar(STARTER, ASPHALT, settings);
+        const car = newCar(REF, ASPHALT, settings);
         const v = kmh / 3.6, b = slipDeg / DEG;
         car.vx = Math.sin(b) * v; car.vz = -Math.cos(b) * v; car.yawRate = yawRate;
         car.step(dt);
@@ -489,7 +509,7 @@ function launch(id) {
     let onRoad = 0, total = 0, sideways = 0, spins = 0, trips = 0;
     for (let k = 0; k < 30; k++) {
       const e = edges[(k * 41) % edges.length];
-      const car = createVehicle({ ground, spec: specFor(STARTER), isPlayer: true });
+      const car = createVehicle({ ground, spec: specFor(REF), isPlayer: true });
       car.setAssists({});
       const p0 = pointOnEdge(e, 3);
       car.reset(p0.x, p0.z, Math.atan2(-p0.tx, -p0.tz));

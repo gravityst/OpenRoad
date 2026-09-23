@@ -86,7 +86,7 @@ export const DEFAULT_SPEC = {
 
   brakeTorque: 3400,        // N·m per axle at full pedal
   brakeBias: 0.63,          // fraction to the front
-  handbrakeTorque: 2600,    // N·m, rear only
+  handbrakeTorque: 2800,    // N·m, rear only: enough to lock the rear axle
 
   maxSteer: 0.62,           // rad at the road wheel, full lock at a standstill
   steerRate: 3.4,           // rad/s the road wheels can be turned
@@ -738,10 +738,16 @@ export function createVehicle(opts = {}) {
     const engBrake = (engineDrag(car.rpm, throttle) * Math.abs(ratio) / spec.wheelRadius) *
       smoothstep(0.5, 2.5, Math.abs(vLong)) * (car.shiftTimer > 0 ? 0.3 : 1);
     if (dmg) driveForce *= dmg.powerScale;
+    // Pulling the handbrake dips the clutch, as every rally driver does with
+    // their left foot. Without it a kid holding W and Space together — which
+    // is how a kid pulls a handbrake turn — had the engine simply overpowering
+    // the handbrake on the driven rear wheels: 3 degrees of slip in the saloon.
+    const clutch = 1 - handbrake;
+    driveForce *= clutch;
 
     const shareF = spec.drive === DRIVE.FWD ? 1 : spec.drive === DRIVE.RWD ? 0 : (spec.awdFront ?? 0.42);
-    let driveF = (driveForce - dir * engBrake) * shareF;
-    let driveR = (driveForce - dir * engBrake) * (1 - shareF);
+    let driveF = (driveForce - dir * engBrake * clutch) * shareF;
+    let driveR = (driveForce - dir * engBrake * clutch) * (1 - shareF);
 
     // ---- Tyre forces -----------------------------------------------------
     const frontSlip = frontTravel - delta * dir;

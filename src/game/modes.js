@@ -23,6 +23,9 @@ export const EMOTE_TEXT = ['Hi!', 'Follow me!', 'Wait up!', 'Nice one!'];
 export const GAME_NAME = { race: 'Race', tag: 'Tag', coins: 'Coin Rush' };
 // One colour per game, kept clear of the GPS cyan and of each other.
 export const GAME_COLOUR = { race: 0xffb43c, tag: 0xff4d3a, coins: 0xffd84a };
+// The same, as CSS, built once here rather than once a frame in update().
+const GAME_CSS = {};
+for (const k of Object.keys(GAME_COLOUR)) GAME_CSS[k] = '#' + GAME_COLOUR[k].toString(16).padStart(6, '0');
 
 const EMOTE_S = 3.2;           // s a reaction stays over the car
 const EMOTE_GAP = 1.3;         // s between two of yours (the room allows 1.2)
@@ -105,6 +108,22 @@ export function pickCoinSpots(world, x, z, rng, n = COIN_COUNT) {
     if (out.length >= n) break;
   }
   return out;
+}
+
+/**
+ * Sorts a short array in place without allocating. Array.prototype.sort
+ * builds its merge state on every call — measured at ~0.9 KB for four
+ * elements — and this list is sorted every frame. Insertion sort is also
+ * stable and, on a list already in order from the frame before, one pass.
+ */
+function sortInPlace(a, cmp) {
+  for (let i = 1; i < a.length; i++) {
+    const x = a[i];
+    let j = i - 1;
+    while (j >= 0 && cmp(a[j], x) > 0) { a[j + 1] = a[j]; j--; }
+    a[j + 1] = x;
+  }
+  return a;
 }
 
 /** m:ss.t — the same shape as the solo race clock (challenges.js). */
@@ -344,7 +363,7 @@ export function createModes(opts) {
     v.kind = m.kind; v.phase = m.phase; v.gid = m.gid; v.host = m.host;
     v.hostName = nameOf(m.host); v.hostCss = cssOf(m.host);
     v.colour = GAME_COLOUR[m.kind] || 0xffffff;
-    v.css = '#' + v.colour.toString(16).padStart(6, '0');
+    v.css = GAME_CSS[m.kind] || '#ffffff';
     v.inGame = !!e;
     v.watching = m.kind === 'race' && Array.isArray(m.spect) && m.spect.includes(id);
     v.entrants = m.ps.length;
@@ -493,6 +512,17 @@ export function createModes(opts) {
     if (view.inGame) nav.tokens = coinNav;
   }
 
+  /**
+   * True when a row's figure has changed and its text must be rebuilt: a tag
+   * clock is a new string once a second, not sixty times, and a race time or
+   * a coin count only when it changes. `key` is the number the text shows.
+   */
+  function statKey(r, kind, key) {
+    if (r.sKind === kind && r.sKey === key) return false;
+    r.sKind = kind; r.sKey = key;
+    return true;
+  }
+
   /** The running order / scoreboard, best first. */
   function rows(m, t) {
     const out = view.rows;
@@ -501,7 +531,7 @@ export function createModes(opts) {
     const c = view.race;
     let i = 0;
     for (const e of m.ps) {
-      const r = rowPool[i] || (rowPool[i] = {});
+      const r = rowPool[i] || (rowPool[i] = { sKind: '', sKey: NaN, stat: '' });
       i++;
       r.id = e.id; r.me = e.id === id;
       r.name = nameOf(e.id); r.css = cssOf(e.id);
@@ -521,20 +551,20 @@ export function createModes(opts) {
           }
         }
         r.rank = e.fin ? e.place : 1e6;
-        r.stat = e.fin ? fmtRaceTime(e.fin) : '';
+        if (statKey(r, m.kind, e.fin)) r.stat = e.fin ? fmtRaceTime(e.fin) : '';
       } else if (m.kind === 'tag') {
         // Time free, counted on from the room's last word unless IT.
         const live = e.free + (m.phase === 'run' && e.id !== m.it ? Math.max(0, t - m.s) : 0);
         r.free = live;
         r.rank = m.phase === 'done' ? e.place : 1e6 - live / 1000;
-        r.stat = fmtClock(live);
+        if (statKey(r, m.kind, Math.ceil(live / 1000))) r.stat = fmtClock(live);
       } else {
         r.rank = m.phase === 'done' ? e.place : 1e6 - e.n;
-        r.stat = `${e.n}`;
+        if (statKey(r, m.kind, e.n)) r.stat = String(e.n);
       }
       out.push(r);
     }
-    out.sort(byStanding);
+    sortInPlace(out, byStanding);
     // The number shown: the running order, or on the podium the room's
     // places (a tie shares a step).
     for (let k = 0; k < out.length; k++) out[k].pos = m.phase === 'done' && out[k].place ? out[k].place : k + 1;

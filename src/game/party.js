@@ -63,6 +63,23 @@ const ARRIVE = 38;          // m: close enough — "you found them"
 const TAU = Math.PI * 2;
 const nearestFirst = (a, b) => a.dist - b.dist;
 
+/**
+ * Sorts a short array in place without allocating. Array.prototype.sort
+ * builds its merge state on every call — measured at ~0.9 KB for four
+ * elements — and the roster is sorted every frame (the chip reads it). The
+ * same helper is in game/modes.js and render/nameTags.js; each of the three
+ * loads on its own through main.js's layer(), so none imports another's.
+ */
+function sortInPlace(a, cmp) {
+  for (let i = 1; i < a.length; i++) {
+    const x = a[i];
+    let j = i - 1;
+    while (j >= 0 && cmp(a[j], x) > 0) { a[j + 1] = a[j]; j--; }
+    a[j + 1] = x;
+  }
+  return a;
+}
+
 /** 0xRRGGBB -> [h (0..1), s, l] */
 function hsl(hex) {
   const r = ((hex >> 16) & 255) / 255, g = ((hex >> 8) & 255) / 255, b = (hex & 255) / 255;
@@ -212,7 +229,7 @@ export function createParty(opts) {
       row.guided = guide.id === p.id;
       list.push(row);
     }
-    list.sort(nearestFirst);
+    sortInPlace(list, nearestFirst);
     return list;
   }
 

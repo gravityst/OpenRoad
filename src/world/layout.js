@@ -1234,8 +1234,13 @@ function buildProps(world, rnd, ground) {
     return q < 0.60 ? TREE.beech : TREE.oak;
   }
 
+  // The one door everything is planted through, so the map edge is enforced
+  // once rather than remembered at every call site — clusters are placed
+  // around a checked centre, and their members were landing past the edge.
   const plant = (type, variant, x, z, y, scale) => {
-    props.push({ type, x, z, y, rot: rnd() * 6.2832, scale, variant });
+    const r = rnd() * 6.2832;
+    if (!inBounds(x, z)) return;
+    props.push({ type, x, z, y, rot: r, scale, variant });
   };
 
   // ---- Woodland -----------------------------------------------------------
@@ -1342,7 +1347,12 @@ function buildProps(world, rnd, ground) {
           if (g.surface === 'sand' || g.surface === 'rock' || g.ny < 0.83) continue;
           const v = conifer ? (rnd() < 0.6 ? TREE.spruce : TREE.pine) : (rnd() < 0.4 ? TREE.birch : rnd() < 0.5 ? TREE.oak : TREE.beech);
           plant('tree', v, x, z, g.y, 0.7 + rnd() * 0.45);
-          if (rnd() < 0.6) plant('bush', BUSH.shrub, x + (rnd() - 0.5) * 6, z + (rnd() - 0.5) * 6, g.y, 0.7 + rnd() * 0.5);
+          if (rnd() < 0.6) {
+            // Its own height, not the tree's: six metres away on a slope is
+            // most of a metre up or down.
+            const bx = x + (rnd() - 0.5) * 6, bz = z + (rnd() - 0.5) * 6;
+            if (clearance(bx, bz) > 2.4 && !inLot(bx, bz)) plant('bush', BUSH.shrub, bx, bz, ground.heightAt(bx, bz), 0.7 + rnd() * 0.5);
+          }
         }
       } else if (roll < 0.36) {
         // Scrub in the grass.

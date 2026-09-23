@@ -1311,7 +1311,7 @@ export function createTerrain(world, ground, opts = {}) {
         for (const i of order) sorted.push(pending[i + 1], pending[i + 2], pending[i + 3]);
         pending = sorted;
       }
-      if (!pending.length) return;
+      if (!pending.length || budget <= 0) return;
       iPos.clearUpdateRanges(); iCol.clearUpdateRanges();
       const t0 = clock.now();
       const deadline = t0 + budget;
@@ -1400,11 +1400,13 @@ export function createTerrain(world, ground, opts = {}) {
     if (job.active && (!chunks.has(job.rec.key) || grids[job.rec.want] !== job.G)) cancelFill();
   }
 
+  /** Build chunks for up to `ms`; returns the milliseconds actually spent. */
   function drain(ms) {
     // Most frames have nothing to build. Bailing before touching the clock keeps
     // the steady-state cost of this module at literally nothing.
-    if (!job.active && qi >= queue.length) return;
-    const deadline = clock.now() + ms;
+    if (!job.active && qi >= queue.length) return 0;
+    const start = clock.now();
+    const deadline = start + ms;
     for (;;) {
       if (!job.active) {
         let next = null;
@@ -1420,6 +1422,7 @@ export function createTerrain(world, ground, opts = {}) {
       if (clock.now() >= deadline) break;
     }
     stats.pending = queue.length - qi + (job.active ? 1 : 0);
+    return clock.now() - start;
   }
 
   function update(cameraPos, dt) {
@@ -1453,10 +1456,12 @@ export function createTerrain(world, ground, opts = {}) {
     // that are already late get less of the budget, not the same amount.
     const step = dt === undefined ? 1 / 60 : dt;
     const k = step > 0.026 ? 0.4 : step < 0.015 ? 1.5 : 1;
-    drain(budgetMs * k);
-    // Grass gets its own small budget: at least one tile a frame, which keeps
-    // up with 250 km/h, and more when there is room.
-    grass.update(cameraPos, step, 0.5 * k);
+    const spent = drain(budgetMs * k);
+    // Grass gets its own small budget, but yields on a frame that chunk
+    // streaming has already filled: new tiles appear at the far edge of the
+    // ring, fifty metres out and shrunk to nothing by the fade, so a frame's
+    // delay costs nothing visible, where stacking the two cost 0.45 ms of p99.
+    grass.update(cameraPos, step, spent > budgetMs * k * 0.8 ? 0 : 0.5 * k);
   }
 
   /** 'low' | 'medium' | 'high', or a 0..1 number so one knob can drive them all. */

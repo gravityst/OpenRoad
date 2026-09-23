@@ -84,11 +84,11 @@ const CSS = `
 .ormp-pick.is-on{border-color:#ffb43c;background:rgba(255,180,60,.16)}
 .ormp-badge-note{width:100%;font:500 12px/1.3 var(--ormp-font);color:rgba(238,242,246,.55)}
 .ormp-pins{position:absolute;left:0;top:0;width:0;height:0;pointer-events:none;z-index:2}
-.ormp-pin{position:absolute;left:0;top:0;pointer-events:auto;appearance:none;border:0;background:none;padding:0;cursor:pointer;
+.ormp-pin{position:absolute;left:0;top:0;z-index:1;pointer-events:auto;appearance:none;border:0;background:none;padding:0;cursor:pointer;
   display:flex;flex-direction:column;align-items:center;transform:translate(-50%,-100%)}
 .ormp-pin i{width:16px;height:16px;border-radius:50%;background:currentColor;box-shadow:0 0 0 3px rgba(6,8,12,.85),0 0 14px currentColor}
 .ormp-pin b{margin-bottom:4px;padding:2px 7px;border-radius:6px;background:rgba(6,8,12,.82);color:#fff;font:700 12px/1.2 var(--ormp-font);white-space:nowrap}
-.ormp-pop{position:absolute;left:0;top:0;pointer-events:auto;transform:translate(-50%,calc(-100% - 34px));display:flex;flex-direction:column;gap:8px;
+.ormp-pop{position:absolute;left:0;top:0;z-index:5;pointer-events:auto;transform:translate(-50%,calc(-100% - 34px));display:flex;flex-direction:column;gap:8px;
   padding:10px;border-radius:12px;background:rgba(10,14,20,.92);border:1px solid rgba(255,255,255,.2);box-shadow:0 12px 30px rgba(0,0,0,.5);min-width:180px}
 .ormp-pop[hidden]{display:none}
 .ormp-pop .ormp-name{font-size:14px}

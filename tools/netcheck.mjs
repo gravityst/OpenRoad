@@ -873,12 +873,25 @@ for (const prof of ['lan', 'wifi', 'rough', 'fuzz']) {
       'a room that hibernated recognises its players when they speak again',
       pa ? `id ${pa.id}, ${pa.name}` : 'forgotten');
     const st = P2.encodeState({ x: 1, z: 1 }, 1);
-    for (let k = 0; k < 150; k++) room.webSocketMessage(A, st);
+    // A kid whose WiFi stalled for 8 s gets it all delivered at once.
+    for (let k = 0; k < 160; k++) room.webSocketMessage(B, st);
+    check(!B.closed, 'a burst after a network stall (8 s of backlog at once) is not mistaken for a flood');
+    for (let k = 0; k < 400; k++) room.webSocketMessage(A, st);
     check(A.closed, 'a client flooding the room is disconnected (every incoming message is billed)');
   } finally { uninstallRuntime(); }
 }
 
 // ---- 8. finding each other, on the real world ------------------------------------
+{
+  const want = { 'src/game/party.js': ['createParty', 'playerColour'], 'src/game/roster.js': ['createRoster'],
+    'src/render/beacons.js': ['createBeacons'], 'src/render/nameTags.js': ['createNameTags'] };
+  const missing = [];
+  for (const [f, names] of Object.entries(want)) {
+    try { const m = await imp(f); for (const n of names) if (typeof m[n] !== 'function') missing.push(`${f}:${n}`); }
+    catch (err) { missing.push(`${f} (${err.message.split('\n')[0]})`); }
+  }
+  check(!missing.length, 'the friends layers load and export what main.js calls', missing.join(', '));
+}
 {
   const { buildWorld } = await imp('src/world/layout.js');
   const { createGround } = await imp('src/world/ground.js');

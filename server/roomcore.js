@@ -21,9 +21,13 @@ import {
 export const TICK_MS = 50;             // 20 Hz downstream
 export const MAX_PLAYERS = 16;
 export const STALE_MS = 8000;
-// A real client sends 20 states and a ping or two a second. Anything past
-// this is a bug or abuse, and every incoming message is metered.
-const MAX_MSGS_PER_S = 90;
+// A real client sends 20 states and a ping or two a second; every incoming
+// message is metered. A token bucket, not a per-second count: after a WiFi
+// stall TCP delivers everything that was held up in one burst — 5 s of it is
+// 100 messages at once — and a hard 90-a-second window disconnected exactly
+// the kid whose connection had just recovered. Bursts of BURST pass; a
+// sustained flood above RATE a second drains the bucket and is cut off.
+const BURST = 300, RATE = 45;
 // How fast the per-player clock estimate may creep upwards between the
 // packets that pin it: 1 ms per second, ten times any real crystal's drift.
 const CREEP = 0.001;
@@ -74,7 +78,7 @@ export function createRoomCore(opts = {}) {
   function newPeer(id, name) {
     return {
       id, name, car: '', colour: 0, rec: null, queue: [], last: now(),
-      minOff: null, lastRecv: 0, lastSample: -Infinity, winT: 0, winN: 0,
+      minOff: null, lastRecv: 0, lastSample: -Infinity, tokens: BURST, tokT: now(),
     };
   }
 
@@ -121,11 +125,13 @@ export function createRoomCore(opts = {}) {
     if (!p) return;
     const t = now();
     p.last = t;
-    if (t - p.winT > 1000) { p.winT = t; p.winN = 0; }
-    if (++p.winN > MAX_MSGS_PER_S) {
+    p.tokens = Math.min(BURST, p.tokens + (t - p.tokT) * (RATE / 1000));
+    p.tokT = t;
+    if (p.tokens < 1) {
       try { sock.close(1008, 'too fast'); } catch { /* gone */ }
       return;
     }
+    p.tokens -= 1;
 
     if (typeof data === 'string') { if (data.length <= 512) control(sock, p, data); return; }
 

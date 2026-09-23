@@ -68,6 +68,9 @@ const METRIC_STAT = {
   speed: ['topSpeed', 'peak'], chain: ['chainBest', 'peak'], mult: ['multBest', 'peak'],
   clean: ['cleanBest', 'peak'], jump: ['bestJump', 'peak'],
   medals: [null, 'sum'], tokens: [null, 'sum'],
+  // Trophy-only: no daily asks for these, but "2 seconds of air in one jump"
+  // and "a 5,000-point drift" are single bests, not totals.
+  airBest: ['airBest', 'peak'], driftBest: ['driftBest', 'peak'],
 };
 
 function defaults() {
@@ -373,7 +376,7 @@ export function createProgress(opts = {}) {
   // ---- dailies and the streak ------------------------------------------------
 
   const dailyView = {
-    day: '', list: [], streak: 0, streakBest: 0, alive: false, doneToday: false, doneCount: 0, allDone: false,
+    day: '', stamp: -1, list: [], streak: 0, streakBest: 0, alive: false, doneToday: false, doneCount: 0, allDone: false,
   };
   let dailyStamp = -1, dailyBuilt = -2;
 
@@ -625,6 +628,7 @@ export function createProgress(opts = {}) {
     dailyBuilt = dailyStamp;
     const v = dailyView;
     v.day = data.daily.day;
+    v.stamp = dailyStamp;
     v.list = data.daily.ids.length === 3 ? [0, 1, 2].map(dailyEntry) : [];
     v.doneCount = data.daily.done.filter(Boolean).length;
     v.allDone = v.doneCount === 3;

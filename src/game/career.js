@@ -28,8 +28,10 @@ export const MAX_LEVEL = 99;
  * 5 at 2,000 XP: the rookie race at gold (450) and ten tokens (250) left a new
  * player at level 2 after twenty minutes, with the next level another hour
  * away. That curve paid for medals alone. This one also has skill chains,
- * dailies and trophies pouring into it, and is sized so a kid who plays for
- * twenty minutes sees five level-ups (measured: see tools/skillscheck.mjs).
+ * dailies and trophies pouring into it: twenty minutes of cautious driving
+ * (43 XP a minute from skills, measured with the real car in real traffic —
+ * tools/skillscheck.mjs) plus four bronzes and eight tokens is 1,535 XP,
+ * level 6 here against level 4 on the old curve.
  *
  * It is below round one's curve at every level past 1, so a returning player
  * only ever goes UP when their save is migrated.
@@ -146,9 +148,11 @@ export function rewardText(r) {
 // easy, medium, hard. A day draws one of each tier from three different
 // metrics. `sum` metrics add up over the day, `peak` ones keep the best.
 //
-// The targets were set against what the starter car and a keyboard actually
-// do (tools/skillscheck.mjs drives it): easy is a few minutes of ordinary
-// play, medium wants you to go looking for it, hard is a proper session.
+// Easy is a few minutes of ordinary play, medium wants you to go looking for
+// it, hard is a proper session. For scale: the cautious autopilot in
+// tools/skillscheck.mjs, which never tries for a near miss, gets five of them,
+// fourteen speed milestones and several slipstreams in eleven minutes — so
+// every easy target falls to ordinary driving and the hard ones do not.
 export const DAILY_TEMPLATES = [
   { id: 'near',   metric: 'near',   kind: 'sum',  targets: [3, 8, 15],          text: (n) => `Get ${n} near misses` },
   { id: 'drift',  metric: 'drift',  kind: 'sum',  targets: [1500, 4000, 10000], text: (n) => `Drift ${n.toLocaleString('en')} points` },

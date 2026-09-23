@@ -46,18 +46,25 @@ const KMH = 3.6;
 
 // ---- the chain -------------------------------------------------------------
 export const CHAIN = {
-  BANK_TIME: 4.5,     // s after the last link before a chain banks
+  // s after the last link before a chain banks. Six rather than the four or
+  // five a busy city would want: this world is open country, traffic comes
+  // every ten or twenty seconds, and a window that closed faster left the
+  // measured drive above with nothing but one-link chains.
+  BANK_TIME: 6,
   MULT_STEP: 0.5,     // each link after the first adds half a multiplier...
   MAX_MULT: 10,       // ...up to x10, reached on the 19th link
   CRASH: 0.18,        // collision severity that loses the chain: ~3 m/s into a wall
   SCRAPE: 0.06,       // severity that breaks the clean-driving clock but keeps the chain
 };
 
-// Banked value to reward. Calibrated against driving the starter car through
-// traffic (tools/skillscheck.mjs, "a lap of the highway"): an ordinary chain
-// of five or six links banks 4,000-6,000 and pays 50-75 XP and ~$80, a race
-// bronze is 120 XP and $400, and a monster x10 chain of 40,000 pays about a
-// level at level 6 and ~$650 — a paint, not the garage.
+// Banked value to reward. Measured by driving the real starter car through
+// real traffic on every race stage at 85% pace (tools/skillscheck.mjs, "the
+// real car in real traffic"): a cautious driver who never goes looking for a
+// near miss banks about 3,400 points a minute — 43 XP and $57 a minute. A
+// race bronze is 120 XP and $400, so skills are the steady trickle and
+// medals the lumps; a kid actually weaving and drifting earns several times
+// the cautious rate, and a x10 chain of 40,000 pays 500 XP and $666 — a
+// paint, not the garage.
 export const SKILL_XP_PER = 80;     // chain points per XP
 export const SKILL_CASH_PER = 60;   // chain points per $
 

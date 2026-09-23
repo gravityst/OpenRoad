@@ -542,6 +542,12 @@ async function boot() {
     scene, root: document.getElementById('hud'),
     createView: mGates ? mGates.createGoalGates : null,
     createOverlay: mObjectives ? mObjectives.createObjectives : null,
+    // Skill chains read the traffic pool for near misses and the slipstream,
+    // and punch the camera's FOV on big moments (setFov eases it back).
+    traffic, camera,
+    // No chimes: the game is silent by the owner's standing choice, and the
+    // goal chimes were the one sound still playing.
+    sfx: false,
   })) : null;
   if (goals) {
     // Boot straight onto a road 200 m short of whatever is next, facing it —
@@ -562,7 +568,7 @@ async function boot() {
   // car back on disk and the next visit starts in it.
   menus.on('drive', (p) => { if (p && p.id) { settings.car = p.id; settings.colour = p.colour | 0; } });
   // Handed to goals.update() every frame; one object, not one per frame.
-  const goalsFrame = { driving: false };
+  const goalsFrame = { driving: false, model: null };
 
   // ---- state --------------------------------------------------------------
   const MODES = ['chase', 'chaseFar', 'bonnet', 'bumper', 'orbit'];
@@ -871,6 +877,7 @@ async function boot() {
       if (goals) goals.step(PHYS_DT);
       if (collision) {
         const hit = collision.resolve(car, PHYS_DT);
+        if (goals && hit.hit) goals.onCrash(hit.severity);
         if (hit.hit && hit.severity > 0.04) {
           audio.playCollision(hit.severity);
           particles.emitSparks(hit.x, car.y + 0.4, hit.z, hit.severity * 14, hit.nx, hit.nz);
@@ -884,6 +891,7 @@ async function boot() {
       // thing sharing the road with you, which undoes the world faster than any
       // missing texture.
       const bump = carHits.resolve(car, traffic.cars, PHYS_DT, onTrafficHit);
+      if (goals && bump.hit) goals.onCrash(bump.severity);
       if (bump.hit) {
         if (drift.onCollision) drift.onCollision(bump.severity);
         if (bump.severity > 0.05) {
@@ -966,7 +974,14 @@ async function boot() {
     pumpHints(dt);
 
     driftState = drift.update(dt, car) || drift.state;
-    if (goals) { goalsFrame.driving = driving; goals.update(dt, goalsFrame); hudState.nav = goals.nav; }
+    if (goals) {
+      // Not driving while any menu is up, whatever `mode` says: the goals
+      // overlay — and the medal card in it — must never show over a menu.
+      goalsFrame.driving = driving && !menus.current;
+      goalsFrame.model = carModel;
+      goals.update(dt, goalsFrame);
+      hudState.nav = goals.nav;
+    }
 
     // ---- car visuals ----
     carRoot.position.set(car.x, car.y, car.z);

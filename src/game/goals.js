@@ -9,6 +9,8 @@
 //   challenges.js  where everything is and what wins        pure
 //   ramps.js       the jumps, as ground                     pure
 //   progress.js    cash, XP, medals, cars — saved           pure + storage
+//   career.js      levels, rewards, dailies, trophies       pure
+//   skills.js      skill chains between the challenges      pure
 //   sfx.js         chimes                                   WebAudio, optional
 //   gates.js       what you see in the world                three.js, OPTIONAL
 //   objectives.js  what you see on screen                   DOM, OPTIONAL
@@ -39,6 +41,8 @@ import {
 import { makeRamp, createRampOverlay, kickRamps } from './ramps.js';
 import { createProgress, levelFor } from './progress.js';
 import { createSfx } from './sfx.js';
+import { createSkills, chainPayout } from './skills.js';
+import { rewardText, PAINT_BY_ID } from './career.js';
 
 export const KIND_LABEL = { race: 'Race', trap: 'Speed trap', jump: 'Jump', drift: 'Drift zone' };
 const KIND_VERB = {
@@ -72,6 +76,13 @@ const TOKEN_R = 5.5;            // m pickup radius, generous: a token is a gift
  *   createOverlay         objectives.js factory, optional
  *   scene, root           where those two draw
  *   storage               progress storage override (the harness uses this)
+ *   traffic               the traffic layer ({ cars }), for near misses and
+ *                         the slipstream; without it those two never fire
+ *   camera                the view camera, for a FOV punch on big moments;
+ *                         optional (see kick())
+ *   sfx                   false: no chimes at all
+ *   today                 () => 'YYYY-MM-DD', for the harness; default the
+ *                         player's local date
  * }
  */
 export function createGoals(opts) {
@@ -124,7 +135,22 @@ export function createGoals(opts) {
     c.startLoc = at ? { edge: at.edge, s: at.s } : null;
   }
 
-  const progress = createProgress({ storage: opts.storage, cars: opts.cars || [], grant: opts.grant || [] });
+  const trafficCars = opts.traffic && opts.traffic.cars ? opts.traffic.cars : null;
+  const progress = createProgress({
+    storage: opts.storage, cars: opts.cars || [], grant: opts.grant || [],
+    today: opts.today, tokensTotal: tokens.length,
+    // Never offer a daily this world cannot give: tokens once fewer are left
+    // than it asks for, jumps with no ramps, drifting with no drift scorer,
+    // near misses and slipstreams with no traffic.
+    dailyEligible: (t, target, d) => {
+      if (t.metric === 'tokens') return tokens.length - d.tokens.length >= target;
+      if (t.metric === 'jump') return ramps.length > 0;
+      if (t.metric === 'drift') return !!drift;
+      if (t.metric === 'near' || t.metric === 'tow') return !!trafficCars;
+      return true;
+    },
+  });
+  const skills = createSkills();
   // The chimes run on their own context, so the engine audio's mute (N) does
   // not reach them by wiring; they ask it before every sound instead.
   const audio = opts.audio || null;
@@ -210,7 +236,143 @@ export function createGoals(opts) {
     zone: { active: false, name: '', score: 0, targetMedal: 0, targetScore: 0, unit: 'pts' },
     wallet: { cash: progress.cash, level: 1, frac: 0 },
     hint: '',
+    // The skill chain, copied off skills.state every frame (numbers only).
+    chain: { live: false, links: 0, mult: 1, value: 0, timerFrac: 0, hold: false, best: 0 },
+    // Today's dailies and the streak: progress.daily()'s cached view, whose
+    // `stamp` moves only when something in it changed.
+    daily: null,
+    // What the next level pays, re-read only when XP or the garage changes.
+    next: { level: 2, text: '', type: '', frac: 0 },
   };
+
+  // ---- skill chains and the long game ---------------------------------------
+
+  // Every skill event, straight off skills.js, into the three places it
+  // matters: the stats and dailies (progress), the words on screen (overlay)
+  // and, for the big ones, a punch of the camera.
+  function onSkill(e) {
+    const k = e.kind;
+    if (k === 'bank') {
+      const pay = chainPayout(e.amount);
+      const r = progress.bankChain(e.amount, pay.xp, pay.cash);
+      if (overlay && overlay.chainEnd) overlay.chainEnd('bank', e.amount, e.mult, pay.xp, pay.cash, r.newBest);
+      // A big bank is a moment: the bigger the chain, the harder the punch.
+      if (e.amount >= 10000) { kick(e.amount >= 30000 ? 7 : 4.5); flash(e.amount >= 30000 ? 0.5 : 0.3); }
+      return;
+    }
+    if (k === 'lost') {
+      if (overlay && overlay.chainEnd) overlay.chainEnd('lost', e.amount, e.mult, 0, 0, false);
+      return;
+    }
+    progress.peak('mult', e.mult);
+    if (k === 'near' || k === 'oncoming') {
+      progress.track('near', 1);
+      if (e.amount < 0.35) kick(1.6);
+    } else if (k === 'air') {
+      progress.track('air', e.amount);
+      progress.peak('airBest', e.amount);
+      if (e.amount >= 2) kick(3);
+    } else if (k === 'drift') {
+      progress.track('drift', e.points);
+      progress.peak('driftBest', e.points);
+    } else if (k === 'sling') kick(2.5);
+    if (overlay && overlay.skill) overlay.skill(k, e.label, e.points, e.mult);
+  }
+
+  /**
+   * A FOV punch. It only ever nudges camera.fov UP; main.js's setFov() eases
+   * the angle back toward its target every frame (2.5/s in the chase camera,
+   * a 0.28 s half-life), so the punch decays through the camera's own
+   * smoothing and there is no second animation here to fight it. Capped so
+   * two in one frame cannot fling the view past 100 degrees.
+   */
+  function kick(deg) {
+    const cam = opts.camera;
+    if (!cam || !driving || !(deg > 0)) return;
+    cam.fov = Math.min(100, cam.fov + deg);
+  }
+  function flash(k) { if (overlay && overlay.flash) overlay.flash(k); }
+
+  // Level-ups, trophies, dailies — queued by progress.js from whatever paid
+  // the XP, and shown only while driving: one earned in the garage (buying a
+  // fifth car is "Collector") waits for the road rather than going unseen.
+  const celebrations = [];
+  function celebrate(ev) {
+    if (!overlay) return;
+    if (ev.type === 'level') {
+      // The medal card already says LEVEL n and what it paid.
+      if (ev.onCard) return;
+      if (overlay.celebrate) overlay.celebrate('level', `LEVEL ${ev.level}!`, rewardText(ev.reward), ev.reward);
+      kick(5); flash(0.45);
+      if (particles && particles.emitSparks) particles.emitSparks(car.x, car.y + 1.4, car.z, 90, 0, 0);
+    } else if (ev.type === 'trophy') {
+      if (overlay.trophy) overlay.trophy(ev.name, ev.desc, ev.xp);
+    } else if (ev.type === 'daily') {
+      if (overlay.note) overlay.note('daily', 'DAILY DONE', ev.text, `+$${ev.cash}  +${ev.xp} XP`);
+    } else if (ev.type === 'sweep') {
+      if (overlay.celebrate) overlay.celebrate('sweep', 'ALL THREE DAILIES!', `Bonus +$${ev.cash}  +${ev.xp} XP`, null);
+      kick(4); flash(0.35);
+    } else if (ev.type === 'streak') {
+      if (overlay.note) overlay.note('streak', `${ev.count}-DAY STREAK`, 'Come back tomorrow to keep it going', '');
+    } else if (ev.type === 'welcome') {
+      const bits = [];
+      if (ev.cash) bits.push(`$${ev.cash.toLocaleString('en')}`);
+      for (const c of ev.cars) bits.push(c);
+      for (const p of ev.paints) bits.push(`${p} paint`);
+      const sub = ev.levels ? `You are level ${ev.level}. Rewards waiting for you:` : `${ev.trophies.length} trophies for what you have already done`;
+      if (overlay.celebrate) overlay.celebrate('welcome', 'WELCOME BACK!', sub, { type: 'list', items: bits });
+      flash(0.3);
+    }
+  }
+
+  // The "next reward" line, rebuilt only when what it depends on moves.
+  let nextKey = -1;
+  function nextUi() {
+    const d = progress.data;
+    const key = progress.xp + d.owned.length * 1e8 + d.paints.length * 1e10;
+    const lv = levelFor(progress.xp);
+    ui.next.frac = lv.frac;
+    if (key === nextKey) return;
+    nextKey = key;
+    const n = progress.nextReward();
+    ui.next.level = n.level;
+    ui.next.type = n.reward ? n.reward.type : '';
+    ui.next.text = n.reward ? rewardText(n.reward) : '';
+  }
+
+  // Continuous stats reach progress in lumps: once a second, not once a frame.
+  let statT = 0, rollT = 0, kmAcc = 0, kmhPeak = 0;
+  function statStep(dt, moved) {
+    if (moved > 0 && moved < 60) kmAcc += moved;
+    const kmh = car.speed * 3.6;
+    if (kmh > kmhPeak) kmhPeak = kmh;
+    statT += dt;
+    if (statT >= 1) {
+      statT = 0;
+      if (kmAcc > 0) { progress.track('km', kmAcc / 1000); kmAcc = 0; }
+      const tow = skills.takeTow();
+      if (tow > 0) progress.track('tow', tow);
+      progress.peak('clean', skills.state.cleanT);
+      if (kmhPeak > 0) { progress.peak('speed', Math.floor(kmhPeak)); kmhPeak = 0; }
+    }
+    rollT += dt;
+    if (rollT >= 5) {
+      rollT = 0;
+      // Midnight: tomorrow's three arrive without a reload.
+      progress.rollDay();
+      progress.flush();
+    }
+  }
+
+  // The special paint on the car being shown (null: its factory colour).
+  // Applied to whatever model main.js hands over in ctx.model, every frame it
+  // differs — main.js rebuilds the model on every garage change with the
+  // factory colour, and this puts the paint back before the frame renders.
+  let wantPaint = null;
+  function paintStep(model) {
+    if (wantPaint == null || !model || !model.group) return;
+    if (model.group.userData.paint !== wantPaint && typeof model.setPaint === 'function') model.setPaint(wantPaint);
+  }
 
   // ---- routes --------------------------------------------------------------
 
@@ -334,6 +496,9 @@ export function createGoals(opts) {
 
   function spawnAt(route, d) {
     jump = null;
+    // Being put somewhere is the end of whatever chain was running: banked,
+    // because nothing went wrong.
+    skills.bank();
     const p = route.at(Math.min(route.length, d), {});
     // The right-hand lane, like everyone else on this road.
     const off = Math.min(2.2, p.hw * 0.45);
@@ -548,6 +713,7 @@ export function createGoals(opts) {
         newBest: res.newBest && res.prevBest != null,
         first: res.prevBest == null,
         cash: res.cash, xp: res.xp, levelUp: res.levelUp,
+        levelReward: res.reward ? rewardText(res.reward) : '',
         next: medal < MEDAL_GOLD ? `${MEDAL_NAMES[nextMedal].toUpperCase()}: ${fmt(c.targets[nextMedal])}` : '',
         retry: true,
       });
@@ -581,7 +747,9 @@ export function createGoals(opts) {
       }
       play('token');
       if (res && overlay) overlay.popup('token', `TOKEN ${res.count}/${tokens.length}`, `+$${res.cash}`);
-      if (res && res.levelUp) { play('level'); if (overlay) overlay.popup('level', `LEVEL ${res.levelUp}!`, 'New cars within reach in the garage'); }
+      // A level reached here is celebrated by the banner, through
+      // progress.js's event queue like every other level-up.
+      if (res && res.levelUp) play('level');
     }
   }
 
@@ -735,7 +903,8 @@ export function createGoals(opts) {
     driving = !!(ctx && ctx.driving);
     vs.time = clock;
     vs.driving = driving;
-    const jumped = Math.hypot(car.x - prevX, car.z - prevZ) > 60;
+    const moved = Math.hypot(car.x - prevX, car.z - prevZ);
+    const jumped = moved > 60;
     // A cut (R, the map, a respawn) ends any flight in progress: measured as
     // a landing, the distance to wherever the car was put reads as a 400 m
     // jump, which the harness caught before a player could.
@@ -789,6 +958,21 @@ export function createGoals(opts) {
       if (lastResult && clock > lastResult.until) { lastResult = null; if (overlay) overlay.hideResult(); }
     }
 
+    // Skill chains run whenever the car is being driven, races included — a
+    // near miss in a race is still a near miss — but not through a countdown,
+    // where the car is held and the only thing happening is 3-2-1.
+    const skillOn = driving && race.phase !== 'countdown';
+    skills.update(dt, car, trafficCars, drift ? drift.state : null, skillOn);
+    for (let i = 0; i < skills.eventCount; i++) onSkill(skills.event(i));
+    skills.clearEvents();
+    if (skillOn) statStep(dt, prevValid ? moved : 0);
+    if (driving) {
+      progress.drainEvents(celebrations);
+      for (let i = 0; i < celebrations.length; i++) celebrate(celebrations[i]);
+      celebrations.length = 0;
+    }
+    paintStep(ctx && ctx.model);
+
     // Presentation.
     objectiveText();
     raceUi();
@@ -796,6 +980,11 @@ export function createGoals(opts) {
     ui.wallet.cash = progress.cash;
     const lv = levelFor(progress.xp);
     ui.wallet.level = lv.level; ui.wallet.frac = lv.frac;
+    const cs = skills.state, uc = ui.chain;
+    uc.live = cs.live; uc.links = cs.links; uc.mult = cs.mult; uc.value = cs.value;
+    uc.timerFrac = cs.timerFrac; uc.hold = cs.hold; uc.best = Math.max(cs.best, progress.stats.chainBest);
+    ui.daily = progress.daily();
+    nextUi();
     // The "how do I get back" hint is this layer's only while a race runs,
     // where R means the last gate. Outside one, being off the road is the
     // reset hint's business in main.js, and the arrow already points back.
@@ -927,7 +1116,19 @@ export function createGoals(opts) {
     get ui() { return ui; },
     get sfx() { return sfx; },
     update, preStep, step, placeInitial, onDrive, respawn, travelTo, restart,
-    abandon: () => { abandonRace('Race abandoned'); endZone(false); lastResult = null; if (overlay) overlay.hideResult(); },
+    abandon: () => { abandonRace('Race abandoned'); endZone(false); skills.bank(); lastResult = null; if (overlay) overlay.hideResult(); },
+    /** main.js's collision hook: `severity` as collision.resolve() reports it. */
+    onCrash: (severity) => skills.onCrash(severity),
+    get skills() { return skills; },
+    /**
+     * The paint to show on the car model main.js hands over in ctx.model: a
+     * special paint's hex, or null for the model's own factory colour. The
+     * garage calls this as the player browses and when they drive off.
+     */
+    previewPaint(hex) { wantPaint = typeof hex === 'number' ? hex : null; },
+    /** The special paint car `carId` wears, as a hex, or null. */
+    paintFor: (carId) => progress.paintHex(carId),
+    get paint() { return wantPaint; },
     setTarget: (id) => { const c = byId[id]; if (c) setTarget(c, true); return !!c; },
     cycleTarget, resync, recommend: () => recommend(null),
     /** For the harness: the internals it needs to drive a race from code. */

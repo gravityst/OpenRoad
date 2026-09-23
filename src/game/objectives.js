@@ -1,6 +1,12 @@
 // The goals, on screen: what to do next, the race clock, the 3-2-1, the medal
 // card, the pop when a token is grabbed, and — once, on a first drive — which
-// keys do what.
+// keys do what. And the long game: the skill-chain meter and its feed, the
+// level-up banner, trophy and daily notes, the next reward and the dailies.
+//
+// THE CHAIN METER sits top-centre under the compass, the one place a driver's
+// eye passes every second: multiplier, value, and a bar that drains toward
+// the bank. The skills that feed it drop in underneath and fade in 1.5 s —
+// long enough to read NEAR MISS, short enough never to stack past three.
 //
 // WHERE THINGS SIT. The HUD owns the four corners and the top-centre compass,
 // and its drift dial drops into the top of the middle column whenever the car
@@ -26,6 +32,11 @@ const ICONS = {
   token: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="currentColor"/><path d="M12 6.5l1.6 3.4 3.7.4-2.8 2.5.8 3.7L12 14.6l-3.3 1.9.8-3.7-2.8-2.5 3.7-.4z" fill="#0b0e13" opacity=".7"/></svg>',
   level: '<svg viewBox="0 0 24 24"><path d="M12 3l2.6 5.6 6 .7-4.5 4.1 1.2 6L12 16.4 6.7 19.4l1.2-6L3.4 9.3l6-.7z" fill="currentColor"/></svg>',
   nav: '<svg viewBox="0 0 24 24"><path d="M12 2l7 18-7-4-7 4z" fill="currentColor"/></svg>',
+  trophy: '<svg viewBox="0 0 24 24"><path d="M7 3h10v5a5 5 0 0 1-10 0z" fill="currentColor"/><path d="M7 5H4v2a3 3 0 0 0 3 3M17 5h3v2a3 3 0 0 1-3 3" stroke="currentColor" stroke-width="1.8" fill="none"/><path d="M11 13h2v4h-2zM8 18h8v3H8z" fill="currentColor"/></svg>',
+  daily: '<svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="2.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M3 10h18M8 3v4M16 3v4" stroke="currentColor" stroke-width="2"/><path d="M8 15l2.5 2.5L16 12" stroke="currentColor" stroke-width="2.2" fill="none" stroke-linecap="round"/></svg>',
+  streak: '<svg viewBox="0 0 24 24"><path d="M13 2L4 14h6l-1 8 9-12h-6z" fill="currentColor"/></svg>',
+  car: '<svg viewBox="0 0 24 24"><path d="M3 15l2-5c.4-1 1.3-2 2.6-2h8.8c1.3 0 2.2 1 2.6 2l2 5v3H3z" fill="currentColor"/><circle cx="7.5" cy="18" r="2.2" fill="#0b0e13"/><circle cx="16.5" cy="18" r="2.2" fill="#0b0e13"/></svg>',
+  paint: '<svg viewBox="0 0 24 24"><path d="M4 16c0-4 5-12 8-12s8 8 8 12a8 4 0 0 1-16 0z" fill="currentColor"/></svg>',
 };
 const KIND_WORD = { race: 'RACE', trap: 'SPEED TRAP', jump: 'JUMP', drift: 'DRIFT ZONE' };
 const MEDAL_WORD = ['NO MEDAL', 'BRONZE', 'SILVER', 'GOLD'];
@@ -50,6 +61,18 @@ function fmtDistKey(k) {
   return `${((k - 1e6) / 10).toFixed(1)} km`;
 }
 const fmtCash = (v) => `$${Math.round(v).toLocaleString('en')}`;
+
+// The chain bar is set through transform, off a table, like the HUD's bars: a
+// width change is layout, and a template string per frame is garbage.
+const BAR_STEPS = 64;
+const BAR_STR = new Array(BAR_STEPS + 1);
+for (let i = 0; i <= BAR_STEPS; i++) BAR_STR[i] = `scaleX(${i / BAR_STEPS})`;
+// Multipliers are x1.0 to x10.0 in halves: 19 strings, built once.
+const MULT_STR = new Array(21);
+for (let i = 2; i <= 20; i++) MULT_STR[i] = `×${(i / 2).toFixed(1)}`;
+// Four tiers of multiplier colour, so a x7 chain LOOKS worth protecting.
+const multTier = (m) => (m >= 7 ? 3 : m >= 4 ? 2 : m >= 2 ? 1 : 0);
+const REWARD_ICON = { car: 'car', paint: 'paint', cash: 'token' };
 
 export function createObjectives(root, opts = {}) {
   const doc = (root && root.ownerDocument) || document;
@@ -84,7 +107,21 @@ export function createObjectives(root, opts = {}) {
       </div>
       <div class="goal__hint"></div>
       <div class="goal__wallet"><i class="goal__coin" aria-hidden="true">${ICONS.token}</i><b class="goal__cash">$0</b><span class="goal__lv">LV 1</span><span class="goal__xp"><i></i></span></div>
+      <div class="goal__next"><span class="goal__nextLv"></span><i class="goal__nextIcon" aria-hidden="true"></i><span class="goal__nextText"></span></div>
+      <div class="goal__daily">
+        <div class="goal__dHead"><i class="goal__dIcon" aria-hidden="true">${ICONS.daily}</i><b>DAILY</b><span class="goal__streak"></span></div>
+        <div class="goal__dRows"></div>
+      </div>
     </div>
+    <div class="goal__chain" aria-live="off">
+      <div class="goal__chainRow"><b class="goal__mult">×1.0</b><span class="goal__chainVal">0</span></div>
+      <div class="goal__chainBar"><i></i></div>
+      <div class="goal__chainEnd"><b></b><span></span></div>
+      <div class="goal__feed"></div>
+    </div>
+    <div class="goal__banner" role="status"><div class="goal__bTitle"></div><div class="goal__bSub"></div><div class="goal__bDetail"></div></div>
+    <div class="goal__notes" aria-live="polite"></div>
+    <div class="goal__flash" aria-hidden="true"></div>
     <div class="goal__count" aria-live="assertive"></div>
     <div class="goal__pops" aria-live="polite"></div>
     <div class="goal__result" role="status">
@@ -112,6 +149,13 @@ export function createObjectives(root, opts = {}) {
     zone: q('.goal__zone'), zScore: q('.goal__zoneScore'), zMedal: q('.goal__zone .goal__medal'), zText: q('.goal__zoneTarget'),
     hint: q('.goal__hint'),
     cash: q('.goal__cash'), lv: q('.goal__lv'), xp: q('.goal__xp i'),
+    next: q('.goal__next'), nextLv: q('.goal__nextLv'), nextIcon: q('.goal__nextIcon'), nextText: q('.goal__nextText'),
+    daily: q('.goal__daily'), dRows: q('.goal__dRows'), streak: q('.goal__streak'),
+    chain: q('.goal__chain'), mult: q('.goal__mult'), chainVal: q('.goal__chainVal'), chainBar: q('.goal__chainBar i'),
+    chainEnd: q('.goal__chainEnd'), chainEndB: q('.goal__chainEnd b'), chainEndS: q('.goal__chainEnd span'),
+    feed: q('.goal__feed'),
+    banner: q('.goal__banner'), bTitle: q('.goal__bTitle'), bSub: q('.goal__bSub'), bDetail: q('.goal__bDetail'),
+    notes: q('.goal__notes'), flash: q('.goal__flash'),
     count: q('.goal__count'), pops: q('.goal__pops'),
     res: q('.goal__result'), resKind: q('.goal__resKind'), resName: q('.goal__resName'),
     resMedal: q('.goal__resMedal'), resMedalWord: q('.goal__resMedalWord'), resScore: q('.goal__resScore'),
@@ -136,6 +180,8 @@ export function createObjectives(root, opts = {}) {
     tenths: -1, cp: -1, cpTotal: -1, delta: 0, tMedal: -1, tTextMedal: -1, tTextTime: NaN,
     zScore: -1, zMedal: -1, zTextMedal: -1, zTextScore: NaN,
     hint: null, cash: -1, lv: -1, xp: -1,
+    nextLevel: -1, nextText: null, dailyStamp: -2,
+    chainOn: null, chainMult: -1, chainTier: -1, chainVal: -1, chainBar: -1, chainHold: null,
   };
   let visible = false;
   let freshT = 0;
@@ -229,6 +275,189 @@ export function createObjectives(root, opts = {}) {
     if (xp !== last.xp) { last.xp = xp; E.xp.style.width = `${xp}%`; }
 
     if (deltaT > 0) deltaT -= dt;
+
+    // ---- the next reward ------------------------------------------------------
+    const nx = ui.next;
+    if (nx && (nx.level !== last.nextLevel || nx.text !== last.nextText)) {
+      last.nextLevel = nx.level; last.nextText = nx.text;
+      const on = !!nx.text;
+      E.next.classList.toggle('is-on', on);
+      if (on) {
+        E.nextLv.textContent = `LV ${nx.level}`;
+        E.nextIcon.innerHTML = ICONS[REWARD_ICON[nx.type] || 'level'];
+        E.nextText.textContent = nx.text;
+        E.next.dataset.type = nx.type || '';
+      }
+    }
+
+    // ---- today's dailies ------------------------------------------------------
+    const dv = ui.daily;
+    if (dv && dv.stamp !== last.dailyStamp) {
+      last.dailyStamp = dv.stamp;
+      renderDaily(dv);
+    }
+
+    // ---- the skill chain ------------------------------------------------------
+    const ch = ui.chain;
+    if (ch) {
+      const on = !!ch.live;
+      if (on !== last.chainOn) {
+        last.chainOn = on;
+        E.chain.classList.toggle('is-live', on);
+        if (on) { clearTimeout(endTimer); E.chainEnd.className = 'goal__chainEnd'; }
+      }
+      if (on) {
+        let mi = Math.round(ch.mult * 2);
+        mi = mi < 2 ? 2 : mi > 20 ? 20 : mi;
+        if (mi !== last.chainMult) {
+          const up = mi > last.chainMult && last.chainMult > 0;
+          last.chainMult = mi;
+          E.mult.textContent = MULT_STR[mi];
+          const tier = multTier(mi / 2);
+          if (tier !== last.chainTier) { last.chainTier = tier; E.chain.dataset.tier = String(tier); }
+          if (up) { E.mult.classList.remove('is-up'); void E.mult.offsetWidth; E.mult.classList.add('is-up'); }
+        }
+        const v = ch.value | 0;
+        if (v !== last.chainVal) { last.chainVal = v; E.chainVal.textContent = v.toLocaleString('en'); }
+        let b = Math.round(ch.timerFrac * BAR_STEPS);
+        b = b < 0 ? 0 : b > BAR_STEPS ? BAR_STEPS : b;
+        if (b !== last.chainBar) { last.chainBar = b; E.chainBar.style.transform = BAR_STR[b]; }
+        const hold = !!ch.hold;
+        if (hold !== last.chainHold) { last.chainHold = hold; E.chain.classList.toggle('is-hold', hold); }
+      } else if (last.chainMult !== -1) {
+        last.chainMult = -1; last.chainVal = -1; last.chainBar = -1; last.chainHold = null;
+      }
+    }
+  }
+
+  // ---- the long game ------------------------------------------------------------
+
+  // Three rows built once and then only re-texted; the text changes when the
+  // numbers behind it do, which for a distance daily is once a second.
+  const dRow = [];
+  for (let i = 0; i < 3; i++) {
+    const r = doc.createElement('div');
+    r.className = 'goal__dRow';
+    r.innerHTML = '<i class="goal__dTick" aria-hidden="true"></i><span class="goal__dText"></span><em class="goal__dNum"></em><u class="goal__dBar"><i></i></u>';
+    E.dRows.appendChild(r);
+    dRow.push({ el: r, text: r.querySelector('.goal__dText'), num: r.querySelector('.goal__dNum'), bar: r.querySelector('.goal__dBar i') });
+  }
+  const oneDp = { km: 1, air: 1, tow: 1 };
+  function fmtDaily(metric, v) {
+    if (oneDp[metric]) return (Math.floor(v * 10) / 10).toString();
+    return Math.floor(v).toLocaleString('en');
+  }
+  function renderDaily(dv) {
+    const list = dv.list || [];
+    E.daily.classList.toggle('is-on', list.length === 3);
+    E.daily.classList.toggle('is-all', !!dv.allDone);
+    for (let i = 0; i < 3; i++) {
+      const d = list[i], r = dRow[i];
+      if (!d) continue;
+      r.el.classList.toggle('is-done', d.done);
+      r.el.dataset.tier = String(d.tier);
+      if (r.text.textContent !== d.text) r.text.textContent = d.text;
+      r.num.textContent = d.done ? 'DONE' : `${fmtDaily(d.metric, d.progress)}/${fmtDaily(d.metric, d.target)}`;
+      const f = d.done ? 1 : Math.max(0, Math.min(1, d.progress / Math.max(1e-6, d.target)));
+      r.bar.style.transform = BAR_STR[Math.round(f * BAR_STEPS)];
+    }
+    // The streak: how many days, and whether today still needs doing.
+    const due = dv.streak > 0 && !dv.doneToday;
+    E.streak.innerHTML = dv.streak > 0 ? `<i aria-hidden="true">${ICONS.streak}</i>${dv.streak | 0}-DAY STREAK` : '';
+    E.streak.classList.toggle('is-on', dv.streak > 0);
+    E.streak.classList.toggle('is-due', due);
+    E.streak.title = due ? 'Finish a daily today to keep your streak' : '';
+  }
+
+  // Skills as they land, newest on top, three at most.
+  function skill(kind, label, points) {
+    const p = doc.createElement('div');
+    p.className = 'goal__feedItem';
+    p.dataset.kind = kind;
+    p.innerHTML = '<b></b><span></span>';
+    p.firstChild.textContent = label;
+    p.lastChild.textContent = points > 0 ? `+${points.toLocaleString('en')}` : '';
+    E.feed.insertBefore(p, E.feed.firstChild);
+    while (E.feed.children.length > 3) E.feed.lastChild.remove();
+    setTimeout(() => p.classList.add('is-out'), 1200);
+    setTimeout(() => p.remove(), 1600);
+  }
+
+  // The chain's end: gold for banked, red for lost, with what it paid.
+  let endTimer = 0;
+  function chainEnd(kind, value, mult, xp, cash, best) {
+    clearTimeout(endTimer);
+    const bank = kind === 'bank';
+    E.chainEndB.textContent = bank ? `BANKED ${value.toLocaleString('en')}` : 'CHAIN LOST';
+    E.chainEndS.textContent = bank
+      ? `${best ? 'NEW BEST CHAIN!  ' : ''}+${xp} XP  +$${cash}`
+      : `${value.toLocaleString('en')} gone — don't crash!`;
+    E.chainEnd.className = 'goal__chainEnd';
+    void E.chainEnd.offsetWidth;
+    E.chainEnd.className = `goal__chainEnd is-on ${bank ? 'is-bank' : 'is-lost'}${best ? ' is-best' : ''}`;
+    endTimer = setTimeout(() => { E.chainEnd.className = 'goal__chainEnd'; }, bank ? 2600 : 2000);
+  }
+
+  // Level-ups, the daily sweep, welcome back: one big banner at a time.
+  const bannerQ = [];
+  let bannerTimer = 0, bannerOn = false;
+  function celebrate(kind, title, sub, reward) {
+    bannerQ.push({ kind, title, sub, reward });
+    if (!bannerOn) nextBanner();
+  }
+  function nextBanner() {
+    const b = bannerQ.shift();
+    if (!b) { bannerOn = false; E.banner.classList.remove('is-on'); return; }
+    bannerOn = true;
+    E.banner.dataset.kind = b.kind;
+    E.bTitle.textContent = b.title;
+    E.bSub.textContent = b.sub || '';
+    E.bDetail.textContent = '';
+    const r = b.reward;
+    if (r && r.type === 'paint') {
+      const chip = doc.createElement('i');
+      chip.className = 'goal__swatch';
+      chip.style.background = `#${r.hex.toString(16).padStart(6, '0')}`;
+      E.bDetail.appendChild(chip);
+      E.bDetail.appendChild(doc.createTextNode('New paint in the garage'));
+    } else if (r && r.type === 'car') {
+      E.bDetail.textContent = 'Parked in your garage — go and try it!';
+    } else if (r && r.type === 'list') {
+      E.bDetail.textContent = r.items.join('  ·  ');
+    }
+    E.banner.classList.remove('is-on');
+    void E.banner.offsetWidth;
+    E.banner.classList.add('is-on');
+    clearTimeout(bannerTimer);
+    bannerTimer = setTimeout(() => {
+      E.banner.classList.remove('is-on');
+      bannerTimer = setTimeout(nextBanner, 350);
+    }, r && r.type === 'list' ? 4800 : 3200);
+  }
+
+  // Trophies, dailies and the streak: small cards down the left edge.
+  function note(kind, title, text, sub) {
+    const n = doc.createElement('div');
+    n.className = `goal__note goal__note--${kind}`;
+    n.innerHTML = `<i class="goal__noteIcon">${ICONS[kind] || ICONS.level}</i><div><b></b><span class="goal__noteText"></span><em></em></div>`;
+    n.querySelector('b').textContent = title;
+    n.querySelector('.goal__noteText').textContent = text || '';
+    n.querySelector('em').textContent = sub || '';
+    E.notes.appendChild(n);
+    while (E.notes.children.length > 3) E.notes.firstChild.remove();
+    setTimeout(() => n.classList.add('is-out'), 4200);
+    setTimeout(() => n.remove(), 4700);
+  }
+  function trophy(name, desc, xp) {
+    note('trophy', 'TROPHY UNLOCKED', name, xp ? `${desc}  +${xp} XP` : desc);
+  }
+
+  /** A soft full-screen flash; k is its peak opacity, 0..1. */
+  function flash(k) {
+    E.flash.style.setProperty('--k', String(Math.max(0, Math.min(0.6, k || 0.3))));
+    E.flash.classList.remove('is-on');
+    void E.flash.offsetWidth;
+    E.flash.classList.add('is-on');
   }
 
   // ---- the moments ------------------------------------------------------------------
@@ -271,7 +500,10 @@ export function createObjectives(root, opts = {}) {
     if (r.xp) pay.push(`+${r.xp} XP`);
     E.resPay.textContent = pay.join('   ');
     E.resPay.classList.toggle('is-on', pay.length > 0);
-    E.resNext.textContent = r.levelUp ? `LEVEL ${r.levelUp}! New cars within reach` : r.next ? `Next: ${r.next}` : 'Top of the podium.';
+    E.resNext.textContent = r.levelUp
+      ? `LEVEL ${r.levelUp}!${r.levelReward ? `  ${r.levelReward}` : ''}`
+      : r.next ? `Next: ${r.next}` : 'Top of the podium.';
+    E.resNext.classList.toggle('is-level', !!r.levelUp);
     E.res.classList.remove('is-on');
     void E.res.offsetWidth;
     E.res.classList.add('is-on');
@@ -301,8 +533,13 @@ export function createObjectives(root, opts = {}) {
   function dispose() {
     clearTimeout(countTimer);
     clearTimeout(controlsTimer);
+    clearTimeout(endTimer);
+    clearTimeout(bannerTimer);
     el.remove();
   }
 
-  return { element: el, update, setVisible, countdown, popup, result, hideResult, controls, dispose };
+  return {
+    element: el, update, setVisible, countdown, popup, result, hideResult, controls, dispose,
+    skill, chainEnd, celebrate, note, trophy, flash,
+  };
 }

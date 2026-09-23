@@ -1488,7 +1488,15 @@ export function createMenus(root, opts = {}) {
     // handleEscape:true only if nothing else is watching for it.
     if (current === null) {
       if (e.key === 'Escape' && opts.handleEscape === true) {
-        e.preventDefault(); e.stopPropagation();
+        // Shown at once, but NOT swallowed: main.js's pause lives in its own
+        // `mode`, which only changes when controls.js sees this key. With
+        // stopPropagation here the pause card came up while main.js carried on
+        // in 'driving' — the physics ran under the menu (full throttle held:
+        // 3 m in 3 s, measured), the HUD stayed lit, and the goals overlay,
+        // medal card and all, sat on top of the "paused" game. Letting the
+        // key through costs nothing: main.js pauses, sees the pause screen is
+        // already up, and showing it twice is harmless.
+        e.preventDefault();
         show('pause');
       }
       return;

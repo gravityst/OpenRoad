@@ -18,6 +18,7 @@ const CHECKS = [
   ['damage', 'damage only ever takes capability away'],
   ['carcrash', 'cars are solid against each other and both take the damage'],
   ['goals', 'every challenge is on a road, every race is winnable, saves survive'],
+  ['skills', 'skill chains add up, dailies are the same for everyone, saves migrate'],
   ['debris', 'parts that fall off tumble, land, and never gain energy'],
   ['model', 'imported cars match the rig, and a missing one is harmless'],
   ['cars', 'the car models look like cars and still come apart where damage expects'],

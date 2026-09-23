@@ -20,6 +20,7 @@ const CHECKS = [
   ['goals', 'every challenge is on a road, every race is winnable, saves survive'],
   ['debris', 'parts that fall off tumble, land, and never gain energy'],
   ['model', 'imported cars match the rig, and a missing one is harmless'],
+  ['cars', 'the car models look like cars and still come apart where damage expects'],
   ['traffic', 'the other cars behave like traffic'],
   ['drift', 'sideways scores, straight does not, and the detector never flickers'],
   ['atmosphere', 'roads are sharp and seamless, and the air hides the edge of the world'],

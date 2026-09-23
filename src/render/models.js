@@ -950,6 +950,7 @@ export function createModelLibrary(opts = {}) {
 
     function setPaint(hex) {
       for (let i = 0; i < paintMats.length; i++) paintMats[i].color.setHex(hex);
+      group.userData.paint = hex;
     }
 
     function dispose() {
@@ -964,6 +965,11 @@ export function createModelLibrary(opts = {}) {
     }
 
     const colour = per.colour ?? spec.colour;
+    // physics/debris.js sizes a torn-off panel from userData.dims and colours
+    // it from userData.paint, as it does for a procedural car. An imported car
+    // with no colour asked for keeps its livery, and debris falls back to
+    // reading the paint material, as it always has.
+    group.userData.dims = asset.dims;
     // Only repaint when a colour was actually asked for: an imported car may
     // carry an authored livery that a default grey would wash straight over.
     if (typeof colour === 'number') setPaint(colour);

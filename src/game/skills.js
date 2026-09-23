@@ -429,6 +429,12 @@ export function createSkills(opts = {}) {
   /** Ends the chain now, paying it out — a race finishing, the player quitting. */
   function bank() { endChain('bank'); }
 
+  /**
+   * Adds a link as if a detector had fired. For looking at the chain on
+   * screen without driving for it (goals.demo) — nothing in play calls it.
+   */
+  function inject(kind, label, points) { return link(kind, label, points, 0); }
+
   /** A new session: nothing carried over. */
   function reset() {
     state.live = false; state.links = 0; state.points = 0; state.mult = 1; state.value = 0;
@@ -444,7 +450,7 @@ export function createSkills(opts = {}) {
 
   return {
     state,
-    update, onCrash, bank, reset,
+    update, onCrash, bank, reset, inject,
     /** Events emitted since the last clearEvents(), in order. */
     get eventCount() { return evCount; },
     event: (i) => pool[i],

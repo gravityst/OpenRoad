@@ -283,7 +283,7 @@ export function createObjectives(root, opts = {}) {
       const on = !!nx.text;
       E.next.classList.toggle('is-on', on);
       if (on) {
-        E.nextLv.textContent = `LV ${nx.level}`;
+        E.nextLv.textContent = `NEXT AT LV ${nx.level}`;
         E.nextIcon.innerHTML = ICONS[REWARD_ICON[nx.type] || 'level'];
         E.nextText.textContent = nx.text;
         E.next.dataset.type = nx.type || '';

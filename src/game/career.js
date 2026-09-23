@@ -132,12 +132,19 @@ export function levelReward(level, own) {
   return { type: 'cash', amount: levelCash(level) };
 }
 
-/** A reward as a few words, for a banner or the "next reward" line. */
+/** A reward as a few words, for a banner or the result card. */
 export function rewardText(r) {
   if (!r) return '';
   if (r.type === 'car') return `New car: ${r.name}`;
   if (r.type === 'paint') return `${r.name} paint`;
   return `$${Math.round(r.amount).toLocaleString('en')}`;
+}
+
+/** Shorter, for the HUD's "next reward" line, where an icon says what kind. */
+export function rewardShort(r) {
+  if (!r) return '';
+  if (r.type === 'cash') return `$${Math.round(r.amount).toLocaleString('en')}`;
+  return r.name;
 }
 
 // ---------------------------------------------------------------------------

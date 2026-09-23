@@ -29,6 +29,7 @@ import { DEFAULT_SPEC } from '../physics/vehicle.js';
 export { SETTINGS_KEY, DEFAULT_SETTINGS, loadSettings, saveSettings } from './settings.js';
 import { SETTINGS_KEY, DEFAULT_SETTINGS, loadSettings, saveSettings } from './settings.js';
 import { NAME_RE } from '../net/protocol.js';
+import { PAINTS, PAINT_BY_ID, rewardShort } from './career.js';
 
 // KEY NAMES ARE A CONTRACT. main.js reads settings.post, settings.time,
 // settings.quality and the rest straight off the object this file emits, and
@@ -116,7 +117,9 @@ const SETTINGS_SCHEMA = [
   },
 ];
 
-const SCREENS = ['title', 'garage', 'settings', 'pause', 'map'];
+const SCREENS = ['title', 'garage', 'settings', 'pause', 'map', 'trophies'];
+// Screens that are a step down from a root one (title or pause) and go back to it.
+const SUB_SCREENS = ['garage', 'settings', 'map', 'trophies'];
 
 const DRIVE_LABEL = { fwd: 'Front-wheel drive', rwd: 'Rear-wheel drive', awd: 'All-wheel drive' };
 
@@ -386,10 +389,12 @@ export function createMenus(root, opts = {}) {
           <div class="or-title-secondary">
             <button class="or-btn or-btn--ghost" data-act="garage">Garage</button>
             <button class="or-btn or-btn--ghost" data-act="map">Map</button>
+            <button class="or-btn or-btn--ghost" data-act="trophies" hidden>Trophies</button>
             <button class="or-btn or-btn--ghost" data-act="settings">Settings</button>
           </div>
         </div>
       </div>
+      <aside class="or-career" hidden aria-label="Your progress"></aside>
       <p class="or-title-foot"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> to drive &middot; <kbd>Esc</kbd> to pause</p>
     </section>
 
@@ -421,6 +426,11 @@ export function createMenus(root, opts = {}) {
             <span class="or-swatch-label">Paint</span>
             <div class="or-swatches" role="radiogroup" aria-label="Paint"></div>
           </div>
+          <div class="or-paintshop" hidden>
+            <span class="or-swatch-label">Paint shop</span>
+            <div class="or-swatches or-swatches--shop" role="radiogroup" aria-label="Special paint"></div>
+            <p class="or-paint-name"></p>
+          </div>
         </aside>
       </div>
       <footer class="or-garage-foot">
@@ -447,16 +457,30 @@ export function createMenus(root, opts = {}) {
         <p class="or-eyebrow">Engine idling</p>
         <h2 class="or-card-title">Paused</h2>
         <p class="or-goals-progress or-pause-progress" hidden></p>
+        <div class="or-pause-daily" hidden></div>
         <div class="or-menu-list">
           <button class="or-btn or-btn--primary" data-act="resume" data-autofocus>Resume</button>
           <button class="or-btn or-btn--ghost" data-act="goal-restart" hidden>Restart race</button>
           <button class="or-btn or-btn--quiet" data-act="goal-abandon" hidden>Leave race</button>
           <button class="or-btn or-btn--ghost" data-act="map">Map</button>
           <button class="or-btn or-btn--ghost" data-act="garage">Garage</button>
+          <button class="or-btn or-btn--ghost" data-act="trophies" hidden>Trophies</button>
           <button class="or-btn or-btn--ghost" data-act="settings">Settings</button>
           <button class="or-btn or-btn--quiet" data-act="quit">Quit to title</button>
         </div>
       </div>
+    </section>
+
+    <section class="or-screen or-trophies" data-screen="trophies" role="dialog" aria-modal="true" aria-label="Trophies">
+      <header class="or-topbar">
+        <button class="or-back" data-act="back" aria-label="Back">&larr;</button>
+        <h2 class="or-screen-title">Trophies</h2>
+        <p class="or-trophy-count"></p>
+      </header>
+      <div class="or-trophy-grid" role="list"></div>
+      <footer class="or-trophy-foot">
+        <button class="or-btn or-btn--primary" data-act="back" data-autofocus>Done</button>
+      </footer>
     </section>
 
     <section class="or-screen or-map" data-screen="map" role="dialog" aria-modal="true" aria-label="Map">
@@ -600,24 +624,38 @@ export function createMenus(root, opts = {}) {
     // `colour` is the INDEX, not the hex. main.js feeds it straight to
     // specFor(id, colourIndex) and to the car model, so handing over a packed
     // colour here would paint the wrong car and silently pick a random one.
+    // A special paint from the shop rides alongside the factory colour rather
+    // than replacing it: main.js builds the car from the factory index as it
+    // always has, and the goals layer puts the special paint on top (see
+    // goals.previewPaint) — so catalog.js and main.js never learn about it.
+    const paint = paintOf(car);
     return {
       car, index, id: car.id,
       colour: ci,
       colourIndex: ci,
       colourHex: car.colours[ci % car.colours.length],
+      paint, paintHex: paint ? PAINT_BY_ID[paint].hex : null,
       spec,
       stats: stats[index],
     };
   }
 
+  /** 'select', with the paint preview kept in step with it. */
+  function emitSelect() {
+    const sel = selection();
+    if (goals && goals.previewPaint) goals.previewPaint(sel ? sel.paintHex : null);
+    emit('select', sel);
+  }
+
   function renderSwatches(car) {
     specEls.swatches.textContent = '';
     const ci = colourIndexFor(car);
+    const special = !!paintOf(car);
     car.colours.forEach((hex, i) => {
       const b = el('button', 'or-swatch');
       b.type = 'button';
       b.setAttribute('role', 'radio');
-      b.setAttribute('aria-checked', String(i === ci));
+      b.setAttribute('aria-checked', String(i === ci && !special));
       b.setAttribute('aria-label', `Paint ${i + 1}`);
       b.tabIndex = i === ci ? 0 : -1;
       b.style.setProperty('--c', '#' + hex.toString(16).padStart(6, '0'));
@@ -646,6 +684,7 @@ export function createMenus(root, opts = {}) {
     // The electric car has one reduction gear, which is not a "1-speed gearbox".
     specEls.gears.textContent = s.gears > 1 ? `${s.gears}-speed` : 'Single speed';
     renderSwatches(car);
+    renderShop(car);
     renderLocks();
 
     for (const row of listEl.children) {
@@ -662,15 +701,81 @@ export function createMenus(root, opts = {}) {
     renderSpec();
     const row = listEl.children[index];
     if (row) row.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-    if (!silent) emit('select', selection());
+    if (!silent) emitSelect();
   }
 
   function setColour(i) {
     const car = cars[index];
     if (!car) return;
     colourByCar.set(car.id, ((i % car.colours.length) + car.colours.length) % car.colours.length);
+    // A factory colour is picked over any special paint being tried on.
+    paintByCar.set(car.id, null);
     renderSpec();
-    emit('select', selection());
+    emitSelect();
+  }
+
+  // ---- the paint shop ------------------------------------------------------
+  // Special paints (career.js PAINTS) for any car the player owns. Every one
+  // can be tried on the car on the stage for free; the garage button turns
+  // into "Buy paint" while an unbought one is showing, and driving off keeps
+  // only a paint that is owned. Bought once, a paint is every owned car's.
+  const shopEl = ui.querySelector('.or-paintshop');
+  const shopSwatches = ui.querySelector('.or-swatches--shop');
+  const paintNameEl = ui.querySelector('.or-paint-name');
+  // The special paint on show per car while browsing; null is its factory colour.
+  const paintByCar = new Map();
+  function paintOf(car) { return car ? paintByCar.get(car.id) || null : null; }
+
+  function renderShop(car) {
+    const show = !!goals && owns(car.id);
+    shopEl.hidden = !show;
+    if (!show) return;
+    shopSwatches.textContent = '';
+    const cur = paintOf(car);
+    for (const p of PAINTS) {
+      const owned = goals.progress.ownsPaint(p.id);
+      const b = el('button', 'or-swatch or-swatch--shop');
+      b.type = 'button';
+      b.setAttribute('role', 'radio');
+      b.setAttribute('aria-checked', String(p.id === cur));
+      b.setAttribute('aria-label', owned ? p.name : `${p.name}, ${money(p.price)}`);
+      b.title = owned ? p.name : `${p.name} — ${money(p.price)}`;
+      b.tabIndex = p.id === cur ? 0 : -1;
+      b.style.setProperty('--c', '#' + p.hex.toString(16).padStart(6, '0'));
+      if (!owned) b.classList.add('is-locked');
+      b.addEventListener('click', () => setPaint(p.id));
+      shopSwatches.appendChild(b);
+    }
+    const p = cur ? PAINT_BY_ID[cur] : null;
+    paintNameEl.textContent = !p ? 'Try one on — pick a colour'
+      : goals.progress.ownsPaint(p.id) ? `${p.name} — yours` : `${p.name} — ${money(p.price)}`;
+  }
+
+  function setPaint(id) {
+    const car = cars[index];
+    if (!car) return;
+    paintByCar.set(car.id, id && PAINT_BY_ID[id] ? id : null);
+    renderSpec();
+    emitSelect();
+  }
+
+  /** Left/right through the factory colours and then the shop, as one row. */
+  function stepPaint(dir) {
+    const car = cars[index];
+    if (!car) return;
+    const F = car.colours.length;
+    const shop = !!goals && owns(car.id) ? PAINTS.length : 0;
+    const p = paintOf(car);
+    const cur = p ? F + PAINTS.findIndex((q) => q.id === p) : colourIndexFor(car);
+    const n = F + shop;
+    const next = (((cur + dir) % n) + n) % n;
+    if (next < F) setColour(next);
+    else setPaint(PAINTS[next - F].id);
+  }
+
+  /** Every car back in the paint it actually wears — leaving the garage without driving. */
+  function restoreLiveries() {
+    for (const id of paintByCar.keys()) paintByCar.set(id, goals ? goals.progress.livery(id) : null);
   }
 
   function setCars(list) {
@@ -1184,6 +1289,123 @@ export function createMenus(root, opts = {}) {
     if (racing) pauseRestart.textContent = `Restart ${goals.activeRace.name}`;
     pauseProgress.hidden = !goals;
     if (goals) pauseProgress.textContent = progressLine();
+    pauseDaily.hidden = !goals;
+    if (goals) { pauseDaily.textContent = ''; pauseDaily.appendChild(dailyList(goals.progress.daily(), true)); }
+  }
+
+  // ---- the long game: the title's career card, dailies, trophies -----------
+
+  const careerEl = ui.querySelector('.or-career');
+  const pauseDaily = ui.querySelector('.or-pause-daily');
+  const trophyGrid = ui.querySelector('.or-trophy-grid');
+  const trophyCount = ui.querySelector('.or-trophy-count');
+  const oneDp = { km: 1, air: 1, tow: 1 };
+  const fmtDaily = (metric, v) => (oneDp[metric] ? String(Math.floor(v * 10) / 10) : Math.floor(v).toLocaleString('en'));
+
+  /** Today's three as a list, with the streak — the title card and the pause card share it. */
+  function dailyList(dv, compact) {
+    const wrap = el('div', 'or-daily');
+    const head = el('p', 'or-daily-head');
+    head.appendChild(el('span', null, compact ? 'Today' : "Today's challenges"));
+    if (dv.streak > 0) {
+      const st = el('span', 'or-streak', `${dv.streak}-day streak`);
+      if (!dv.doneToday) { st.classList.add('is-due'); st.title = 'Finish a daily today to keep it'; }
+      head.appendChild(st);
+    }
+    wrap.appendChild(head);
+    const ul = el('ul', 'or-daily-list');
+    for (const d of dv.list || []) {
+      const li = el('li', `or-daily-item${d.done ? ' is-done' : ''}`);
+      li.dataset.tier = String(d.tier);
+      li.appendChild(el('i', 'or-daily-tick'));
+      li.appendChild(el('span', 'or-daily-text', d.text));
+      li.appendChild(el('em', 'or-daily-num', d.done ? 'Done' : `${fmtDaily(d.metric, d.progress)} / ${fmtDaily(d.metric, d.target)}`));
+      const bar = el('u', 'or-daily-bar');
+      const fill = el('i');
+      fill.style.width = `${Math.round((d.done ? 1 : Math.min(1, d.progress / Math.max(1e-6, d.target))) * 100)}%`;
+      bar.appendChild(fill);
+      li.appendChild(bar);
+      ul.appendChild(li);
+    }
+    wrap.appendChild(ul);
+    const foot = el('p', 'or-daily-foot', dv.allDone ? 'All three done — new ones tomorrow!'
+      : dv.streak > 0 && !dv.doneToday ? `Finish one today to make it a ${dv.streak + 1}-day streak`
+      : 'All three today for a $500 bonus');
+    wrap.appendChild(foot);
+    return wrap;
+  }
+
+  /** The title's right-hand card: level, the next reward, today's dailies, trophies. */
+  function renderCareer() {
+    if (!goals) { careerEl.hidden = true; return; }
+    const p = goals.progress;
+    const lv = p.level;
+    const nx = p.nextReward();
+    careerEl.hidden = false;
+    careerEl.textContent = '';
+
+    const top = el('div', 'or-career-level');
+    top.appendChild(el('b', 'or-career-lv', `Level ${lv.level}`));
+    const bar = el('span', 'or-career-xp');
+    const fill = el('i');
+    fill.style.width = `${Math.round(lv.frac * 100)}%`;
+    bar.appendChild(fill);
+    top.appendChild(bar);
+    top.appendChild(el('span', 'or-career-xpnum', lv.need ? `${Math.floor(lv.into).toLocaleString('en')} / ${lv.need.toLocaleString('en')} XP` : 'MAX'));
+    careerEl.appendChild(top);
+
+    if (nx.reward) {
+      const next = el('p', 'or-career-next');
+      next.dataset.type = nx.reward.type;
+      next.appendChild(el('span', null, `Next at level ${nx.level}`));
+      if (nx.reward.type === 'paint') {
+        const chip = el('i', 'or-career-chip');
+        chip.style.background = '#' + nx.reward.hex.toString(16).padStart(6, '0');
+        next.appendChild(chip);
+      }
+      next.appendChild(el('b', null, nx.reward.type === 'car' ? `a new car: ${nx.reward.name}` : rewardShort(nx.reward) + (nx.reward.type === 'paint' ? ' paint' : '')));
+      careerEl.appendChild(next);
+    }
+
+    careerEl.appendChild(dailyList(p.daily(), false));
+
+    const foot = el('div', 'or-career-foot');
+    const tb = el('button', 'or-btn or-btn--ghost or-career-trophies', `Trophies ${p.trophyCount} / ${p.trophyTotal}`);
+    tb.type = 'button';
+    tb.dataset.act = 'trophies';
+    foot.appendChild(tb);
+    const best = p.stats.chainBest;
+    if (best > 0) foot.appendChild(el('span', 'or-career-best', `Best chain ${Math.round(best).toLocaleString('en')}`));
+    careerEl.appendChild(foot);
+  }
+
+  function renderTrophies() {
+    if (!goals) return;
+    const list = goals.progress.trophyList();
+    const got = list.filter((t) => t.got).length;
+    trophyCount.textContent = `${got} of ${list.length}`;
+    trophyGrid.textContent = '';
+    // Won ones first, then the closest to being won: the next thing to do is
+    // at the top of the "not yet" half.
+    const order = list.slice().sort((a, b) => (b.got - a.got) || (!a.got && !b.got ? (b.value / b.at) - (a.value / a.at) : 0));
+    for (const t of order) {
+      const card = el('div', `or-trophy${t.got ? ' is-got' : ''}`);
+      card.setAttribute('role', 'listitem');
+      card.appendChild(el('i', 'or-trophy-cup'));
+      const text = el('div', 'or-trophy-text');
+      text.appendChild(el('b', null, t.name));
+      text.appendChild(el('span', null, t.desc));
+      if (!t.got) {
+        const bar = el('u', 'or-trophy-bar');
+        const fill = el('i');
+        fill.style.width = `${Math.round(Math.min(1, t.value / Math.max(1e-6, t.at)) * 100)}%`;
+        bar.appendChild(fill);
+        text.appendChild(bar);
+      }
+      card.appendChild(text);
+      if (t.xp) card.appendChild(el('em', null, `+${t.xp} XP`));
+      trophyGrid.appendChild(card);
+    }
   }
 
   function renderMapGoals() {
@@ -1279,6 +1501,18 @@ export function createMenus(root, opts = {}) {
     }
     const car = cars[index];
     if (!car || !garageGo) return;
+    const pid = paintOf(car);
+    if (owns(car.id) && goals && pid && !goals.progress.ownsPaint(pid)) {
+      const price = PAINT_BY_ID[pid].price, cash = goals.progress.cash;
+      specLock.hidden = false;
+      specLock.textContent = cash >= price
+        ? `${PAINT_BY_ID[pid].name} for ${money(price)}. You have ${money(cash)} — and it fits every car you own.`
+        : `${PAINT_BY_ID[pid].name} costs ${money(price)} — ${money(price - cash)} to go. Bank skill chains and finish dailies to earn it.`;
+      garageGo.textContent = cash >= price ? `Buy paint ${money(price)}` : `Need ${money(price - cash)} more`;
+      garageGo.dataset.act = 'buy-paint';
+      garageGo.disabled = cash < price;
+      return;
+    }
     if (owns(car.id)) {
       specLock.hidden = true;
       garageGo.textContent = 'Take it out';
@@ -1306,6 +1540,16 @@ export function createMenus(root, opts = {}) {
     }
   }
 
+  function buyPaint() {
+    const car = cars[index];
+    const pid = paintOf(car);
+    if (!car || !goals || !pid) return;
+    if (goals.progress.buyPaint(pid)) {
+      renderSpec();
+      garageGo.classList.remove('is-bought'); void garageGo.offsetWidth; garageGo.classList.add('is-bought');
+    }
+  }
+
   /** Into the starter, on disk too: a saved car the player no longer owns
    *  would otherwise be the one the next visit boots in. */
   function backToStarter() {
@@ -1324,13 +1568,22 @@ export function createMenus(root, opts = {}) {
     // One whose saved car is not theirs (a save from before "Start over", or
     // edited by hand) is put back in the starter rather than given it.
     if (goals && !owns(drivingId)) backToStarter();
+    // The car boots in its factory colour (main.js built it before any of
+    // this existed); its special paint, if it has one, goes on from here.
+    if (goals) {
+      paintByCar.set(drivingId, goals.progress.livery(drivingId));
+      if (goals.previewPaint) goals.previewPaint(goals.progress.paintHex(drivingId));
+    }
     refreshGoals();
   }
   function refreshGoals() {
     const rp = ui.querySelector('[data-act="reset-progress"]');
     if (rp) rp.hidden = !goals;
+    for (const b of ui.querySelectorAll('.or-title-secondary [data-act="trophies"], .or-menu-list [data-act="trophies"]')) b.hidden = !goals;
     renderTitleGoals();
+    renderCareer();
     renderPauseGoals();
+    if (current === 'trophies') renderTrophies();
     if (current === 'map') { renderMapGoals(); drawMap(); }
     if (cars.length) renderLocks();
   }
@@ -1349,7 +1602,7 @@ export function createMenus(root, opts = {}) {
 
   function show(name) {
     if (!SCREENS.includes(name)) return;
-    if (name === 'garage' || name === 'settings' || name === 'map') {
+    if (SUB_SCREENS.includes(name)) {
       // Opened straight from the road — main.js does this for the map key — so
       // backing out lands on the pause screen, which is the state the game is
       // actually in. Dropping the player on the title screen mid-drive is not.
@@ -1373,9 +1626,10 @@ export function createMenus(root, opts = {}) {
       screen.setAttribute('aria-hidden', String(!on));
       screen.inert = !on;
     }
-    if (name === 'garage' && cars.length) emit('select', selection());
-    if (name === 'title') renderTitleGoals();
+    if (name === 'garage' && cars.length) emitSelect();
+    if (name === 'title') { renderTitleGoals(); renderCareer(); }
     if (name === 'pause') renderPauseGoals();
+    if (name === 'trophies') renderTrophies();
     if (name === 'garage') renderLocks();
     if (name === 'map') { renderMapGoals(); layoutMap(); }
     focusFirst(name);
@@ -1401,7 +1655,9 @@ export function createMenus(root, opts = {}) {
     if (current === 'title') return;
     // Leaving the garage without taking anything out: put the body of the car
     // actually being driven back on it, not whatever was browsed last.
-    if (current === 'garage' && cars[index] && cars[index].id !== drivingId) {
+    // A paint tried on and not bought, or not driven off in, comes off too.
+    if (current === 'garage' && cars[index]) {
+      restoreLiveries();
       const i = cars.findIndex((c) => c.id === drivingId);
       if (i >= 0) select(i);
     }
@@ -1420,6 +1676,16 @@ export function createMenus(root, opts = {}) {
       if (current === 'garage') { garageGo.classList.remove('is-nope'); void garageGo.offsetWidth; garageGo.classList.add('is-nope'); return; }
       const i = cars.findIndex((c) => c.id === drivingId);
       select(i >= 0 ? i : 0, true);
+    }
+    // Drive off in a special paint only if it is owned: one being tried on
+    // comes off, and the car keeps whatever it wore before.
+    if (goals && cars[index]) {
+      const car = cars[index];
+      const pid = paintOf(car);
+      if (pid && goals.progress.ownsPaint(pid)) goals.progress.setLivery(car.id, pid);
+      else if (!pid) goals.progress.setLivery(car.id, null);
+      paintByCar.set(car.id, goals.progress.livery(car.id));
+      if (goals.previewPaint) goals.previewPaint(goals.progress.paintHex(car.id));
     }
     const sel = selection();
     // A drive from the title (directly, or via the garage) starts a session;
@@ -1447,6 +1713,8 @@ export function createMenus(root, opts = {}) {
     resume,
     quit: () => { show('title'); emit('quit-to-title'); },
     buy,
+    'buy-paint': buyPaint,
+    trophies: () => show('trophies'),
     // Separate from "Restore defaults" on purpose, and behind a confirm: this
     // one throws away medals and cars a kid may have spent an afternoon on.
     'reset-progress': () => {
@@ -1515,8 +1783,8 @@ export function createMenus(root, opts = {}) {
       if (tag === 'INPUT' || tag === 'SELECT') return;
       if (e.key === 'ArrowDown') { e.preventDefault(); e.stopPropagation(); select(index + 1); }
       else if (e.key === 'ArrowUp') { e.preventDefault(); e.stopPropagation(); select(index - 1); }
-      else if (e.key === 'ArrowRight') { e.preventDefault(); e.stopPropagation(); setColour(colourIndexFor(cars[index]) + 1); }
-      else if (e.key === 'ArrowLeft') { e.preventDefault(); e.stopPropagation(); setColour(colourIndexFor(cars[index]) - 1 + cars[index].colours.length); }
+      else if (e.key === 'ArrowRight') { e.preventDefault(); e.stopPropagation(); stepPaint(1); }
+      else if (e.key === 'ArrowLeft') { e.preventDefault(); e.stopPropagation(); stepPaint(-1); }
       else if (e.key === 'Enter' && e.target === document.body) { e.preventDefault(); startDriving(); }
       return;
     }

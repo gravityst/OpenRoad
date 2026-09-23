@@ -42,7 +42,7 @@ import { makeRamp, createRampOverlay, kickRamps } from './ramps.js';
 import { createProgress, levelFor } from './progress.js';
 import { createSfx } from './sfx.js';
 import { createSkills, chainPayout } from './skills.js';
-import { rewardText, PAINT_BY_ID } from './career.js';
+import { rewardText, rewardShort } from './career.js';
 
 export const KIND_LABEL = { race: 'Race', trap: 'Speed trap', jump: 'Jump', drift: 'Drift zone' };
 const KIND_VERB = {
@@ -319,7 +319,8 @@ export function createGoals(opts) {
       if (ev.cash) bits.push(`$${ev.cash.toLocaleString('en')}`);
       for (const c of ev.cars) bits.push(c);
       for (const p of ev.paints) bits.push(`${p} paint`);
-      const sub = ev.levels ? `You are level ${ev.level}. Rewards waiting for you:` : `${ev.trophies.length} trophies for what you have already done`;
+      if (ev.trophies && ev.trophies.length) bits.push(`${ev.trophies.length} troph${ev.trophies.length > 1 ? 'ies' : 'y'}`);
+      const sub = ev.levels ? `You're level ${ev.level}! You've earned:` : 'Trophies for what you have already done:';
       if (overlay.celebrate) overlay.celebrate('welcome', 'WELCOME BACK!', sub, { type: 'list', items: bits });
       flash(0.3);
     }
@@ -337,7 +338,7 @@ export function createGoals(opts) {
     const n = progress.nextReward();
     ui.next.level = n.level;
     ui.next.type = n.reward ? n.reward.type : '';
-    ui.next.text = n.reward ? rewardText(n.reward) : '';
+    ui.next.text = n.reward ? rewardShort(n.reward) : '';
   }
 
   // Continuous stats reach progress in lumps: once a second, not once a frame.
@@ -1129,6 +1130,40 @@ export function createGoals(opts) {
     /** The special paint car `carId` wears, as a hex, or null. */
     paintFor: (carId) => progress.paintHex(carId),
     get paint() { return wantPaint; },
+    /**
+     * Shows a moment without earning it, for looking at the UI (the way
+     * main.js's detonate() shows a blast without a crash). 'chain' adds five
+     * links to the real chain, which then counts and pays like any other;
+     * 'bank' and 'lost' end it; 'level', 'trophy',
+     * 'daily', 'sweep' and 'welcome' show their card and change nothing in
+     * the save. Returns what it did.
+     */
+    demo(what = 'chain') {
+      if (what === 'chain') {
+        skills.inject('near', 'NEAR MISS', 380);
+        skills.inject('oncoming', 'RAZOR ONCOMING', 820);
+        skills.inject('air', 'BIG AIR', 520);
+        skills.inject('speed', '170+ KM/H', 340);
+        skills.inject('drift', 'DRIFT', 1460);
+        return 'five links';
+      }
+      if (what === 'bank') { skills.bank(); return 'banked'; }
+      if (what === 'lost') { skills.onCrash(1); return 'lost'; }
+      const n = progress.nextReward();
+      const t = progress.trophyList().find((q) => !q.got) || progress.trophyList()[0];
+      const d = (progress.daily().list || [])[0];
+      const fake = {
+        level: { type: 'level', level: n.level, reward: n.reward },
+        trophy: { type: 'trophy', name: t.name, desc: t.desc, xp: t.xp },
+        daily: { type: 'daily', text: d ? d.text : 'Drive 3 km', cash: 250, xp: 60 },
+        sweep: { type: 'sweep', cash: 500, xp: 150 },
+        streak: { type: 'streak', count: 3 },
+        welcome: { type: 'welcome', level: 7, levels: 6, cash: 1900, cars: ['Auroch Scout 4x4'], paints: ['Sunburst Yellow'], trophies: ['Off the Line'] },
+      }[what];
+      if (!fake) return 'unknown';
+      celebrate(fake);
+      return what;
+    },
     setTarget: (id) => { const c = byId[id]; if (c) setTarget(c, true); return !!c; },
     cycleTarget, resync, recommend: () => recommend(null),
     /** For the harness: the internals it needs to drive a race from code. */

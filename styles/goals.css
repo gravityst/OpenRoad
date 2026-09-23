@@ -874,3 +874,183 @@
 .or-btn.is-bought { animation: or-bought 0.6s ease; }
 @keyframes or-bought { 40% { transform: scale(1.08); box-shadow: 0 0 24px rgba(255, 207, 58, 0.6); } }
 .or-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+
+/* ===========================================================================
+ * The long game, in the menus: the title's career card, today's dailies (on
+ * the title and the pause card), the trophies screen and the paint shop.
+ * ======================================================================== */
+
+/* ---- the career card, bottom right of the title ------------------------------- */
+
+.or-career {
+  position: absolute;
+  right: var(--or-pad, 24px);
+  bottom: var(--or-pad, 24px);
+  width: min(340px, 34vw);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 18px;
+  border: 1px solid var(--or-line, rgba(255, 255, 255, 0.1));
+  border-radius: var(--or-r, 14px);
+  background: var(--or-glass, rgba(11, 15, 21, 0.58));
+  backdrop-filter: blur(18px) saturate(1.1);
+  box-shadow: var(--or-shadow, 0 18px 50px rgba(0, 0, 0, 0.45));
+  color: var(--or-text, #eef2f6);
+}
+.or-career[hidden] { display: none; }
+.or-career-level { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 4px 12px; }
+.or-career-lv { font: 800 1.35rem/1 var(--or-display, system-ui, sans-serif); letter-spacing: 0.02em; }
+.or-career-xp { display: block; height: 8px; border-radius: 999px; background: rgba(255, 255, 255, 0.12); overflow: hidden; }
+.or-career-xp i { display: block; height: 100%; background: linear-gradient(90deg, #4fd8f0, #9be7ff); }
+.or-career-xpnum { grid-column: 2; justify-self: end; font: 600 0.7rem/1 var(--or-mono, ui-monospace, monospace); color: var(--or-text-3, rgba(238, 242, 246, 0.4)); }
+.or-career-next {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(255, 207, 58, 0.1);
+  border: 1px solid rgba(255, 207, 58, 0.25);
+  font: 600 0.8rem/1.3 var(--or-body, system-ui, sans-serif);
+  color: var(--or-text-2, rgba(238, 242, 246, 0.66));
+}
+.or-career-next b { color: #ffe08a; }
+.or-career-next[data-type="car"] { background: rgba(126, 242, 154, 0.1); border-color: rgba(126, 242, 154, 0.3); }
+.or-career-next[data-type="car"] b { color: #7ef29a; }
+.or-career-chip { width: 14px; height: 14px; border-radius: 50%; box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.5); }
+.or-career-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.or-career-trophies { padding: 8px 12px; font-size: 0.74rem; }
+.or-career-best { font: 700 0.74rem/1 var(--or-mono, ui-monospace, monospace); color: #ffe08a; }
+
+/* ---- today's dailies: a list the title and the pause card share --------------- */
+
+.or-daily { display: flex; flex-direction: column; gap: 8px; text-align: left; }
+.or-daily-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0;
+  font: 700 0.68rem/1 var(--or-body, system-ui, sans-serif);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: #9be7ff;
+}
+.or-streak {
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: rgba(255, 207, 58, 0.16);
+  color: #ffe08a;
+  letter-spacing: 0.06em;
+}
+.or-streak::before { content: "\26A1\FE0E  "; }
+.or-streak.is-due { animation: or-due 1.4s ease-in-out infinite; }
+@keyframes or-due { 50% { opacity: 0.55; } }
+.or-daily-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.or-daily-item {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 4px 9px;
+  font: 600 0.84rem/1.25 var(--or-body, system-ui, sans-serif);
+}
+.or-daily-tick { grid-row: 1 / 3; width: 16px; height: 16px; border-radius: 50%; border: 2px solid rgba(255, 255, 255, 0.3); }
+.or-daily-item[data-tier="1"] .or-daily-tick { border-color: rgba(79, 216, 240, 0.6); }
+.or-daily-item[data-tier="2"] .or-daily-tick { border-color: rgba(228, 92, 255, 0.65); }
+.or-daily-num { font: 600 0.72rem/1 var(--or-mono, ui-monospace, monospace); font-style: normal; color: var(--or-text-3, rgba(238, 242, 246, 0.4)); }
+.or-daily-bar { grid-column: 2 / 4; display: block; height: 4px; border-radius: 999px; background: rgba(255, 255, 255, 0.1); overflow: hidden; }
+.or-daily-bar i { display: block; height: 100%; background: #9be7ff; }
+.or-daily-item.is-done .or-daily-tick { border-color: #5cf29a; background: #5cf29a radial-gradient(circle, #0b0e13 0 26%, transparent 30%); }
+.or-daily-item.is-done .or-daily-text { color: var(--or-text-3, rgba(238, 242, 246, 0.4)); text-decoration: line-through; }
+.or-daily-item.is-done .or-daily-num { color: #5cf29a; }
+.or-daily-item.is-done .or-daily-bar i { background: #5cf29a; }
+.or-daily-foot { margin: 0; font: 600 0.72rem/1.3 var(--or-body, system-ui, sans-serif); color: var(--or-text-3, rgba(238, 242, 246, 0.4)); }
+
+.or-pause-daily { margin: 0 0 16px; padding: 12px 14px; border-radius: 12px; background: rgba(255, 255, 255, 0.04); border: 1px solid var(--or-line, rgba(255, 255, 255, 0.1)); }
+.or-pause-daily[hidden] { display: none; }
+.or-pause-daily .or-daily-item { font-size: 0.78rem; }
+
+/* ---- the trophies screen ---------------------------------------------------------- */
+
+.or-trophies { align-items: center; }
+.or-trophies .or-topbar { width: min(1000px, 100%); }
+.or-trophy-count { margin: 0 0 0 auto; font: 700 0.9rem/1 var(--or-mono, ui-monospace, monospace); color: #ffe08a; }
+.or-trophy-grid {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: min(1000px, 100%);
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  align-content: start;
+  gap: 10px;
+  padding: 2px;
+}
+.or-trophy {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid var(--or-line, rgba(255, 255, 255, 0.1));
+  background: var(--or-glass, rgba(11, 15, 21, 0.58));
+  color: var(--or-text-2, rgba(238, 242, 246, 0.66));
+}
+.or-trophy.is-got { border-color: rgba(255, 210, 63, 0.45); background: linear-gradient(135deg, rgba(255, 210, 63, 0.14), rgba(11, 15, 21, 0.6)); color: var(--or-text, #eef2f6); }
+.or-trophy-cup {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.14);
+}
+.or-trophy.is-got .or-trophy-cup { background: radial-gradient(circle at 35% 30%, #fff3a8, #ffcd2e 45%, #c98a06); box-shadow: 0 0 12px rgba(255, 205, 46, 0.5); }
+.or-trophy-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.or-trophy-text b { font: 700 0.9rem/1.2 var(--or-body, system-ui, sans-serif); }
+.or-trophy-text span { font: 500 0.76rem/1.35 var(--or-body, system-ui, sans-serif); }
+.or-trophy-bar { display: block; height: 4px; margin-top: 4px; border-radius: 999px; background: rgba(255, 255, 255, 0.1); overflow: hidden; }
+.or-trophy-bar i { display: block; height: 100%; background: #9be7ff; }
+.or-trophy em { flex: none; font: 700 0.7rem/1 var(--or-mono, ui-monospace, monospace); font-style: normal; color: #ffe08a; }
+.or-trophy-foot { flex: 0 0 auto; display: flex; justify-content: flex-end; width: min(1000px, 100%); margin-top: 14px; }
+
+/* ---- the paint shop ---------------------------------------------------------------- */
+
+.or-paintshop {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  padding-top: 12px;
+  margin-top: 10px;
+  border-top: 1px solid var(--or-line, rgba(255, 255, 255, 0.1));
+}
+.or-paintshop[hidden] { display: none; }
+.or-swatches--shop { flex-wrap: wrap; gap: 6px; }
+.or-swatch--shop { width: 24px; height: 24px; }
+.or-swatch--shop.is-locked { position: relative; opacity: 0.8; }
+.or-swatch--shop.is-locked::after {
+  content: "";
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: #0b0e13 radial-gradient(circle, #ffe08a 0 30%, transparent 34%);
+  box-shadow: 0 0 0 1px rgba(255, 224, 138, 0.6);
+}
+.or-paint-name { flex-basis: 100%; margin: 0; font: 600 0.76rem/1.3 var(--or-body, system-ui, sans-serif); color: var(--or-text-2, rgba(238, 242, 246, 0.66)); }
+
+/* The career card is a right-hand column on a laptop and folds under the
+   buttons on anything narrower, where it would sit on top of them. */
+@media (max-width: 980px) {
+  .or-career { position: static; width: min(640px, 92%); margin-top: 14px; }
+  .or-career .or-daily-foot { display: none; }
+}
+@media (max-width: 640px), (max-height: 560px) {
+  .or-career { display: none; }
+}

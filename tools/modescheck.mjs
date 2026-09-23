@@ -148,6 +148,65 @@ const goalsStub = { list: gen.list, byId: gen.byId, nav: null };
   check(!missing.length, 'the party-game layers load and export what main.js calls, and their stylesheet is linked', missing.join(', '));
 }
 
+// ---- 1c. the bubbles and badges, on a stand-in DOM ------------------------------
+//
+// render/nameTags.js is DOM, so nothing above ever ran it — which is how a
+// variable named `w` (the words) shadowing `w` (the viewport width) shipped:
+// your own bubble's transform came out 'translate(NaNpx, …)', the browser
+// threw it away, and 'Hi!' sat in the top-left corner over the timing tower.
+// This runs the real file on just enough of a document to read the transform
+// back, with a style that refuses NaN the way a browser does.
+{
+  const THREE = await import('three');
+  const TAGS = await imp('src/render/nameTags.js');
+  const made = [];
+  const node = (tag) => {
+    let transform = '';
+    const cls = new Set();
+    const n = {
+      tagName: tag.toUpperCase(), className: '', hidden: false, textContent: '', children: [], offsetWidth: 0,
+      style: {
+        display: '', color: '', opacity: '',
+        get transform() { return transform; },
+        set transform(v) { if (!/NaN|Infinity/.test(String(v))) transform = String(v); },
+      },
+      classList: { toggle(c, on) { if (on ?? !cls.has(c)) cls.add(c); else cls.delete(c); }, contains: (c) => cls.has(c) },
+      appendChild(c) { n.children.push(c); return c; },
+      append(...cs) { for (const c of cs) n.children.push(c); },
+      remove() {},
+    };
+    made.push(n);
+    return n;
+  };
+  const realDoc = globalThis.document;
+  globalThis.document = { createElement: node, body: node('body') };
+  try {
+    const W = 1280, H = 720;
+    const tags = TAGS.createNameTags(node('div'));
+    tags.setSize(W, H);
+    const cam = new THREE.PerspectiveCamera(60, W / H, 0.1, 5000);
+    cam.position.set(0, 2.6, 7.2);                 // the chase camera, behind and above
+    cam.lookAt(0, 1, -10);
+    cam.updateMatrixWorld(true);
+    const me = { x: 0, y: 0, z: 0 };
+    const friend = { id: 3, active: true, fade: 1, x: 4, y: 0, z: -30, name: 'Bee' };
+    const games = { badge: (id) => (id === 3 ? 'IT' : ''), say: (id) => (id === 7 ? 'Hi!' : id === 3 ? 'Nice one!' : ''), cssOf: () => '#ffb43c' };
+    tags.update(cam, [friend], me, null, -1, games, 7);
+    const self = made.find((n) => n.className === 'ortag-self');
+    const tag = made.find((n) => n.className === 'ortag');
+    const say = made.find((n) => n.className === 'ortag__say');
+    const num = (s) => { const m = /^translate\((-?[\d.]+)px,(-?[\d.]+)px\)/.exec(s || ''); return m ? [+m[1], +m[2]] : null; };
+    const at = num(self && self.style.transform), tagAt = num(tag && tag.style.transform);
+    check(!!self && !self.hidden && !!at && Math.abs(at[0] - W / 2) < 8 && at[1] > 0 && at[1] < H * 0.75 &&
+        !!tagAt && !say.hidden && say.children[0].textContent === 'Nice one!',
+      'your own emote bubble sits over your own car, and a friend\'s over theirs',
+      `yours at ${at ? at.map((v) => v.toFixed(0)).join(', ') : `"${self && self.style.transform}"`} on ${W}x${H} (car dead ahead), ` +
+      `Bee's tag at ${tagAt ? tagAt.map((v) => v.toFixed(0)).join(', ') : 'nowhere'} saying "${say ? say.children[0].textContent : ''}"`);
+  } finally {
+    if (realDoc === undefined) delete globalThis.document; else globalThis.document = realDoc;
+  }
+}
+
 // ---- 2. the referee, on its own ------------------------------------------------
 //
 // Tag decided from positions alone: a car alongside and closing is tagged; a car

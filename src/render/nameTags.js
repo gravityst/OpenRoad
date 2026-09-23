@@ -38,6 +38,21 @@ function fmt(d) {
   return d < 1000 ? `${Math.round(d)} m` : `${(d / 1000).toFixed(1)} km`;
 }
 
+/**
+ * Where the bubble over your own car goes on a `width` x `height` viewport:
+ * writes out.x / out.y in CSS pixels and returns true, or returns false when
+ * the car is behind the camera or the numbers are not finite (nothing is
+ * better than a bubble parked at 0,0). `v` is scratch.
+ */
+export function placeSelf(camera, self, width, height, v, out) {
+  v.set(self.x, (self.y || 0) + 1.9, self.z);
+  v.project(camera);
+  out.x = (v.x * 0.5 + 0.5) * width;
+  out.y = (-v.y * 0.5 + 0.5) * height;
+  out.ok = v.z <= 1 && Number.isFinite(out.x) && Number.isFinite(out.y);
+  return out.ok;
+}
+
 export function createNameTags(root, opts = {}) {
   const layer = document.createElement('div');
   layer.className = 'ortag-layer';
@@ -135,26 +150,33 @@ export function createNameTags(root, opts = {}) {
       t.el.classList.toggle('has-badge', !!b);
       t.el.classList.toggle('is-it', b === 'IT');
     }
-    const w = games ? games.say(id) : '';
-    if (w !== t.stxt) {
-      t.stxt = w;
-      t.sayText.textContent = w;
-      t.say.hidden = !w;
+    const said = games ? games.say(id) : '';
+    if (said !== t.stxt) {
+      t.stxt = said;
+      t.sayText.textContent = said;
+      t.say.hidden = !said;
     }
   }
 
-  /** Your own emote, over your own car (`self` is where it is drawn). */
+  /**
+   * Your own emote, over your own car (`self` is where it is drawn).
+   *
+   * `w` and `h` in this file are ALWAYS the viewport. The words are `said`:
+   * this function once called them `w`, which shadowed the width, so the
+   * bubble's x was 'Hi!' * 0.5 = NaN, the browser threw the transform away,
+   * and your own bubble sat in the top-left corner over the timing tower.
+   * tools/modescheck.mjs now runs this file on a stand-in DOM and reads the
+   * transform back.
+   */
   const vs = new THREE.Vector3();
+  const selfAt = { x: 0, y: 0, ok: false };
   function selfBubble(camera, self, games, selfId) {
-    const w = games && self && selfId >= 0 ? games.say(selfId) : '';
-    if (!w || !showTags) { if (!selfSay.hidden) { selfSay.hidden = true; selfTxt = ''; } return; }
-    vs.set(self.x, (self.y || 0) + 1.9, self.z);
-    vs.project(camera);
-    if (vs.z > 1) { selfSay.hidden = true; return; }
-    const sx = (vs.x * 0.5 + 0.5) * w, sy = (-vs.y * 0.5 + 0.5) * h;
-    if (w !== selfTxt) {
-      selfTxt = w;
-      selfSayText.textContent = w;
+    const said = games && self && selfId >= 0 ? games.say(selfId) : '';
+    if (!said || !showTags) { if (!selfSay.hidden) { selfSay.hidden = true; selfTxt = ''; } return; }
+    if (!placeSelf(camera, self, w, h, vs, selfAt)) { selfSay.hidden = true; return; }
+    if (said !== selfTxt) {
+      selfTxt = said;
+      selfSayText.textContent = said;
       // Re-inserted so the pop-in animation runs for every new reaction.
       selfSay.hidden = true;
       void selfSay.offsetWidth;
@@ -162,7 +184,7 @@ export function createNameTags(root, opts = {}) {
     const col = games.cssOf ? games.cssOf(selfId) : DEFAULT_CSS;
     if (col !== selfCol) { selfSay.style.color = col; selfCol = col; }
     selfSay.hidden = false;
-    selfSay.style.transform = `translate(${sx.toFixed(1)}px,${sy.toFixed(1)}px) translate(-50%,-100%)`;
+    selfSay.style.transform = `translate(${selfAt.x.toFixed(1)}px,${selfAt.y.toFixed(1)}px) translate(-50%,-100%)`;
   }
 
   /**

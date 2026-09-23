@@ -387,13 +387,14 @@ export function createModes(opts) {
     // drawn, and for the frame of the placement that is still where it was.
     const offSpot = Math.hypot(self.x - my.spot.x, self.z - my.spot.z);
     if (my.placed && offSpot < 0.5) my.onSpot = true;
-    if (my.placed && my.onSpot && (m.phase === 'lobby' || m.phase === 'grid') && driving && offSpot > JUMP_START) {
+    const gone = m.phase === 'grid' && m.go && t >= m.go;
+    if (my.placed && my.onSpot && (m.phase === 'lobby' || m.phase === 'grid') && !gone && driving && offSpot > JUMP_START) {
       if (opts.place) opts.place(my.spot.x, my.spot.z, my.spot.yaw);
       my.onSpot = false;
       my.prevValid = false;
       events.push({ k: 'jumpstart' });
     }
-    v.myTime = m.phase === 'run' ? (e.fin || Math.max(0, t - m.go)) : 0;
+    v.myTime = m.phase === 'run' || (m.go && t >= m.go) ? (e.fin || Math.max(0, t - m.go)) : 0;
     // The race line: chevrons from where you are, and the minimap line —
     // until you are home, when the road is yours again.
     if (!e.fin) {
@@ -531,10 +532,16 @@ export function createModes(opts) {
     update, onMode, onEmote,
     startRace, startTag, startCoins, again, join, leave, emote, racesNear,
     get canPlay() { return canPlay(); },
-    /** True while this car must sit on the grid (main.js holds the brakes). */
+    /**
+     * True while this car must sit on the grid (main.js holds the brakes).
+     * Let go on the synced clock at the room's GO, not when the room's "go"
+     * message lands: that arrives a one-way trip late, a different trip for
+     * every kid, and on WiFi the difference is a car length.
+     */
     get hold() {
       const m = g();
-      return !!(m && m.kind === 'race' && my.placed && (m.phase === 'lobby' || m.phase === 'grid') && entrantOf(m, me()));
+      if (!(m && m.kind === 'race' && my.placed && (m.phase === 'lobby' || m.phase === 'grid') && entrantOf(m, me()))) return false;
+      return !(m.phase === 'grid' && m.go && serverNow() >= m.go);
     },
     /** True while a game is steering this player: the challenge GPS stands down. */
     get owns() { return view.inGame && view.phase !== 'done'; },

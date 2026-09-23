@@ -580,8 +580,10 @@ try {
   const goWall = gameGo - A.net.serverNow() + sim.t;      // the room's GO, on the sim clock
   const spread = Math.max(...Object.values(released)) - Math.min(...Object.values(released));
   const offGo = Math.max(...Object.values(released).map((x) => Math.abs(x - goWall)));
-  check(spread < 60 && offGo < 80 && A.net.mode.phase === 'run',
-    'GO is the room\'s clock: every car is released within a frame or two of the others',
+  // Released on the synced clock, so the room's own "go" message may still be
+  // on its way: the game is at the grid or running, never anything else.
+  check(spread < 40 && offGo < (LIVE ? 40 : 20) && (A.net.mode.phase === 'grid' || A.net.mode.phase === 'run'),
+    'GO is the room\'s clock: every car is released at the same instant, not when the news arrives',
     `released within ${spread.toFixed(0)} ms of each other, ${offGo.toFixed(0)} ms of the room's GO; held ${Object.keys(released).map((n) => n + ' ' + ((released[n] - byName(n).holdTrail[0]) / 1000).toFixed(1) + ' s').join(', ')}`);
 
   // A late arrival: watches this one, is in the next.

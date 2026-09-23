@@ -3593,7 +3593,7 @@ export function createFleet(scene, opts = {}) {
   let livery = null;
   try { livery = heavy && heavy.farLiveryAtlas ? heavy.farLiveryAtlas() : null; }
   catch (err) { console.error('[open road] far liveries:', err); }
-  if (livery) farMat.defines = { FAR_LIVERY: '' };
+  if (livery) farMat.defines = { ...farMat.defines, FAR_LIVERY: '' };
   farMat.onBeforeCompile = (shader) => {
     patchFar(shader);
     if (livery) shader.uniforms.uLivery = { value: livery.texture };

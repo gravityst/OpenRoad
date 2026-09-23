@@ -232,6 +232,7 @@ for (const tier of ['high', 'medium', 'low']) {
   // clearance does not matter to either layer, so it ignores the roads.
   let frames = 0;
   let pSum = 0, pMax = 0, tSum = 0, tMax = 0, saturated = 0, bad = 0;
+  const pT = [], tT = [];
   const speed = 42, dt = 1 / 60;
   const x0 = Math.max(-w.half + 50, bx - 500), dir = bx > 0 ? 1 : 1;
   place(x0, bz);
@@ -241,15 +242,23 @@ for (const tier of ['high', 'medium', 'low']) {
     let t0 = now(); props.update(cam, dt); const tp = now() - t0;
     t0 = now(); terrain.update(cam, dt); const tt = now() - t0;
     pSum += tp; pMax = Math.max(pMax, tp); tSum += tt; tMax = Math.max(tMax, tt);
+    pT.push(tp); tT.push(tt);
     for (const m of props.group.children) {
       if (m.isInstancedMesh && m.count > 0 && m.count >= m.instanceMatrix.count) saturated++;
     }
     frames++;
   }
-  check('props: per-frame cost while driving', pSum / frames < 0.25 && pMax < 6,
-    `mean ${(pSum / frames).toFixed(3)} ms, worst ${pMax.toFixed(2)} ms over ${frames} frames (1 km) at 150 km/h`);
-  check('terrain + grass: per-frame cost while driving', tSum / frames < 4.5,
-    `mean ${(tSum / frames).toFixed(2)} ms (chunk streaming budget 3 ms + grass 0.5 ms), worst ${tMax.toFixed(1)} ms`);
+  // Steady state is judged on the 99th percentile, not the single worst frame:
+  // the worst is the first far-level refresh, a one-off while the JIT warms up
+  // (4.3 ms, against under 1.5 ms for every later one), and on a machine busy
+  // with anything else a max threshold turns the harness into a coin toss.
+  // The worst frame still has a ceiling, for a genuine regression.
+  pT.sort((a, b) => a - b); tT.sort((a, b) => a - b);
+  const p99 = (a) => a[Math.floor(a.length * 0.99)];
+  check('props: per-frame cost while driving', pSum / frames < 0.25 && p99(pT) < 1.5 && pMax < 15,
+    `mean ${(pSum / frames).toFixed(3)} ms, p99 ${p99(pT).toFixed(2)} ms, worst ${pMax.toFixed(2)} ms over ${frames} frames (1 km) at 150 km/h`);
+  check('terrain + grass: per-frame cost while driving', tSum / frames < 4.5 && p99(tT) < 6,
+    `mean ${(tSum / frames).toFixed(2)} ms, p99 ${p99(tT).toFixed(2)} ms (chunk streaming budget 3 ms + grass 0.5 ms), worst ${tMax.toFixed(1)} ms`);
   check('no field ever runs out of instance capacity', saturated === 0, `${saturated} field-frames at capacity`);
 
   // Every live tuft: on turf, off the road. Checked beside the road the

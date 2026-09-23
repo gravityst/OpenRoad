@@ -74,6 +74,18 @@
 // converging to it, so distant ground keeps a full-strength wobble that
 // scintillates as the car moves. Hence the explicit distance fade — it exists
 // for the normal term, and the albedo just comes along with it.
+//
+// BETWEEN THE DETAIL AND THE VERTICES there used to be nothing: the maps stop
+// at 3.7 m and the vertex colours at the vertex spacing, and a field is flat in
+// exactly the band between. A third map, `macro`, fills it per pixel at 310 m
+// and 53 m and is NOT faded — it is what keeps a far hillside from being one
+// colour. Slope-driven soil and rock are per pixel too. Land use (fields, the
+// forest floor, the river bed, worn verges and shoulders) is per vertex, from
+// layout.js, so the physics and the paint agree on where things are.
+//
+// ABOVE THE GROUND: instanced grass tufts near the camera (see "Grass tufts"),
+// coloured by this same palette so they melt into the ground they stand on;
+// and the sun's shadow map, received on the rings it covers.
 
 import * as THREE from 'three';
 import { fbm, valueNoise, clamp, lerp, smoothstep, tileNoise, tileFbm, tileCells } from '../world/noise.js';

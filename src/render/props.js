@@ -13,15 +13,15 @@
 //
 // WHAT THE COUNTRYSIDE COSTS, AND WHY IT IS AFFORDABLE
 //
-// The world now carries woodland rather than a sprinkling of lollipops: on the
-// order of a hundred thousand trees and bushes (layout.js). None of that is
-// drawn per object. Every species is three InstancedMeshes, one per level of
-// detail, and the levels hand over with a screen-door crossfade:
+// The world now carries woodland rather than a sprinkling of lollipops: about
+// 90,000 trees and 44,000 shrubs (layout.js), against 8,000 trees before. None
+// of that is drawn per object. Every species is three InstancedMeshes, one per
+// level of detail, and the levels hand over with a screen-door crossfade:
 //
 //   near   the full tree — every leaf card and branch (foliage.js). Out to
-//          64 m at 'high', which in the thickest forest is a few hundred trees.
-//   mid    a third of the cards, scaled up to cover the same canopy, on the
-//          major limbs only. Out to 175 m.
+//          50 m at 'high', which in the thickest forest is a couple of hundred.
+//   mid    about a quarter of the cards, scaled up to cover the same canopy,
+//          on the major limbs only. Out to 125 m.
 //   far    a two-triangle impostor billboard, rasterised from the near mesh at
 //          load. Out to 1 km, which is what puts forest on the far hillsides
 //          instead of bare green.
@@ -39,9 +39,10 @@
 // camera has moved its rebuild step; the stalest field refreshes each frame.
 //
 // Draw calls: 8 species x 3 levels, 2 rock levels x 3 shapes, stones, tree
-// contact shadows, lamps. ~38 in all, against ~10 before, for roughly thirty
-// times the vegetation. Triangle counts per tier are in the TIERS table and
-// measured by tools/naturecheck.mjs.
+// contact shadows, lamps — 35 fields, of which 14-40 draw in a given frame
+// (shadow pass included), against 6-11 before. Triangle budgets per tier are
+// in the TIERS table and measured by tools/naturecheck.mjs in the densest
+// block of woodland on the map.
 //
 // WHY THE LAMP POOLS ARE FAKE
 //
@@ -60,18 +61,19 @@ import {
 } from './foliage.js';
 
 // How far the camera may travel before a field's visible set is stale. Every
-// field builds with `radius + step`, which is what makes that safe; `step` is
-// this for the big fields and a fifth of the radius for the small ones. A frame
-// that has already overrun defers a refresh until the field is 1.5 steps stale
-// — deferred, not vetoed, or a machine below 20 fps would never rebuild and
-// would drive straight out of its own scenery.
+// field builds with `radius + step`, which is what makes that safe. `step` is
+// 12% of the field's radius, between 8 and 24 m — every metre of margin is
+// paid for all the way round the circle, and a near tree is eight hundred
+// triangles. This constant is the ceiling the instance buffers are sized for.
+// A frame that has already overrun defers a refresh until the field is 1.5
+// steps stale — deferred, not vetoed, or a machine below 20 fps would never
+// rebuild and would drive straight out of its own scenery.
 const REBUILD_STEP = 34;
 
-// One grid for everything. Per-cell culling lets an instance survive up to a
-// cell diagonal past the radius; at 32 m that is 45 m, which is 70% of the
-// near radius but only matters to the vertex shader, which collapses anything
-// outside its band anyway. The far fields reach a kilometre, and a coarser grid
-// would only save a loop over empty offsets.
+// One grid for everything. Cells wholly inside a field's circle are copied as
+// runs; cells straddling it are filtered instance by instance, so the grid
+// pitch costs refresh time rather than triangles. The far fields reach a
+// kilometre, and a coarser grid would only save a loop over empty offsets.
 const CELL = 32;
 
 // Distances per quality tier, in metres from the camera (horizontal). `near`,
@@ -749,15 +751,18 @@ export function createProps(world, ground, opts = {}) {
 
   /**
    * One InstancedMesh over a store. `maxRadius` sizes the buffers (the 'high'
-   * figure, so quality can change without reallocating); `radiusFor(tier)` is
-   * the live radius.
+   * figure, so quality can change without reallocating); applyTier() sets the
+   * live radius and step. The furthest a field ever reaches is its outer fade
+   * band plus the largest step, and both the capacity and the cell offsets are
+   * sized for that, with a cell to spare.
    */
   function makeField(store, spec) {
     if (!store) return null;
     const { name, geometry, material, maxRadius } = spec;
-    const cap = capacityFor(store, maxRadius * range + REBUILD_STEP + CELL);
+    const reach = maxRadius * range * (1 + BAND * 0.5) + REBUILD_STEP;
+    const cap = capacityFor(store, reach + CELL);
     if (cap === 0) return null;
-    const offs = offsetsFor(Math.ceil((maxRadius * range + REBUILD_STEP) / CELL) + 1);
+    const offs = offsetsFor(Math.ceil(reach / CELL) + 1);
 
     const mesh = new THREE.InstancedMesh(geometry, material, cap);
     mesh.name = name;

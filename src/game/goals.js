@@ -326,12 +326,20 @@ export function createGoals(opts) {
     }
   }
 
+  // Level for the current XP, recomputed only when the XP moves: levelFor()
+  // returns a fresh object, and this was being asked for every frame.
+  let lvXp = -1, lvNow = null;
+  function levelNow() {
+    if (progress.xp !== lvXp) { lvXp = progress.xp; lvNow = levelFor(lvXp); }
+    return lvNow;
+  }
+
   // The "next reward" line, rebuilt only when what it depends on moves.
   let nextKey = -1;
   function nextUi() {
     const d = progress.data;
     const key = progress.xp + d.owned.length * 1e8 + d.paints.length * 1e10;
-    const lv = levelFor(progress.xp);
+    const lv = levelNow();
     ui.next.frac = lv.frac;
     if (key === nextKey) return;
     nextKey = key;
@@ -979,7 +987,7 @@ export function createGoals(opts) {
     raceUi();
     zoneUi();
     ui.wallet.cash = progress.cash;
-    const lv = levelFor(progress.xp);
+    const lv = levelNow();
     ui.wallet.level = lv.level; ui.wallet.frac = lv.frac;
     const cs = skills.state, uc = ui.chain;
     uc.live = cs.live; uc.links = cs.links; uc.mult = cs.mult; uc.value = cs.value;

@@ -107,7 +107,7 @@ export function createObjectives(root, opts = {}) {
       </div>
       <div class="goal__hint"></div>
       <div class="goal__wallet"><i class="goal__coin" aria-hidden="true">${ICONS.token}</i><b class="goal__cash">$0</b><span class="goal__lv">LV 1</span><span class="goal__xp"><i></i></span></div>
-      <div class="goal__next"><span class="goal__nextLv"></span><i class="goal__nextIcon" aria-hidden="true"></i><span class="goal__nextText"></span></div>
+      <div class="goal__next"><u class="goal__nextBar" aria-hidden="true"><i></i></u><span class="goal__nextLv"></span><i class="goal__nextIcon" aria-hidden="true"></i><span class="goal__nextText"></span></div>
       <div class="goal__daily">
         <div class="goal__dHead"><i class="goal__dIcon" aria-hidden="true">${ICONS.daily}</i><b>DAILY</b><span class="goal__streak"></span></div>
         <div class="goal__dRows"></div>
@@ -116,6 +116,7 @@ export function createObjectives(root, opts = {}) {
     <div class="goal__chain" aria-live="off">
       <div class="goal__chainRow"><b class="goal__mult">×1.0</b><span class="goal__chainVal">0</span></div>
       <div class="goal__chainBar"><i></i></div>
+      <div class="goal__chainBest"></div>
       <div class="goal__chainEnd"><b></b><span></span></div>
       <div class="goal__feed"></div>
     </div>
@@ -150,8 +151,10 @@ export function createObjectives(root, opts = {}) {
     hint: q('.goal__hint'),
     cash: q('.goal__cash'), lv: q('.goal__lv'), xp: q('.goal__xp i'),
     next: q('.goal__next'), nextLv: q('.goal__nextLv'), nextIcon: q('.goal__nextIcon'), nextText: q('.goal__nextText'),
+    nextBar: q('.goal__nextBar i'),
     daily: q('.goal__daily'), dRows: q('.goal__dRows'), streak: q('.goal__streak'),
     chain: q('.goal__chain'), mult: q('.goal__mult'), chainVal: q('.goal__chainVal'), chainBar: q('.goal__chainBar i'),
+    chainBest: q('.goal__chainBest'),
     chainEnd: q('.goal__chainEnd'), chainEndB: q('.goal__chainEnd b'), chainEndS: q('.goal__chainEnd span'),
     feed: q('.goal__feed'),
     banner: q('.goal__banner'), bTitle: q('.goal__bTitle'), bSub: q('.goal__bSub'), bDetail: q('.goal__bDetail'),
@@ -180,8 +183,9 @@ export function createObjectives(root, opts = {}) {
     tenths: -1, cp: -1, cpTotal: -1, delta: 0, tMedal: -1, tTextMedal: -1, tTextTime: NaN,
     zScore: -1, zMedal: -1, zTextMedal: -1, zTextScore: NaN,
     hint: null, cash: -1, lv: -1, xp: -1,
-    nextLevel: -1, nextText: null, dailyStamp: -2,
+    nextLevel: -1, nextText: null, nextBar: -1, dailyStamp: -2,
     chainOn: null, chainMult: -1, chainTier: -1, chainVal: -1, chainBar: -1, chainHold: null,
+    chainBeat: null, chainBestShown: -1,
   };
   let visible = false;
   let freshT = 0;
@@ -289,6 +293,12 @@ export function createObjectives(root, opts = {}) {
         E.next.dataset.type = nx.type || '';
       }
     }
+    // The line is also the bar: it fills toward the reward it names.
+    if (nx) {
+      let f = Math.round((nx.frac || 0) * BAR_STEPS);
+      f = f < 0 ? 0 : f > BAR_STEPS ? BAR_STEPS : f;
+      if (f !== last.nextBar) { last.nextBar = f; E.nextBar.style.transform = BAR_STR[f]; }
+    }
 
     // ---- today's dailies ------------------------------------------------------
     const dv = ui.daily;
@@ -318,7 +328,20 @@ export function createObjectives(root, opts = {}) {
           if (up) { E.mult.classList.remove('is-up'); void E.mult.offsetWidth; E.mult.classList.add('is-up'); }
         }
         const v = ch.value | 0;
-        if (v !== last.chainVal) { last.chainVal = v; E.chainVal.textContent = v.toLocaleString('en'); }
+        if (v !== last.chainVal) {
+          last.chainVal = v;
+          E.chainVal.textContent = v.toLocaleString('en');
+          // The record to beat, under the bar — and the moment it is beaten,
+          // the chain says so while it is still running, which is exactly
+          // when a kid starts driving carefully.
+          const best = ch.best | 0;
+          const beat = best > 0 && v > best;
+          if (beat !== last.chainBeat || (!beat && best !== last.chainBestShown)) {
+            last.chainBeat = beat; last.chainBestShown = best;
+            E.chainBest.textContent = beat ? 'NEW BEST!' : best > 0 ? `BEST ${best.toLocaleString('en')}` : '';
+            E.chain.classList.toggle('is-record', beat);
+          }
+        }
         let b = Math.round(ch.timerFrac * BAR_STEPS);
         b = b < 0 ? 0 : b > BAR_STEPS ? BAR_STEPS : b;
         if (b !== last.chainBar) { last.chainBar = b; E.chainBar.style.transform = BAR_STR[b]; }
@@ -326,6 +349,8 @@ export function createObjectives(root, opts = {}) {
         if (hold !== last.chainHold) { last.chainHold = hold; E.chain.classList.toggle('is-hold', hold); }
       } else if (last.chainMult !== -1) {
         last.chainMult = -1; last.chainVal = -1; last.chainBar = -1; last.chainHold = null;
+        last.chainBeat = null; last.chainBestShown = -1;
+        E.chain.classList.remove('is-record');
       }
     }
   }
@@ -406,6 +431,15 @@ export function createObjectives(root, opts = {}) {
     if (!bannerOn) nextBanner();
   }
   function nextBanner() {
+    // The medal card is the moment when there is one; a level-up earned by
+    // the trophy that medal unlocked waits for the card to go, rather than
+    // landing on top of it (the two share the middle of the screen).
+    if (bannerQ.length && E.res.classList.contains('is-on')) {
+      bannerOn = true;
+      clearTimeout(bannerTimer);
+      bannerTimer = setTimeout(nextBanner, 400);
+      return;
+    }
     const b = bannerQ.shift();
     if (!b) { bannerOn = false; E.banner.classList.remove('is-on'); return; }
     bannerOn = true;

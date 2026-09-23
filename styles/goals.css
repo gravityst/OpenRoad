@@ -430,17 +430,34 @@
 /* ---- the next reward, under the wallet ---------------------------------------- */
 
 .goal__next {
+  position: relative;
   display: none;
   align-items: center;
   justify-content: flex-end;
   gap: calc(var(--g-u) * 0.4);
-  margin-top: calc(var(--g-u) * -0.3);
+  padding: calc(var(--g-u) * 0.3) calc(var(--g-u) * 0.7);
+  border-radius: 999px;
+  border: 1px solid var(--g-edge);
+  background: var(--g-panel);
   font-size: calc(var(--g-u) * 0.95);
   font-weight: 800;
   color: var(--g-dim);
   text-shadow: 0 1px calc(var(--g-u) * 0.4) rgba(0, 0, 0, 0.8);
+  overflow: hidden;
 }
 .goal__next.is-on { display: flex; }
+/* The pill fills toward the reward it names: the XP bar and the promise are
+   one thing to look at, not two. */
+.goal__nextBar { position: absolute; inset: 0; z-index: -1; display: block; }
+.goal__nextBar i {
+  display: block;
+  height: 100%;
+  transform-origin: left;
+  transform: scaleX(0);
+  background: linear-gradient(90deg, rgba(79, 216, 240, 0.12), rgba(79, 216, 240, 0.34));
+  transition: transform 400ms ease;
+}
+.goal__next { isolation: isolate; }
 .goal__nextLv { color: var(--g-gps); letter-spacing: 0.06em; }
 .goal__nextLv::after { content: " \25B8"; color: var(--g-dim); }
 .goal__nextIcon { width: calc(var(--g-u) * 1.2); height: calc(var(--g-u) * 1.2); color: var(--g-token); }
@@ -564,6 +581,19 @@
 .goal__chainBar i { display: block; height: 100%; background: var(--tier); transform-origin: left; transform: scaleX(0); }
 .goal__chain.is-live .goal__chainRow { opacity: 1; transform: none; }
 .goal__chain.is-live .goal__chainBar { opacity: 1; }
+.goal__chainBest {
+  display: none;
+  font-family: var(--g-mono);
+  font-size: calc(var(--g-u) * 0.8);
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: var(--g-dim);
+  text-shadow: 0 1px calc(var(--g-u) * 0.4) rgba(0, 0, 0, 0.9);
+}
+.goal__chainBest:empty { display: none !important; }
+.goal__chain.is-live .goal__chainBest { display: block; }
+.goal__chain.is-record .goal__chainBest { color: #ffe08a; animation: goal-blink 0.9s ease-in-out infinite; }
+.goal__chain.is-record .goal__chainRow { box-shadow: var(--g-shadow), 0 0 calc(var(--g-u) * 2) rgba(255, 210, 63, 0.55); }
 /* A skill in progress pauses the bank timer; the bar says so by breathing. */
 .goal__chain.is-hold .goal__chainBar i { animation: goal-hold 0.8s ease-in-out infinite; }
 @keyframes goal-hold { 50% { filter: brightness(1.8); } }
@@ -1053,4 +1083,36 @@
 }
 @media (max-width: 640px), (max-height: 560px) {
   .or-career { display: none; }
+}
+
+/* With the next-reward pill showing the XP, the wallet's own little bar is a
+   second copy of the same number. */
+.goal__col:has(.goal__next.is-on) .goal__xp { display: none; }
+
+/* ---- the pause card, with today's dailies in it -----------------------------------
+ * The dailies made the card taller than a 768-pixel laptop screen once the
+ * Trophies button joined the list (measured at 800x500: title and "Quit to
+ * title" both off screen). On anything wide enough the dailies sit beside the
+ * buttons instead of above them; on a short screen the buttons get tighter,
+ * and on a very short one the dailies go — the HUD shows them while driving. */
+@media (min-width: 700px) {
+  .or-pause .or-card:has(.or-pause-daily:not([hidden])) {
+    width: min(700px, 100%);
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    column-gap: 22px;
+    align-items: start;
+  }
+  .or-pause .or-card:has(.or-pause-daily:not([hidden])) > .or-eyebrow,
+  .or-pause .or-card:has(.or-pause-daily:not([hidden])) > .or-card-title,
+  .or-pause .or-card:has(.or-pause-daily:not([hidden])) > .or-pause-progress { grid-column: 1 / -1; }
+  .or-pause .or-pause-daily { margin: 0; }
+}
+@media (max-height: 640px) {
+  .or-pause .or-card-title { margin: 0.1em 0 0.5em; font-size: 1.6rem; }
+  .or-pause .or-menu-list { gap: 6px; }
+  .or-pause .or-menu-list .or-btn { min-height: 36px; }
+}
+@media (max-height: 460px) {
+  .or-pause-daily { display: none !important; }
 }

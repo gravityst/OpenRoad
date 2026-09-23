@@ -435,6 +435,7 @@ export function createMenus(root, opts = {}) {
       <div class="or-groups"></div>
       <footer class="or-settings-foot">
         <button class="or-btn or-btn--quiet" data-act="reset">Restore defaults</button>
+        <button class="or-btn or-btn--quiet" data-act="reset-progress" hidden>Start over</button>
         <button class="or-btn or-btn--primary" data-act="back" data-autofocus>Done</button>
       </footer>
     </section>
@@ -1306,6 +1307,8 @@ export function createMenus(root, opts = {}) {
     refreshGoals();
   }
   function refreshGoals() {
+    const rp = ui.querySelector('[data-act="reset-progress"]');
+    if (rp) rp.hidden = !goals;
     renderTitleGoals();
     renderPauseGoals();
     if (current === 'map') { renderMapGoals(); drawMap(); }
@@ -1421,6 +1424,20 @@ export function createMenus(root, opts = {}) {
     resume,
     quit: () => { show('title'); emit('quit-to-title'); },
     buy,
+    // Separate from "Restore defaults" on purpose, and behind a confirm: this
+    // one throws away medals and cars a kid may have spent an afternoon on.
+    'reset-progress': () => {
+      if (!goals) return;
+      const ok = typeof window.confirm !== 'function' ||
+        window.confirm('Start over? All medals, cash and bought cars will be lost.');
+      if (!ok) return;
+      goals.progress.reset();
+      if (goals.resync) goals.resync();
+      const i = cars.findIndex((c) => c.id === STARTER);
+      drivingId = STARTER;
+      if (i >= 0) select(i);
+      refreshGoals();
+    },
     'goal-restart': () => { hide(); emit('goal-restart'); },
     'goal-abandon': () => { hide(); emit('goal-abandon'); },
     reset: () => {

@@ -549,6 +549,7 @@ async function boot() {
     menus.on('goal-restart', () => { goals.restart(); startDriving(); });
     menus.on('goal-abandon', () => { goals.abandon(); startDriving(); });
     menus.on('teleport', () => goals.abandon());
+    menus.on('quit-to-title', () => goals.abandon());
   }
 
   // ---- state --------------------------------------------------------------

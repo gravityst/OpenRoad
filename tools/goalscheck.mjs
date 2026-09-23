@@ -433,6 +433,27 @@ console.log('\n-- onboarding and the GPS --');
   check('a short drive away', !!r && r.length < 400, r ? `${r.length.toFixed(0)} m of road to the start ring` : 'no route');
   g3.dispose();
 
+  // Starting over (settings -> Start over) brings the world back, not just the save.
+  {
+    const c5 = createVehicle({ ground, spec: specFor('kaida2') });
+    const g5 = createGoals({ world, ground, car: c5, cars: CARS, storage: memoryStorage(), sfx: false, drift: { state: {} } });
+    const rk = g5.list.find((c) => c.rookie);
+    g5.progress.takeToken(0);
+    g5.progress.record(rk, rk.targets[MEDAL_GOLD] - 1, MEDAL_GOLD);
+    g5.progress.setFlag('rookieDone');
+    g5.progress.buy('haulier');
+    g5.resync();                // progress written behind the runtime's back
+    g5.update(1 / 60, { driving: true });
+    const before = g5.nav.tokens.taken[0] === 1 && g5.target !== rk;
+    g5.progress.reset();
+    g5.resync();
+    const m = g5.nav.markers.find((k) => k.id === rk.id);
+    check('starting over brings the tokens and the rookie race back',
+      before && g5.nav.tokens.taken[0] === 0 && g5.target === rk && m.medal === 0 && g5.progress.cash === 0 && !g5.progress.owns('haulier'),
+      `token back ${g5.nav.tokens.taken[0] === 0}, next up "${g5.target && g5.target.name}", medal ring cleared ${m.medal === 0}, cash $${g5.progress.cash}`);
+    g5.dispose();
+  }
+
   // From 40 places on the map to every challenge: every point on a road.
   let routes = 0, bad = 0, worstOff = 0, endMiss = 0;
   const prng = (i) => Math.abs(Math.sin(i * 12.9898) * 43758.5453) % 1;
@@ -459,6 +480,21 @@ console.log('\n-- onboarding and the GPS --');
   check('the GPS finds a road route to everything, from anywhere', bad === 0, `${routes} routes planned, ${bad} failed`);
   check('every GPS route runs on roads', worstOff < 0.01, `worst point ${worstOff.toFixed(2)} m off the carriageway`);
   check('every GPS route ends at its challenge', endMiss === 0, `${endMiss} routes end more than 70 m from where they were going`);
+
+  // The distance on the banner is to the challenge, not to the end of the
+  // GPS line (which runs on through a drift zone, past a camera, over a ramp).
+  let distBad = 0, distWorst = '';
+  for (const c of g4.list) {
+    g4.travelTo(c.id);
+    c3.speed = 20;
+    g4.update(1 / 60, { driving: true });
+    const goal = c.kind === 'race' ? c.start : c.gate;
+    const crow = Math.hypot(goal.x - c3.x, goal.z - c3.z);
+    const shown = g4.ui.objective.dist;
+    if (g4.activeRace) { g4.abandon(); continue; }
+    if (!(shown >= crow - 5 && shown <= crow * 2.5 + 40)) { distBad++; distWorst = `${c.name}: banner ${shown.toFixed(0)} m, ${crow.toFixed(0)} m as the crow flies`; }
+  }
+  check('the banner distance is to the challenge itself', distBad === 0, distBad ? distWorst : `all ${g4.list.length} within road-distance bounds of the real gap`);
 
   // Cost per frame, driving about with a target set.
   c3.reset(list[0].start.x, list[0].start.z, 0);

@@ -109,7 +109,15 @@ export function createGoals(opts) {
   for (const c of list) {
     // Every non-race challenge has a lead-in the GPS must follow the right way
     // round: a speed trap approached from the wrong end has no run-up.
-    if (c.kind !== 'race') c.lead = leadFrom(c.approach);
+    if (c.kind !== 'race') {
+      c.lead = leadFrom(c.approach);
+      // The lead-in runs on past the trigger (through a drift zone to its end,
+      // 60 m past a camera, over a ramp), so "how far to go" is measured to
+      // the trigger, not to the end of the line: a drift zone 20 m ahead read
+      // as 330 m on the first try.
+      const at = c.lead.project(c.gate.x, c.gate.z, -1, 0, {});
+      c.overrun = Math.max(0, c.lead.length - at.d);
+    } else c.overrun = 0;
     const at = graph.locate(c.start.x, c.start.z, 60, null, {});
     c.startLoc = at ? { edge: at.edge, s: at.s } : null;
   }
@@ -126,6 +134,7 @@ export function createGoals(opts) {
     try {
       view = opts.createView(opts.scene, { baseHeight, heightAt: rampGround.heightAt, quality: settings.quality || 'medium' });
       view.build({ challenges: list, tokens, ramps, taken: tokenTaken() });
+      for (const c of list) { const m = progress.medalOf(c.id); if (m) view.setMedal(c.id, m); }
     } catch (err) { console.error('[goals] world markers unavailable:', err); view = null; }
   }
   let overlay = null;
@@ -629,7 +638,9 @@ export function createGoals(opts) {
     nav.hint = projScratch.i;
     nav.d = projScratch.d;
     nav.off = projScratch.dist > OFF_ROUTE ? nav.off + dt : 0;
-    nav.dist = Math.max(0, r.length - nav.d);
+    // Distance to the challenge itself — while racing, to the finish.
+    const over = routeC ? 0 : (nav.planFor && nav.planFor.overrun) || 0;
+    nav.dist = Math.max(0, r.length - nav.d - over);
 
     vs.route = r; vs.routeD = nav.d; vs.routeEnd = r.length;
     hudNav.route = r; hudNav.from = nav.hint;
@@ -859,6 +870,21 @@ export function createGoals(opts) {
   }
   if (typeof window !== 'undefined') window.addEventListener('keydown', onKey);
 
+  /**
+   * Re-read everything derived from progress — after a reset from the
+   * settings screen the tokens come back, the rings lose their medal colours
+   * and the rookie race is next again.
+   */
+  function resync() {
+    for (let i = 0; i < tokens.length; i++) taken[i] = progress.hasToken(i) ? 1 : 0;
+    for (const m of markers) m.medal = progress.medalOf(m.id);
+    if (view && view.setMedal) for (const c of list) view.setMedal(c.id, progress.medalOf(c.id));
+    abandonRace();
+    endZone(false);
+    manualTarget = null;
+    setTarget(recommend(null), false);
+  }
+
   function dispose() {
     if (typeof window !== 'undefined') window.removeEventListener('keydown', onKey);
     rampGround.disable();
@@ -880,7 +906,7 @@ export function createGoals(opts) {
     update, preStep, step, placeInitial, onDrive, respawn, travelTo, restart,
     abandon: () => { abandonRace('Race abandoned'); endZone(false); lastResult = null; if (overlay) overlay.hideResult(); },
     setTarget: (id) => { const c = byId[id]; if (c) setTarget(c, true); return !!c; },
-    cycleTarget, recommend: () => recommend(null),
+    cycleTarget, resync, recommend: () => recommend(null),
     /** For the harness: the internals it needs to drive a race from code. */
     _race: race, _zone: zone,
     dispose,

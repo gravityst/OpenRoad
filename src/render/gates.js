@@ -754,9 +754,11 @@ export function createGoalGates(scene, opts = {}) {
   function flashTrap(id) { const f = trapFlash.get(id); if (f) f.t = 0.25; }
   function setMedal(id, medal) {
     const rec = byId.get(id);
-    if (!rec || !medal) return;
-    rec.medal = medal;
-    rec.ringMat.color.copy(MEDAL_COL[medal]).multiplyScalar(2.4);
+    if (!rec) return;
+    rec.medal = medal || 0;
+    // A won challenge's ring takes its medal's colour; an unwon one keeps its kind's.
+    if (medal) rec.ringMat.color.copy(MEDAL_COL[medal]).multiplyScalar(2.4);
+    else rec.ringMat.color.copy(COL[rec.kind]).multiplyScalar(2.6);
   }
 
   function dispose() {

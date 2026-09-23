@@ -59,10 +59,25 @@
 //     windscreen) and one in `glassDark` (the backlight);
 //   * the side glass running from the windscreen base to the rear glass base,
 //     because the cabin's extent is MEASURED off it;
-//   * mirrors living in `plastic`, outboard of 0.8 of the half width;
+//   * mirrors living in `plastic`, outboard of 0.8 of the half width, and
+//     nothing else black there — which is why low detail's window frames are
+//     body colour rather than folded-in chrome;
+//   * `chrome` holding something besides tailpipes (the badges), because a
+//     bucket that is all one kind of part is never split, and then the
+//     exhaust can never come off;
 //   * the sports spoiler being separate paint components above the deck;
 //   * wheels whose first child is the tyre.
 // tools/carscheck.mjs asserts every one of those for every car in the catalogue.
+//
+// WHAT IT COSTS
+//
+// Per car at player detail: 26 draw calls at rest (the first version: 24), 11
+// shadow casters (12), 21-23k triangles (1.6k). At traffic detail ('low'): 12
+// calls (12), 6 casters (6), 4.8-5.8k triangles (1.4k). Past ~35 m a car's
+// cabin, grille infill and calipers are dropped by a THREE.LOD switch, which is
+// why a street full of traffic now costs FEWER draw calls than before. The
+// wheel-blur discs are drawn only while the wheels are turning fast. Geometry
+// is built once per model and shared by every car of that model.
 
 import * as THREE from 'three';
 
@@ -1673,7 +1688,7 @@ function topY(d, z, x) {
  * own normal, with a gentle dome. Lamp lenses, grilles and the plates' mounts
  * are all this.
  */
-function projectedPatch(d, corners, nu, nv, face, { lift = 0.004, dome = 0.004, clampZ = null } = {}) {
+function projectedPatch(d, corners, nu, nv, face, { lift = 0.004, dome = 0.004 } = {}) {
   const R = nv + 1, C = nu + 1;
   const P = new Float64Array(R * C * 3);
   const [[x0, y0], [x1, y1], [x2, y2], [x3, y3]] = corners;       // BL, BR, TR, TL
@@ -1682,8 +1697,7 @@ function projectedPatch(d, corners, nu, nv, face, { lift = 0.004, dome = 0.004, 
     for (let i = 0; i < C; i++) {
       const u = i / nu;
       const x = lerp(lerp(x0, x1, u), lerp(x3, x2, u), v);
-      const [y, z0] = projectEnd(d, face, x, lerp(lerp(y0, y1, u), lerp(y3, y2, u), v));
-      const z = clampZ ? clampZ(z0) : z0;
+      const [y, z] = projectEnd(d, face, x, lerp(lerp(y0, y1, u), lerp(y3, y2, u), v));
       const o = (j * C + i) * 3;
       P[o] = x; P[o + 1] = y; P[o + 2] = z;
     }

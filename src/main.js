@@ -22,11 +22,19 @@ import { CARS, CAR_BY_ID, STARTER, specFor } from './vehicles/catalog.js';
 // layer(): there is nothing in it that can fail at load time.
 import { roomUrl } from './net/config.js';
 import { loadSettings, saveSettings, suggestName } from './game/settings.js';
+// Pure arithmetic, no three.js and no DOM, so imported directly for the same
+// reason as roomUrl above. See the render-interpolation note in the loop.
+import { createPoseBuffer, settleAccumulator, blendFactor, springAngleStep, followLinear } from './core/interp.js';
 
 const BUILD = '2026-08-22';
 const PHYS_HZ = 120;
 const PHYS_DT = 1 / PHYS_HZ;
-const MAX_SUBSTEPS = 6;
+// Enough steps to cover the 0.1 s the frame clamp allows, so a machine running
+// at 10-20 fps still runs the game at real speed. At 6 (50 ms) a 15 fps frame
+// lost a quarter of its time, and the accumulator was zeroed as well, so the
+// car drove in slow motion AND twitched. A whole step (car, collisions, goals)
+// measured 9-18 us on an M2, so even ten times slower, 12 of them are cheap.
+const MAX_SUBSTEPS = 12;
 
 // ---------------------------------------------------------------------------
 // Boot plumbing
@@ -702,6 +710,16 @@ async function boot() {
   const camVel = new THREE.Vector3();
   const tmp = new THREE.Vector3();
   const suspension = [0, 0, 0, 0];
+  // RENDER INTERPOLATION. The physics runs at a fixed 120 Hz and the car used
+  // to be drawn wherever the last step left it, which judders at any frame
+  // rate that is not a multiple of 60: a 144 Hz frame gets 1 step or 0, a
+  // 45 fps frame 2 or 3. The pose before the last step is kept as well, and
+  // the car, its wheels and the camera are drawn `alpha` of the way between
+  // the two, alpha being the time the physics still owes as a fraction of a
+  // step. Everything visual reads `pose`; physics, collisions, the network
+  // and the HUD keep reading `car`. See src/core/interp.js.
+  const carPose = createPoseBuffer();
+  let pose = carPose.view;
   // Inspection orbit. Kept out of the camera-mode list because it is a game
   // STATE, not a view: the car is parked and the physics is idle while it runs.
   const orbit = { yaw: 0.7, pitch: 0.28, dist: 7.5, dragging: false, px: 0, py: 0 };
@@ -864,6 +882,7 @@ async function boot() {
     accumulator += dt;
     let steps = 0;
     while (accumulator >= PHYS_DT && steps < MAX_SUBSTEPS) {
+      carPose.capture(car);
       // The jump ramps exist in the ground only for the length of car.step():
       // preStep() puts them in, step() fires the lips and takes them out.
       if (goals) goals.preStep();
@@ -897,7 +916,10 @@ async function boot() {
       accumulator -= PHYS_DT;
       steps++;
     }
-    if (steps === MAX_SUBSTEPS) accumulator = 0;   // never let the debt spiral
+    // Never let the debt spiral — but keep the fraction, or the blend below
+    // jumps back to zero and the car twitches backwards.
+    accumulator = settleAccumulator(accumulator, steps, MAX_SUBSTEPS, PHYS_DT);
+    pose = carPose.blend(car, blendFactor(accumulator, PHYS_DT));
 
     // ---- time of day ----
     if (settings.timeFlow !== false && driving) {
@@ -969,16 +991,17 @@ async function boot() {
     if (goals) { goalsFrame.driving = driving; goals.update(dt, goalsFrame); hudState.nav = goals.nav; }
 
     // ---- car visuals ----
-    carRoot.position.set(car.x, car.y, car.z);
-    carRoot.rotation.set(0, car.yaw, 0);
+    // From the interpolated pose, not the car: see carPose above.
+    carRoot.position.set(pose.x, pose.y, pose.z);
+    carRoot.rotation.set(0, pose.yaw, 0);
     // Pitch and roll are applied inside the yaw frame, which is what makes a car
     // lean INTO the camber rather than about the world axes.
-    carRoot.rotateX(car.pitch);
-    carRoot.rotateZ(-car.roll);
+    carRoot.rotateX(pose.pitch);
+    carRoot.rotateZ(-pose.roll);
     if (carModel) {
-      carModel.setSteer(car.steerAngle);
-      carModel.setWheelSpin(car.wheels[0].spin);
-      for (let i = 0; i < 4; i++) suspension[i] = car.wheels[i].comp;
+      carModel.setSteer(pose.steer);
+      carModel.setWheelSpin(pose.spin);
+      for (let i = 0; i < 4; i++) suspension[i] = pose.comp[i];
       carModel.setSuspension(suspension);
       carModel.setBrakeLights(Math.max(input.brake, input.handbrake));
       carModel.setHeadlights(headlights || night > 0.35);
@@ -989,6 +1012,13 @@ async function boot() {
 
     // ---- tyre effects ----
     if (driving) emitTyreEffects(dt);
+
+    // ---- camera ----
+    // Straight after the car is posed and before anything projects through the
+    // camera. It used to run after the network block, so the name tags were
+    // placed with LAST frame's camera and slid about under their cars by a
+    // frame of camera motion — 0.75 m of it at 160 km/h.
+    updateCamera(dt, driving);
 
     // ---- traffic ----
     // Consume the shove a collision gave each traffic car. traffic.js steers
@@ -1041,9 +1071,6 @@ async function boot() {
     debris.update(dt, camera.position);
     fxCars[0] = car;
     damageFx.update(dt, fxCars, camera.position);
-
-    // ---- camera ----
-    updateCamera(dt, driving);
 
     // ---- streaming ----
     terrain.update(camera.position, dt);
@@ -1115,14 +1142,16 @@ async function boot() {
 
   const skidCooldown = [0, 0, 0, 0];
   function emitTyreEffects(dt) {
-    const fx = -Math.sin(car.yaw), fz = -Math.cos(car.yaw);
-    const rx = Math.cos(car.yaw), rz = -Math.sin(car.yaw);
+    // Laid where the wheels are DRAWN (the interpolated pose), or a skid mark
+    // starts up to a step ahead of the tyre that is supposed to be making it.
+    const fx = -Math.sin(pose.yaw), fz = -Math.cos(pose.yaw);
+    const rx = Math.cos(pose.yaw), rz = -Math.sin(pose.yaw);
     const hw = car.spec.track / 2, hb = car.spec.wheelbase / 2;
     for (let i = 0; i < 4; i++) {
       const ox = i % 2 === 0 ? -hw : hw;
       const oz = i < 2 ? hb : -hb;
-      const wx = car.x + rx * ox + fx * oz;
-      const wz = car.z + rz * ox + fz * oz;
+      const wx = pose.x + rx * ox + fx * oz;
+      const wz = pose.z + rz * ox + fz * oz;
       const w = car.wheels[i];
       const surf = ground.SURFACES[w.surface];
       if (!surf) continue;
@@ -1166,16 +1195,16 @@ async function boot() {
           // puts the whole cloud behind the rear bumper, where a rooster tail
           // belongs, and costs nothing in volume.
           const back = 1.1 + Math.min(car.speed, 32) * 0.075;
-          particles.emitDust(wx - fx * back, car.y - car.spec.rideHeight + 0.02, wz - fz * back,
+          particles.emitDust(wx - fx * back, pose.y - car.spec.rideHeight + 0.02, wz - fz * back,
             surf.dust * rear * (0.85 + Math.min(car.speed, 40) * 0.060) * slide,
             surf.colour);
           skidCooldown[i] = 0.013;
         }
       } else if (working && car.speed > 4) {
-        particles.emitSmoke(wx, car.y - car.spec.rideHeight + 0.05, wz, car.slipping * 2.4);
+        particles.emitSmoke(wx, pose.y - car.spec.rideHeight + 0.05, wz, car.slipping * 2.4);
         skidCooldown[i] -= dt;
         if (skidCooldown[i] <= 0) {
-          particles.addSkid(wx, car.y - car.spec.rideHeight + 0.02, wz, car.yaw, car.slipping);
+          particles.addSkid(wx, pose.y - car.spec.rideHeight + 0.02, wz, pose.yaw, car.slipping);
           skidCooldown[i] = 0.02;
         }
       }
@@ -1406,17 +1435,21 @@ async function boot() {
   // State for the chase camera, kept between frames on one object so the frame
   // path allocates nothing.
   const chase = {
-    yaw: 0, yawVel: 0,          // azimuth the camera sits behind, and its rate
+    yaw: 0,                     // azimuth the camera sits behind
+    spring: { x: 0, v: 0 },     // ...and its spring state: angle, rate
+    wantYaw: 0,                 // the azimuth asked for last frame
     dist: 6, height: 2.2,       // smoothed framing
     baseY: 0,                   // car height with the suspension's bounce filtered out
+    carY: 0,                    // the car height baseY was chasing last frame
+    lookPrimed: false,          // camLookPrev holds last frame's look target
     shakeT: 0,
     live: false,                // false = snap next frame (first frame, respawn)
   };
+  const camLookPrev = new THREE.Vector3();
   const hoodEye = new THREE.Vector3();
   const hoodAim = new THREE.Vector3();
   const carUp = new THREE.Vector3();
   const WORLD_UP = new THREE.Vector3(0, 1, 0);
-  const wrapPi = (a) => a - Math.round(a / (Math.PI * 2)) * Math.PI * 2;
 
   /** Small smooth wobble, -1..1. Sines, not Math.random: noise at frame rate
    *  reads as a broken camera, a few hertz reads as a road. */
@@ -1471,8 +1504,11 @@ async function boot() {
 
   function updateCamera(dt, driving) {
     const m = MODES[cameraMode];
-    const fx = -Math.sin(car.yaw), fz = -Math.cos(car.yaw);
-    const rx = Math.cos(car.yaw), rz = -Math.sin(car.yaw);
+    // Where the car is DRAWN, not where the physics has got to: a camera hung
+    // off the simulated car shakes by the difference every frame.
+    const p = pose;
+    const fx = -Math.sin(p.yaw), fz = -Math.cos(p.yaw);
+    const rx = Math.cos(p.yaw), rz = -Math.sin(p.yaw);
     const v = car.speed;
     const speedT = Math.min(1, v / 55);
 
@@ -1484,15 +1520,15 @@ async function boot() {
       if (controls.state.brake) orbit.pitch = clampNum(orbit.pitch - dt * 0.9, -0.25, 1.15);
       const cp = Math.cos(orbit.pitch), sp = Math.sin(orbit.pitch);
       camWanted.set(
-        car.x + Math.sin(orbit.yaw) * orbit.dist * cp,
-        car.y + 0.55 + orbit.dist * sp,
-        car.z + Math.cos(orbit.yaw) * orbit.dist * cp,
+        p.x + Math.sin(orbit.yaw) * orbit.dist * cp,
+        p.y + 0.55 + orbit.dist * sp,
+        p.z + Math.cos(orbit.yaw) * orbit.dist * cp,
       );
       // Never underground, however far the player drags the camera down.
       const gy = ground.heightAt(camWanted.x, camWanted.z) + 0.45;
       if (camWanted.y < gy) camWanted.y = gy;
       camera.position.lerp(camWanted, 1 - Math.exp(-14 * dt));
-      camLook.lerp(camTarget.set(car.x, car.y + 0.45, car.z), 1 - Math.exp(-14 * dt));
+      camLook.lerp(camTarget.set(p.x, p.y + 0.45, p.z), 1 - Math.exp(-14 * dt));
       camera.up.set(0, 1, 0);
       camera.lookAt(camLook);
       setFov(38, 5, dt);
@@ -1504,8 +1540,8 @@ async function boot() {
       // A slow orbit of the car for the menus, so the front end is never a
       // static screenshot.
       const t = performance.now() * 0.00013;
-      camWanted.set(car.x + Math.cos(t) * 11, car.y + 3.4, car.z + Math.sin(t) * 11);
-      camLook.set(car.x, car.y + 0.7, car.z);
+      camWanted.set(p.x + Math.cos(t) * 11, p.y + 3.4, p.z + Math.sin(t) * 11);
+      camLook.set(p.x, p.y + 0.7, p.z);
       camera.position.lerp(camWanted, 1 - Math.exp(-3 * dt));
       camera.up.set(0, 1, 0);
       camera.lookAt(camLook);
@@ -1539,9 +1575,9 @@ async function boot() {
 
     if (m === 'orbit') {
       const t = performance.now() * 0.0002;
-      camWanted.set(car.x + Math.cos(t) * 14, car.y + 5.5, car.z + Math.sin(t) * 14);
+      camWanted.set(p.x + Math.cos(t) * 14, p.y + 5.5, p.z + Math.sin(t) * 14);
       camera.position.lerp(camWanted, 1 - Math.exp(-2.4 * dt));
-      camLook.set(car.x, car.y + 0.8, car.z);
+      camLook.set(p.x, p.y + 0.8, p.z);
       camera.up.set(0, 1, 0);
       camera.lookAt(camLook);
       setFov(60, 3, dt);
@@ -1568,36 +1604,41 @@ async function boot() {
     // matters. But a third of the body slip is let through, so in a slide the
     // camera eases round to show where the car is actually going.
     const slip = clampNum(car.bodySlip || 0, -0.6, 0.6);
-    let wantYaw = car.yaw - slip * 0.35 + (lookBack ? Math.PI : 0);
+    let wantYaw = p.yaw - slip * 0.35 + (lookBack ? Math.PI : 0);
 
-    const jumped = Math.hypot(camera.position.x - car.x, camera.position.z - car.z) > 60;
+    const jumped = Math.hypot(camera.position.x - p.x, camera.position.z - p.z) > 60;
     if (!chase.live || jumped) {
       // First frame, a respawn, or a camera mode change: cut, do not swing.
-      chase.yaw = wantYaw; chase.yawVel = 0;
-      chase.dist = wantDist; chase.height = wantHigh; chase.baseY = car.y;
+      chase.spring.x = wantYaw; chase.spring.v = 0; chase.wantYaw = wantYaw;
+      chase.dist = wantDist; chase.height = wantHigh; chase.baseY = p.y; chase.carY = p.y;
+      chase.lookPrimed = false;
       chase.live = true;
     }
     // A critically damped angular spring. It swings round the car instead of
     // cutting the corner through it, and lags just enough to show the turn.
+    // Solved exactly for the frame rather than stepped (see core/interp.js):
+    // the stepped version trailed a steady bend by 0.1734-0.1750 rad with dt
+    // jittering between 1/144 and 1/40, so the whole view shook by the spread.
     const w = lookBack ? 18 : 6.5;
-    const err = wrapPi(wantYaw - chase.yaw);
-    chase.yawVel += (err * w * w - chase.yawVel * 2 * w) * dt;
-    chase.yaw = wrapPi(chase.yaw + chase.yawVel * dt);
+    springAngleStep(chase.spring, chase.wantYaw, wantYaw, w, dt);
+    chase.wantYaw = wantYaw;
+    chase.yaw = chase.spring.x;
     chase.dist += (wantDist - chase.dist) * (1 - Math.exp(-2.5 * dt));
     chase.height += (wantHigh - chase.height) * (1 - Math.exp(-2.5 * dt));
     // The suspension bounces the car at several hertz; the camera should not.
-    chase.baseY += (car.y - chase.baseY) * (1 - Math.exp(-7 * dt));
+    chase.baseY = followLinear(chase.baseY, chase.carY, p.y, 7, dt);
+    chase.carY = p.y;
 
     const bx = -Math.sin(chase.yaw), bz = -Math.cos(chase.yaw);
-    camWanted.set(car.x - bx * chase.dist, chase.baseY + chase.height, car.z - bz * chase.dist);
+    camWanted.set(p.x - bx * chase.dist, chase.baseY + chase.height, p.z - bz * chase.dist);
 
     // Never inside the terrain — neither the camera itself nor the line from
     // it to the car. A chase camera on a hillside otherwise ends up looking at
     // the back of a slope, or from under it.
     const ground0 = ground.heightAt(camWanted.x, camWanted.z) + 0.55;
     if (camWanted.y < ground0) camWanted.y = ground0;
-    const mx = (camWanted.x + car.x) * 0.5, mz = (camWanted.z + car.z) * 0.5;
-    const my = (camWanted.y + car.y + 0.9) * 0.5;
+    const mx = (camWanted.x + p.x) * 0.5, mz = (camWanted.z + p.z) * 0.5;
+    const my = (camWanted.y + p.y + 0.9) * 0.5;
     const groundMid = ground.heightAt(mx, mz) + 0.4;
     if (my < groundMid) camWanted.y += (groundMid - my) * 2;
     camera.position.copy(camWanted);
@@ -1613,14 +1654,23 @@ async function boot() {
     const reach = Math.abs(lookDist) * 0.25;
     const bend = clampNum(car.latG * 9.81 * lookDist * lookDist / (2 * Math.max(36, v * v)), -reach, reach);
     camTarget.set(
-      car.x + fx * lookDist + rx * bend,
+      p.x + fx * lookDist + rx * bend,
       chase.baseY + 0.75 + tall * 0.6,
-      car.z + fz * lookDist + rz * bend,
+      p.z + fz * lookDist + rz * bend,
     );
-    camLook.lerp(camTarget, 1 - Math.exp(-9 * dt));
+    // Same lag as the old lerp, exact at any frame rate: that one trailed a
+    // point moving at 45 m/s by 4.57-4.69 m as dt jittered, a 12 cm shake.
+    // Primed on a cut with the target standing still, so the view still eases
+    // from the menu orbit onto the road rather than snapping.
+    if (!chase.lookPrimed) { camLookPrev.copy(camTarget); chase.lookPrimed = true; }
+    camLook.set(
+      followLinear(camLook.x, camLookPrev.x, camTarget.x, 9, dt),
+      followLinear(camLook.y, camLookPrev.y, camTarget.y, 9, dt),
+      followLinear(camLook.z, camLookPrev.z, camTarget.z, 9, dt));
+    camLookPrev.copy(camTarget);
     camera.up.set(0, 1, 0);
     camera.lookAt(camLook);
-    camera.rotateZ(-car.roll * 0.22);
+    camera.rotateZ(-p.roll * 0.22);
     applyShake(dt, far ? 0.6 : 1);
 
     // Wider as the speed builds, and a little more under hard acceleration:

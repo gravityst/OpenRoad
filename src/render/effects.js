@@ -74,6 +74,28 @@
 // softens slightly, nothing appears or disappears — so it is the first one the
 // automatic quality in main.js reaches for.
 //
+// Its optional second argument names the tier whose pixel-ratio CAP the scale
+// applies to. The automatic quality passes the tier the player chose, so
+// stepping the post tier down does not also cut the resolution. Without it, on
+// a devicePixelRatio-2 laptop, medium's cap is 1.5 and low's 1.0: the ladder's
+// step from (0.8, medium) to (0.8, low) went from 1.2 to 0.8 device pixels per
+// CSS pixel, 44% of the pixels in one step where it expected 100%, and the
+// predicted cost of stepping back up was 2.25x too low, so it kept probing up,
+// failing and dropping back — 15 changes in 10 minutes, simulated.
+//
+// NO RESIZE EVER LANDS BETWEEN A RENDER AND THE SCREEN
+//
+// Changing the pixel ratio resizes the canvas, and resizing a WebGL canvas
+// clears its drawing buffer. Done after the frame was drawn — which is where
+// the automatic quality used to apply its decision, at the end of the frame —
+// the browser composited that cleared, transparent canvas over the page: one
+// fully black frame for every quality change (measured: the centre pixel read
+// 218,216,187 before force(2) and 0,0,0,0 straight after it, in the same task).
+// So nothing here resizes on the spot. Every change marks the size stale, and
+// the next render() or prewarm() applies it immediately before drawing — the
+// only moment a resize is invisible. It also coalesces: a step that changes
+// both the scale and the tier reallocates the targets once, not twice.
+//
 // GPU TIME
 //
 // With setGpuTiming(true) and EXT_disjoint_timer_query_webgl2 available, one
@@ -377,8 +399,12 @@ export function createEffects(renderer, scene, camera, opts = {}) {
   let msaaPass = null;
   let activeMsaa = 0;
 
-  // Fraction of the tier's pixel ratio actually rendered. See setResolutionScale.
+  // Fraction of the tier's pixel ratio actually rendered, and the tier whose
+  // cap that is a fraction of (null: the current one). See setResolutionScale.
   let resScale = 1;
+  let resBase = null;
+  // The canvas and targets are out of date; render() fixes that before drawing.
+  let sizeStale = true;
 
   // GPU timing: one query in flight at a time, read back when it is ready.
   let timerExt = null, timing = false, query = null, queryWait = 0;
@@ -463,15 +489,30 @@ export function createEffects(renderer, scene, camera, opts = {}) {
     activeMsaa = 0;
   }
 
-  function pixelRatio() {
+  /** Device pixels per CSS pixel tier `tier` draws at full scale on this screen. */
+  function capRatio(tier) {
     const device = (typeof window !== 'undefined' && window.devicePixelRatio) || 1;
-    return Math.min(device, TIERS[quality].dpr, maxPixelRatio) * resScale;
+    return Math.min(device, TIERS[tier].dpr, maxPixelRatio);
   }
 
-  function applySize() {
+  function pixelRatio() {
+    return capRatio(resBase || quality) * resScale;
+  }
+
+  /** The size is out of date. Applied by the next render(), just before it draws. */
+  function applySize() { sizeStale = true; }
+
+  function flushSize() {
+    sizeStale = false;
     const pr = pixelRatio();
-    renderer.setPixelRatio(pr);
-    renderer.setSize(width, height, updateStyle);
+    // Only when the canvas really changes: assigning a canvas its own size
+    // still reallocates the drawing buffer. Compared with the renderer's own
+    // state, since main.js's resize handler also sets it.
+    renderer.getSize(size);
+    if (renderer.getPixelRatio() !== pr || size.x !== width || size.y !== height) {
+      renderer.setPixelRatio(pr);
+      renderer.setSize(width, height, updateStyle);
+    }
     if (!composer) return;
 
     composer.setPixelRatio(pr);
@@ -547,6 +588,9 @@ export function createEffects(renderer, scene, camera, opts = {}) {
     exposure += (want - exposure) * (1 - Math.exp(-d / ADAPT_TAU));
     renderer.toneMappingExposure = exposure;
 
+    // Here and nowhere else: see "no resize ever lands between a render and
+    // the screen" at the top.
+    if (sizeStale) flushSize();
     const timed = beginTiming();
     if (!composer) {
       renderer.render(scene, camera);
@@ -626,12 +670,21 @@ export function createEffects(renderer, scene, camera, opts = {}) {
    * and the browser scales the frame up, so the picture softens a little
    * rather than changing. Reallocates the render targets, so it is for a
    * decision made every few seconds, not every frame.
+   *
+   * `base`, if given, is the tier whose pixel-ratio cap `s` scales ('low',
+   * 'medium', ...); null goes back to following the current tier. Omitted, it
+   * is left as it was.
    */
-  function setResolutionScale(s) {
+  function setResolutionScale(s, base) {
     const v = Math.min(1, Math.max(0.5, Number(s) || 1));
-    if (v === resScale) return;
+    const b = base === undefined ? resBase : (TIERS[base] ? base : null);
+    if (v === resScale && b === resBase) return;
+    const before = pixelRatio();
     resScale = v;
-    applySize();
+    resBase = b;
+    // A new base with the same effective ratio (the player on 'medium' with
+    // the base set to 'medium') changes nothing on screen: no reallocation.
+    if (pixelRatio() !== before) applySize();
   }
 
   /** Start or stop timing frames on the GPU. False if the browser cannot. */
@@ -658,6 +711,7 @@ export function createEffects(renderer, scene, camera, opts = {}) {
    */
   function prewarm() {
     if (!composer) return;
+    if (sizeStale) flushSize();
     const bloomWas = bloomPass.enabled, fxaaWas = fxaaPass.enabled;
     bloomPass.enabled = true;
     fxaaPass.enabled = true;
@@ -685,5 +739,9 @@ export function createEffects(renderer, scene, camera, opts = {}) {
     get gpuMs() { return gpuMs; },
     /** The pixel ratio actually rendered at: device, tier cap and scale. */
     get pixelRatio() { return pixelRatio(); },
+    /** A size change is waiting for the next render(), which applies it before drawing. */
+    get sizePending() { return sizeStale; },
+    /** The pixel ratio tier `tier` draws at full scale on this screen (the current tier if unknown). */
+    basePixelRatio: (tier) => capRatio(TIERS[tier] ? tier : quality),
   };
 }

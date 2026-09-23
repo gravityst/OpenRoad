@@ -27,7 +27,7 @@ import { loadSettings, saveSettings, suggestName } from './game/settings.js';
 // Pure arithmetic, no three.js and no DOM, so imported directly for the same
 // reason as roomUrl above. See the render-interpolation note in the loop.
 import { createPoseBuffer, settleAccumulator, blendFactor, springAngleStep, followLinear } from './core/interp.js';
-import { createAdaptiveQuality } from './core/adaptive.js';
+import { createAdaptiveQuality, applyRung, createDisplayProbe } from './core/adaptive.js';
 
 const BUILD = '2026-08-22';
 const PHYS_HZ = 120;
@@ -110,6 +110,10 @@ function stub(methods, extra) {
 
 async function boot() {
   const canvas = document.getElementById('view');
+  // How often this screen refreshes, measured while the page is loading and
+  // mostly idle; the automatic quality judges frames against it. See
+  // core/adaptive.js, "a screen that is not 60 Hz".
+  const displayProbe = createDisplayProbe(window.requestAnimationFrame.bind(window));
 
   // ---- renderer -----------------------------------------------------------
   let renderer;
@@ -686,7 +690,7 @@ async function boot() {
   // car back on disk and the next visit starts in it.
   menus.on('drive', (p) => { if (p && p.id) { settings.car = p.id; settings.colour = p.colour | 0; } });
   // Handed to goals.update() every frame; one object, not one per frame.
-  const goalsFrame = { driving: false, model: null };
+  const goalsFrame = { driving: false, model: null, pose: null };
 
   // ---- state --------------------------------------------------------------
   const MODES = ['chase', 'chaseFar', 'bonnet', 'bumper', 'orbit'];
@@ -717,7 +721,10 @@ async function boot() {
   const AUTO_KEY = 'openroad.autoquality.v1';
   const autoOn = () => settings.autoQuality !== false;
   let autoPost = settings.post || 'medium';
-  const auto = createAdaptiveQuality({ post: autoPost, level: autoRemembered(autoPost) });
+  // The pixel ratio a tier draws at on this screen: a HiDPI ladder has one
+  // more rung. The fallback is for the stub a failed effects layer leaves.
+  const autoDpr = (post) => (effects.basePixelRatio ? effects.basePixelRatio(post) : 1);
+  const auto = createAdaptiveQuality({ post: autoPost, level: autoRemembered(autoPost), dpr: autoDpr(autoPost) });
   if (effects.setGpuTiming) effects.setGpuTiming(autoOn());
   function autoRemembered(post) {
     try {
@@ -725,11 +732,13 @@ async function boot() {
       return v && v.post === post && Number.isFinite(v.level) ? v.level : 0;
     } catch { return 0; }
   }
+  const AUTO_FULL = { scale: 1, post: 'medium' };
   function applyAuto(save) {
-    const on = autoOn();
-    const r = auto.rung;
-    if (effects.setResolutionScale) effects.setResolutionScale(on ? r.scale : 1);
-    effects.setQuality(on ? r.post : autoPost);
+    AUTO_FULL.post = autoPost;
+    // The scale is a fraction of the CHOSEN tier's pixel ratio, so a post
+    // step never cuts the resolution too. effects.js applies it just before
+    // its next draw, never between a draw and the screen.
+    applyRung(effects, autoOn() ? auto.rung : AUTO_FULL, autoPost);
     if (save) {
       try { localStorage.setItem(AUTO_KEY, JSON.stringify({ post: autoPost, level: auto.level })); }
       catch { /* private browsing: it just forgets */ }
@@ -787,7 +796,7 @@ async function boot() {
     // Anything else — a new name, the weather — leaves the level alone, or a
     // kid renaming themselves would put a slow laptop back to juddering.
     const post = settings.post || 'medium';
-    if (post !== autoPost || !autoOn()) { autoPost = post; auto.reset(post, 0); }
+    if (post !== autoPost || !autoOn()) { autoPost = post; auto.reset(post, 0, autoDpr(post)); }
     if (effects.setGpuTiming) effects.setGpuTiming(autoOn());
     applyAuto(true);
     terrain.setQuality(settings.quality || 'medium');
@@ -896,9 +905,13 @@ async function boot() {
   let accumulator = 0;
   let last = performance.now();
   let fpsSmooth = 60;
+  // How long the previous frame's script ran, for telling a CPU-bound machine
+  // from a GPU-bound one (core/adaptive.js, "is it the pixels?").
+  let scriptMs = NaN;
 
   function frame(now) {
     requestAnimationFrame(frame);
+    const t0 = performance.now();
     let dt = (now - last) / 1000;
     last = now;
     const raw = dt;
@@ -906,11 +919,14 @@ async function boot() {
     // A tab that was in the background hands back a dt of several seconds.
     // Clamping is what stops the car teleporting across the city on return.
     dt = Math.min(dt, 0.1);
-    stepFrame(dt);
     // Judged on the real interval between frames, and only while driving: the
     // menus draw over the world and cost differently, and a harness calling
-    // frame() directly is not a frame rate at all.
-    if (mode === 'driving' && autoOn() && auto.sample(raw * 1000, effects.gpuMs)) applyAuto(true);
+    // frame() directly is not a frame rate at all. BEFORE the frame is drawn:
+    // the interval being judged is the previous frame's either way, and a
+    // quality change then lands on this frame rather than after it.
+    if (mode === 'driving' && autoOn() && auto.sample(raw * 1000, effects.gpuMs, scriptMs)) applyAuto(true);
+    stepFrame(dt);
+    scriptMs = performance.now() - t0;
   }
 
   // The R key's bookkeeping: a scratch road record and how long the car has
@@ -1160,6 +1176,9 @@ async function boot() {
       // overlay — and the medal card in it — must never show over a menu.
       goalsFrame.driving = driving && !menus.current;
       goalsFrame.model = carModel;
+      // Where the car is DRAWN, for anything goals hangs over it on screen
+      // (the GPS arrow); `car` stays the truth for the game logic.
+      goalsFrame.pose = pose;
       goals.update(dt, goalsFrame);
       hudState.nav = goals.nav;
     }
@@ -2121,6 +2140,7 @@ async function boot() {
     tick: (n = 1, dt = PHYS_DT) => { for (let i = 0; i < n; i++) car.step(dt); return car; },
   };
 
+  auto.setDisplayPeriod(displayProbe.stop());
   requestAnimationFrame(frame);
 }
 

@@ -407,7 +407,7 @@ export function createEffects(renderer, scene, camera, opts = {}) {
   let sizeStale = true;
 
   // GPU timing: one query in flight at a time, read back when it is ready.
-  let timerExt = null, timing = false, query = null, queryWait = 0;
+  let timerExt = null, timing = false, query = null, queryInFlight = false, queryWait = 0;
   let gpuMs = NaN;
 
   // Bloom fades rather than switching. bloomNow is what is drawn, bloomWant
@@ -620,21 +620,23 @@ export function createEffects(renderer, scene, camera, opts = {}) {
   // polled, never waited for — waiting would stall the CPU on the GPU, which is
   // the one thing this must not do. `disjoint` means the GPU was interrupted
   // (a context switch, a power-state change) and that sample is discarded.
+  // One query object, reused once its result has been read, rather than a
+  // new one (and a new JS wrapper for the collector) fifteen times a second.
   function beginTiming() {
     if (!timing || !timerExt) return false;
     const gl = renderer.getContext();
-    if (query) {
+    if (queryInFlight) {
       if (!gl.getQueryParameter(query, gl.QUERY_RESULT_AVAILABLE)) return false;
       const disjoint = gl.getParameter(timerExt.GPU_DISJOINT_EXT);
       const ms = gl.getQueryParameter(query, gl.QUERY_RESULT) / 1e6;
       if (!disjoint && ms >= 0 && ms < 1000) gpuMs = Number.isFinite(gpuMs) ? gpuMs + (ms - gpuMs) * 0.25 : ms;
-      gl.deleteQuery(query);
-      query = null;
+      queryInFlight = false;
       queryWait = 3;               // leave a few frames untimed between samples
     }
     if (queryWait > 0) { queryWait--; return false; }
-    query = gl.createQuery();
+    if (!query) query = gl.createQuery();
     gl.beginQuery(timerExt.TIME_ELAPSED_EXT, query);
+    queryInFlight = true;
     return true;
   }
   function endTiming() {
@@ -698,6 +700,7 @@ export function createEffects(renderer, scene, camera, opts = {}) {
       gpuMs = NaN;
       // A query still in flight would otherwise never be read or deleted.
       if (query) { try { renderer.getContext().deleteQuery(query); } catch { /* context gone */ } query = null; }
+      queryInFlight = false;
     }
     return !!(timing && timerExt);
   }
@@ -748,6 +751,7 @@ export function createEffects(renderer, scene, camera, opts = {}) {
 
   function dispose() {
     if (query) { try { renderer.getContext().deleteQuery(query); } catch { /* context gone */ } query = null; }
+    queryInFlight = false;
     teardown();
   }
 

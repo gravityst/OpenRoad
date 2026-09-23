@@ -14,7 +14,16 @@
 //
 // It drives the loop main.js runs, line for line, and then reads main.js to
 // make sure that IS the loop main.js runs: a harness that tests a copy proves
-// nothing the day the original changes.
+// nothing the day the original changes — and proves that reading is strict,
+// by breaking copies of main.js fourteen ways and requiring each be caught.
+//
+// Then the rest of what makes a frame arrive smoothly: effects.js run for real
+// through a renderer that writes down what it is asked to do (no resize ever
+// lands between a draw and the screen; no quality step cuts more than 40% of
+// the pixels on any screen; the loading screen compiles the shader variants
+// the frame will actually draw), the automatic quality against simulated
+// machines — HiDPI, 50 Hz, 30 fps capped, 144 Hz, CPU-bound, slow for reasons
+// nobody can measure — and the measurement of the screen's own rate.
 //
 // Headless, so it cannot see the screen. What to look at in the browser is in
 // the report that came with this harness; the short version is "drive at 144
@@ -700,7 +709,7 @@ function effectsOn(dpr, quality, log = []) {
   const few = probe(refreshes(1000 / 60, 0), 20);
   const none = createDisplayProbe(null).stop();
   check('the screen\'s rate is read off the loading screen, or not guessed at',
-    got.every(([, ms, v]) => Math.abs(v - ms) < 0.05 * ms) && Math.abs(busy - 1000 / 60) < 0.8 &&
+    got.every(([, ms, v]) => Math.abs(v - ms) < 0.02 * ms) && Math.abs(busy - 1000 / 60) < 0.8 &&
     [ragged, few, none].every(Number.isNaN),
     `${got.map(([hz, , v]) => `${hz} Hz -> ${v.toFixed(2)} ms`).join(', ')}; 60 Hz with 80% of frames busy -> ` +
     `${busy.toFixed(2)} ms; ragged -> ${ragged}; 20 frames -> ${few}; no frames -> ${none}`);

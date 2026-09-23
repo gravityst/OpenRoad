@@ -59,6 +59,14 @@ const REPLAN_HOLD = 1.2;        // s off the line before it re-plans
 const RACE_LOST = 60;           // m off a race route before the "press R" hint
 const TOKEN_R = 5.5;            // m pickup radius, generous: a token is a gift
 const NO_RINGS = [];            // the rings to test while another guide leads (none)
+// What the world markers (gates.js) are told while another guide leads: that
+// a race is on, with no gates of this layer's own to draw. gates.js already
+// puts every start ring and beacon away mid-race; a party race IS a race, and
+// its grid sits on a solo race's start line, where that ring and its 7 m
+// column of light filled the bottom half of the screen behind the 3-2-1.
+// A friend's Guide, tag and coins get the same quiet: a ring that no longer
+// starts anything should not glow as if it did.
+const STAND_ASIDE = { gates: NO_RINGS };
 
 /**
  * opts: {
@@ -1039,7 +1047,7 @@ export function createGoals(opts) {
       : ringHint ? ringHint : '';
     if (ui.race.deltaAge < 99) ui.race.deltaAge += dt;
 
-    vs.target = target; vs.race = race.c; vs.nextGate = race.next; vs.zone = zone.c;
+    vs.target = target; vs.race = race.c || (external ? STAND_ASIDE : null); vs.nextGate = race.next; vs.zone = zone.c;
     if (view) view.update(dt, vs);
     if (overlay) overlay.update(dt, ui);
 

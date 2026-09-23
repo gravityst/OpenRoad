@@ -5,13 +5,14 @@
 // The kids asked for more, so the map is now five places a child can name from
 // the first glance, arranged round a farmland heartland the way a compass is:
 //
-//              N   Frostpeak Pass    snow rising with the ground, snowy pines,
-//                                    a wall of peaks along the north edge
+//              N   Frostpeak Pass    roads down valleys between snowy
+//                                    peaks, rock through the snow, spruce
 //   W  Red Canyon        Greenmeadow Farms        Amberleaf Woods  E
-//      red rock, mesas,  the old countryside:     orange, red and gold
-//      buttes, cacti,    fields, hedges, woods    canopies, leaf litter
-//      canyon roads
-//              S   Sunspray Bay      a real sea with a beach, cliffs, palms
+//      banded mesas,     the old countryside:     wooded hills in orange,
+//      buttes, arches,   fields, hedges, woods    red and gold, leaf litter
+//      hoodoos, cacti
+//              S   Sunspray Bay      a real sea: beaches, sandstone cliffs,
+//                                    palms and a lighthouse
 //
 // The layout is fixed to the compass on purpose — the sea is south so the noon
 // sun glitters on it, the peaks are north because nothing on the map reaches
@@ -32,17 +33,21 @@
 //
 // RELIEF, AND WHY IT NEVER TOUCHES A ROAD
 //
-// Mountains, mesas and the sea floor are heights ADDED to the base terrain, and
-// they are held off the road network by a mask: zero within ~40 m of a road
-// edge, full strength a few dozen metres further out. The elevation solver,
-// the stamped height field and every harness that measures them (ground, goals)
-// only ever see the ground within 40 m of a carriageway, so the roads are graded
-// exactly as before and every race, jump and speed trap stays where it was.
-// A mesa that straddles a road becomes a canyon with the road down the middle
-// of it — which is precisely the red-canyon drive the brief asked for. The one
-// exception is the alpine uplift: a broad rise of up to 36 m over a kilometre,
-// so the northern roads genuinely climb into the snow like a pass should. It is
-// gentle enough (under 6% added grade) that the solver grades it like any hill.
+// Mountains, mesas, the woods' hills and the sea floor are heights ADDED to the
+// base terrain, and they are held off the road network: exactly zero within
+// 41 m of a carriageway edge, and past that CAPPED — a feature may rise only so
+// many metres per metre from the road (see KEEP). The elevation solver, the
+// stamped height field and every harness that measures them (ground, goals)
+// only ever see the ground within 40 m of a carriageway, so the roads are
+// graded exactly as before and every race, jump and speed trap stays where it
+// was. What the cap makes of a feature a road runs into is the point: a mesa
+// that straddles a road becomes a canyon with the road down the middle of it,
+// a mountain range becomes a valley with the road along its floor and the
+// walls rising at 29-45 degrees, and the woods' knolls become hollows the
+// lanes wind along. The one exception is the alpine uplift: a broad rise of
+// up to 36 m over a kilometre, so the northern roads genuinely climb into the
+// snow like a pass should. It is gentle enough (under 6% added grade) that the
+// solver grades it like any hill.
 //
 // The relief is precomputed once into an 8 m grid and read back bicubically
 // (C1, like ground.js's own field), so terrain.height() costs one grid lookup

@@ -179,8 +179,16 @@ function overlapDepth(a, b) {
   // (the SAT test createCarCollision already uses, and the model's own
   // extents) — see the round-three realism notes. Until then this is a
   // regression bound on what city.js controls, not a claim it is solved.
-  check('a building corner never buries more than a bumper', worst.depth < 1.1,
-    `worst ${worst.depth.toFixed(2)} m (${worst.at}), was ${worstFull.toFixed(2)} m`);
+  // Named for what it bounds. 'Never more than a bumper' was the old name,
+  // over a 1.1 m bound that measured 0.98 m: that is a bonnet, and oblique
+  // runs reach 0.94 m too. Square-on is the case city.js solves (the check
+  // above); corners and angles wait on the collision.js change.
+  const p90 = (a) => a.slice().sort((x, y) => x - y)[Math.floor(a.length * 0.9)];
+  check('at a corner or an angle, the car sinks under 1.1 m into a wall', worst.depth < 1.1,
+    `worst ${worst.depth.toFixed(2)} m (${worst.at}), was ${worstFull.toFixed(2)} m; ` +
+    `corners worst ${Math.max(...byKind.corner).toFixed(2)} p90 ${p90(byKind.corner).toFixed(2)}, ` +
+    `oblique worst ${Math.max(...byKind.oblique).toFixed(2)} p90 ${p90(byKind.oblique).toFixed(2)}, ` +
+    `${over(results.drawn, 0.3)} of ${runs} runs past 0.3 m`);
   check('city.js and collision.js agree on the solid fraction',
     SOLID_FRACTION === 0.94 && /lot\.w \* 0\.5 \* 0\.94/.test(read('src/physics/collision.js')),
     `${SOLID_FRACTION} of the lot`);
@@ -629,6 +637,17 @@ function overlapDepth(a, b) {
   check('ground decals are pulled toward the eye exactly as the road is', ok,
     m ? `road ${m[1]}/${m[2]}, decals ${ROAD_PULL.join('/')}` : 'uPull not found in roads.js');
 }
+
+// What only eyes can check, in the browser (?nosplash, medium, 1024 x 768).
+console.log(`
+  LOOK
+  - a one-line and a two-line direction sign at noon: white, bordered, text
+    and arrows legible from 20 m (a blank grey board is the old UV bug)
+  - the same signs at 23:00 from 15-30 m: bright but lettered, not a white slab;
+    post reflectors hard points, not orbs; cat's eyes glinting down the middle
+  - a chevron board: two whole arrows, centred
+  - a lorry, a bus and a tractor driving away past 46 m: the company name,
+    the bus's band and the tractor's stripe stay on as they go far`);
 
 console.log(fail === 0 ? '\nThe world is drawn where it is solid, and lived in.' : `\n${fail} CHECK(S) FAILED`);
 process.exit(fail ? 1 : 0);

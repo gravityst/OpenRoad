@@ -1535,16 +1535,20 @@ async function boot() {
     if (my < groundMid) camWanted.y += (groundMid - my) * 2;
     camera.position.copy(camWanted);
 
-    // Look where the car is GOING to be. With yaw rate r at speed v the path
-    // bends at r/v per metre, so a point d metres down it sits r*d^2/(2v) to
-    // the side: aim there and the camera leads into a corner rather than
-    // staring at the outside of it.
+    // Look where the car is GOING to be. The path bends by a/v^2 per metre,
+    // where a is the sideways acceleration, so a point d metres down it sits
+    // a*d^2/(2v^2) to the side: aim there and the camera leads into a corner
+    // rather than staring at the outside of it. Taken from the acceleration,
+    // not the yaw rate: in a handbrake slide the body spins far faster than
+    // the path bends, and leading by the yaw rate threw the car to the edge of
+    // the frame. Capped at about 14 degrees of lead.
     const lookDist = clampNum(7 + v * 0.3, 7, 20) * (lookBack ? -1 : 1);
-    const bend = clampNum(car.yawRate * lookDist * lookDist / (2 * Math.max(6, v)), -Math.abs(lookDist) * 0.35, Math.abs(lookDist) * 0.35);
+    const reach = Math.abs(lookDist) * 0.25;
+    const bend = clampNum(car.latG * 9.81 * lookDist * lookDist / (2 * Math.max(36, v * v)), -reach, reach);
     camTarget.set(
-      car.x + fx * lookDist - rx * bend,
+      car.x + fx * lookDist + rx * bend,
       chase.baseY + 0.75 + tall * 0.6,
-      car.z + fz * lookDist - rz * bend,
+      car.z + fz * lookDist + rz * bend,
     );
     camLook.lerp(camTarget, 1 - Math.exp(-9 * dt));
     camera.up.set(0, 1, 0);

@@ -173,6 +173,11 @@ export function createGoals(opts) {
   let started = false;              // first Drive of the session has happened
   let ringHint = '';
   const cooldown = Object.create(null);   // id -> clock time it may re-trigger
+  // A race ring re-arms only once the car has LEFT it. A lap finishes on its
+  // own start line, and with a timed cooldown alone a kid who pulls up just
+  // past the finish — which is what kids do — was snapped back onto the grid
+  // for a race they had just won.
+  const disarmed = new Set();
 
   // Shared, mutated in place: read by the HUD's minimap and by the view.
   const markers = list.map((c) => ({
@@ -350,7 +355,12 @@ export function createGoals(opts) {
     // (whose line is also the finish, 2 km away).
     const d = c.lap ? 3 : Math.max(0, c.start.d - 8);
     spawnAt(c.route, d);
-    race.hint = c.route.project(car.x, car.z, -1, 0, {}).i;
+    const at = c.route.project(car.x, car.z, -1, 0, {});
+    race.hint = at.i;
+    // Progress starts from the grid, not from wherever the last race ended —
+    // the gate-by-progress test compares against it on the very first frame.
+    race.d = at.d;
+    disarmed.add(c.id);
     lastResult = null;
     if (overlay) { overlay.hideResult(); overlay.countdown(3); }
     play('beep');
@@ -733,10 +743,12 @@ export function createGoals(opts) {
         // race nobody asked for.
         ringHint = '';
         for (const c of list) {
-          if (c.kind !== 'race' || cooldown[c.id] > clock) continue;
+          if (c.kind !== 'race') continue;
           const dx = car.x - c.start.x, dz = car.z - c.start.z;
           const r = c.start.hw + 4;
-          if (dx * dx + dz * dz >= r * r) continue;
+          const d2 = dx * dx + dz * dz;
+          if (disarmed.has(c.id)) { if (d2 > (r + 8) * (r + 8)) disarmed.delete(c.id); continue; }
+          if (d2 >= r * r) continue;
           if (c === target || car.speed < 4) { beginRace(c); break; }
           ringHint = `Stop in the ring to race ${c.name}`;
         }

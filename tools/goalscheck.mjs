@@ -203,6 +203,26 @@ check('every medal table is strictly ordered', tableBad === 0, `${tableBad} tabl
   const rec = g2.progress.result(race.id);
   check('finishing records the time and the medal', !!rec && Math.abs(rec.best - g2._race.splits[g2._race.splits.length - 1]) < 1e-9,
     rec ? `best ${formatTime(rec.best)}, medal ${rec.medal}, ${rec.splits ? rec.splits.length : 0} splits saved` : 'nothing recorded');
+  // A lap finishes on its own start line. Stopping there afterwards must not
+  // start the race again, however long the car sits there.
+  {
+    const lap = g2.list.find((c) => c.kind === 'race' && c.lap);
+    g2.setTarget(lap.id);
+    drive(lap.start.x, lap.start.z);
+    for (let i = 0; i < 200 && g2._race.phase === 'countdown'; i++) g2.update(1 / 60, { driving: true });
+    for (let k = 0; k < lap.gates.length; k++) { const g = lap.gates[k]; drive(...at(g, -2)); drive(...at(g, 2)); }
+    const finished = !g2.activeRace;
+    fake.speed = 0;
+    g2.setTarget(lap.id);                 // even with it targeted again
+    for (let i = 0; i < 60 * 12; i++) g2.update(1 / 60, { driving: true });
+    const stayed = !g2.activeRace;
+    drive(lap.start.x + 60, lap.start.z); drive(lap.start.x + 61, lap.start.z);
+    drive(lap.start.x, lap.start.z);
+    const rearmed = !!g2.activeRace;
+    check('stopping on the line after a lap does not start it again', finished && stayed && rearmed,
+      `finished ${finished}, still free after 12 s parked in the ring ${stayed}, re-arms once the car has left ${rearmed}`);
+    g2.abandon();
+  }
   g2.dispose();
 }
 // ---------------------------------------------------------------------------

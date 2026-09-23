@@ -26,6 +26,7 @@
 <link rel="stylesheet" href="styles/hud.css">
 <link rel="stylesheet" href="styles/touch.css">
 <link rel="stylesheet" href="styles/splash.css">
+<link rel="stylesheet" href="styles/boot.css">
 <!-- Fetched first, in parallel with everything else, so the studio splash never
      starts its reveal over an image that is still downloading. -->
 <link rel="preload" as="image" href="assets/brand/gs-mark.webp" type="image/webp">
@@ -56,19 +57,89 @@
 <div id="touch" class="layer"></div>
 <div id="menus" class="layer"></div>
 
-<div id="boot" class="boot">
-  <div class="boot__inner">
-    <h1 class="boot__title">OPEN&nbsp;ROAD</h1>
-    <div class="boot__bar"><i id="boot-fill"></i></div>
-    <p id="boot-status" class="boot__status">starting up</p>
+<!-- The loading screen. main.js drives #boot, #boot-fill and #boot-status and
+     nothing else; the rest is src/boot.js and styles/boot.css. -->
+<div id="boot" class="boot" aria-busy="true">
+  <div class="boot__sky"></div>
+  <div class="boot__sun"></div>
+  <svg class="boot__ridges" viewBox="0 0 1600 200" preserveAspectRatio="none" aria-hidden="true">
+    <path fill="#6b4460" d="M0 142 L90 118 L160 128 L262 94 L334 110 L420 82 L522 106 L612 88 L702 112 L792 78 L884 100 L962 86 L1042 108 L1132 72 L1222 98 L1302 86 L1392 110 L1482 90 L1600 104 V200 H0 Z"/>
+    <path fill="#33233f" d="M0 162 Q120 122 240 150 T480 138 T720 154 T960 128 T1200 150 T1440 134 T1600 146 V200 H0 Z"/>
+    <path fill="#141120" d="M0 186 Q200 166 400 182 T800 175 T1200 186 T1600 177 V200 H0 Z"/>
+    <path fill="#100d19" d="M-9.1 187.5L-6.0 172.7L-2.9 187.5ZM-4.8 187.5L-1.5 170.6L1.7 187.5ZM-0.1 186.8L4.6 165.6L9.3 186.8ZM63.7 181.8L67.5 162.2L71.3 181.8ZM66.7 181.4L71.8 160.2L77.0 181.4ZM76.3 180.9L79.2 168.3L82.1 180.9ZM81.5 180.5L85.3 162.6L89.2 180.5ZM87.1 180.5L89.9 169.0L92.8 180.5ZM92.5 179.8L97.6 158.9L102.7 179.8ZM137.1 177.9L141.2 157.4L145.4 177.9ZM144.1 177.7L147.3 161.4L150.5 177.7ZM151.2 177.5L154.0 163.9L156.7 177.5ZM155.3 177.3L157.9 163.8L160.5 177.3ZM160.9 177.1L164.1 163.6L167.4 177.1ZM166.6 176.9L170.2 159.0L173.9 176.9ZM228.5 176.4L232.7 154.9L236.9 176.4ZM236.9 176.5L240.8 160.5L244.8 176.5ZM242.5 176.5L247.2 155.4L251.9 176.5ZM248.1 176.6L250.6 166.4L253.2 176.6ZM253.5 176.6L256.4 161.6L259.3 176.6ZM257.1 176.7L262.2 156.1L267.3 176.7ZM265.0 176.8L267.3 166.3L269.5 176.8ZM270.0 177.0L274.1 157.3L278.3 177.0ZM277.7 177.1L282.5 156.9L287.3 177.1ZM282.2 177.3L285.7 159.1L289.2 177.3ZM290.1 177.5L294.4 159.8L298.7 177.5ZM295.8 177.8L299.9 159.1L304.1 177.8ZM302.9 178.0L306.0 164.8L309.2 178.0ZM378.5 182.0L382.4 164.2L386.3 182.0ZM385.0 182.5L387.2 171.2L389.4 182.5ZM392.9 183.0L395.1 172.0L397.3 183.0ZM397.2 183.5L401.9 160.0L406.7 183.5ZM404.7 184.0L408.5 168.7L412.3 184.0ZM409.5 184.5L412.0 174.1L414.5 184.5ZM414.5 185.0L417.0 174.9L419.6 185.0ZM417.6 185.0L420.6 170.7L423.5 185.0ZM422.1 185.5L425.6 168.5L429.2 185.5ZM430.3 185.9L434.0 167.3L437.7 185.9ZM436.4 186.3L441.2 162.5L446.1 186.3ZM445.9 186.7L449.9 170.0L453.9 186.7ZM455.7 187.4L458.1 175.5L460.5 187.4ZM461.2 187.8L466.1 164.0L471.1 187.8ZM468.9 188.1L471.2 177.1L473.6 188.1ZM475.1 188.3L478.2 173.5L481.3 188.3ZM479.7 188.6L483.9 170.2L488.1 188.6ZM487.8 188.8L491.0 173.4L494.3 188.8ZM491.8 188.8L495.3 172.6L498.7 188.8ZM499.8 189.3L503.3 172.8L506.9 189.3ZM504.2 189.3L507.4 173.3L510.7 189.3ZM509.1 189.4L511.8 175.6L514.5 189.4ZM549.1 190.0L551.5 178.0L554.0 190.0ZM552.1 190.0L555.7 175.1L559.3 190.0ZM559.2 190.1L563.1 172.7L566.9 190.1ZM635.7 188.7L639.3 171.0L643.0 188.7ZM711.6 184.6L714.0 174.2L716.4 184.6ZM715.2 184.1L717.7 171.8L720.3 184.1ZM717.0 184.1L722.0 162.9L727.1 184.1ZM727.6 183.1L730.1 172.0L732.6 183.1ZM732.9 183.1L735.5 172.8L738.1 183.1ZM735.9 182.5L740.3 160.3L744.6 182.5ZM740.8 181.9L746.2 159.1L751.6 181.9ZM745.8 181.9L749.7 162.1L753.6 181.9ZM750.5 181.3L754.5 165.5L758.4 181.3ZM802.8 175.7L805.5 162.5L808.2 175.7ZM805.5 175.0L810.3 154.8L815.1 175.0ZM813.2 174.3L817.5 152.0L821.9 174.3ZM818.6 174.3L823.3 153.4L828.0 174.3ZM872.9 169.6L877.9 146.3L882.9 169.6ZM881.2 169.2L885.3 152.5L889.4 169.2ZM886.8 169.2L889.4 157.8L892.1 169.2ZM893.9 168.6L896.7 157.3L899.5 168.6ZM901.4 168.3L905.6 150.7L909.7 168.3ZM909.1 168.0L913.3 151.0L917.5 168.0ZM914.3 167.8L918.6 146.8L923.0 167.8ZM922.7 167.6L925.3 156.5L928.0 167.6ZM929.7 167.5L933.5 151.2L937.3 167.5ZM931.9 167.4L937.1 145.6L942.3 167.4ZM939.3 167.3L943.9 146.3L948.6 167.3ZM946.3 167.3L949.1 152.3L951.9 167.3ZM953.0 167.2L957.2 149.0L961.4 167.2ZM961.0 167.2L964.5 151.3L968.0 167.2ZM967.2 167.3L971.1 150.7L975.0 167.3ZM973.0 167.3L976.6 150.2L980.2 167.3ZM981.1 167.4L984.9 148.5L988.6 167.4ZM988.2 167.6L992.8 144.3L997.4 167.6ZM996.2 167.8L1001.4 143.8L1006.5 167.8ZM1004.1 167.9L1008.6 147.8L1013.1 167.9ZM1008.9 168.2L1013.3 145.9L1017.6 168.2ZM1013.9 168.4L1017.2 154.8L1020.6 168.4ZM1019.3 168.7L1024.1 146.1L1028.8 168.7ZM1028.4 169.1L1031.6 152.4L1034.8 169.1ZM1031.5 169.1L1036.0 149.7L1040.6 169.1ZM1037.8 169.4L1042.0 150.2L1046.2 169.4ZM1042.5 169.8L1046.0 154.8L1049.4 169.8ZM1049.5 170.2L1052.4 158.0L1055.2 170.2ZM1055.4 170.7L1057.8 160.4L1060.2 170.7ZM1061.5 171.2L1063.8 160.8L1066.0 171.2ZM1065.3 171.7L1070.2 149.7L1075.0 171.7ZM1072.5 171.7L1074.9 161.4L1077.4 171.7ZM1079.7 172.2L1082.5 158.3L1085.4 172.2ZM1085.4 173.4L1090.1 152.4L1094.7 173.4ZM1091.7 174.1L1097.2 150.5L1102.8 174.1ZM1097.7 174.1L1102.4 153.5L1107.1 174.1ZM1106.8 174.7L1109.0 164.6L1111.3 174.7ZM1111.4 175.4L1116.1 153.5L1120.9 175.4ZM1118.6 176.2L1123.2 152.4L1127.8 176.2ZM1124.9 176.9L1127.4 164.9L1130.0 176.9ZM1130.0 177.8L1134.7 157.0L1139.4 177.8ZM1140.1 179.4L1143.6 164.8L1147.0 179.4ZM1143.2 179.4L1146.9 161.1L1150.6 179.4ZM1151.9 180.3L1154.3 169.0L1156.7 180.3ZM1158.2 181.3L1162.1 163.6L1166.0 181.3ZM1164.0 182.2L1168.2 161.9L1172.4 182.2ZM1172.0 183.2L1176.6 162.3L1181.1 183.2ZM1177.7 184.2L1180.8 171.9L1183.8 184.2ZM1183.6 185.3L1188.5 162.8L1193.4 185.3ZM1190.5 186.4L1195.3 162.6L1200.1 186.4ZM1197.9 187.5L1202.2 165.3L1206.4 187.5ZM1203.3 188.6L1205.5 178.2L1207.6 188.6ZM1207.4 189.7L1211.6 172.3L1215.8 189.7ZM1214.4 190.7L1219.3 171.2L1224.1 190.7ZM1219.9 191.7L1223.8 176.0L1227.7 191.7ZM1227.3 192.6L1230.8 174.9L1234.3 192.6ZM1237.2 193.5L1239.7 180.5L1242.3 193.5ZM1313.5 200.6L1315.6 189.6L1317.7 200.6ZM1319.5 201.3L1323.7 182.4L1328.0 201.3ZM1328.6 201.6L1331.1 191.0L1333.6 201.6ZM1332.5 201.9L1336.8 179.5L1341.1 201.9ZM1338.1 201.9L1342.5 183.2L1346.8 201.9ZM1398.1 202.2L1401.3 188.7L1404.4 202.2ZM1400.9 202.1L1405.8 180.3L1410.8 202.1ZM1405.8 202.1L1409.5 186.3L1413.2 202.1ZM1411.1 201.6L1416.9 177.6L1422.6 201.6ZM1416.2 201.6L1421.8 178.1L1427.4 201.6ZM1422.0 201.3L1425.1 187.5L1428.2 201.3ZM1428.2 201.0L1433.9 177.0L1439.6 201.0ZM1434.4 200.6L1437.0 189.2L1439.7 200.6ZM1473.9 197.4L1477.3 183.3L1480.7 197.4ZM1478.5 197.4L1480.9 184.3L1483.4 197.4ZM1483.1 196.7L1486.4 182.2L1489.8 196.7ZM1484.7 196.7L1489.9 173.1L1495.2 196.7ZM1489.6 196.0L1494.6 172.9L1499.5 196.0ZM1559.5 185.1L1565.1 161.7L1570.8 185.1ZM1565.3 185.1L1568.9 167.5L1572.4 185.1ZM1570.9 183.9L1575.8 162.4L1580.7 183.9ZM1575.1 182.6L1580.2 160.0L1585.3 182.6Z"/>
+  </svg>
+  <div class="boot__ground">
+    <div class="boot__field"><i></i></div>
+    <div class="boot__road"><div class="boot__marks"></div></div>
+  </div>
+  <div class="boot__beam"></div>
+  <div class="boot__spill"></div>
+  <svg class="boot__car" viewBox="0 0 400 230" aria-hidden="true">
+    <defs>
+      <linearGradient id="bc-body" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#1b2130"/><stop offset="0.35" stop-color="#10141e"/><stop offset="1" stop-color="#07090e"/>
+      </linearGradient>
+      <linearGradient id="bc-glass" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#3a2f55"/><stop offset="0.6" stop-color="#6d3c4f"/><stop offset="1" stop-color="#2a1c2c"/>
+      </linearGradient>
+      <linearGradient id="bc-lamp" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#ff8a7a"/><stop offset="0.45" stop-color="#ff2f2f"/><stop offset="1" stop-color="#a50f18"/>
+      </linearGradient>
+      <filter id="bc-glow" x="-40%" y="-200%" width="180%" height="500%">
+        <feGaussianBlur stdDeviation="5" result="b"/>
+        <feMerge><feMergeNode in="b"/><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+      </filter>
+    </defs>
+    <ellipse cx="200" cy="214" rx="178" ry="11" fill="#000" opacity="0.75"/>
+    <rect x="38" y="150" width="68" height="66" rx="13" fill="#040507"/>
+    <rect x="294" y="150" width="68" height="66" rx="13" fill="#040507"/>
+    <path fill="url(#bc-body)" d="M74 110 C84 70 100 45 124 37 Q200 27 276 37 C300 45 316 70 326 110 Z"/>
+    <path fill="url(#bc-glass)" opacity="0.9" d="M97 102 C105 74 117 54 135 48 Q200 40 265 48 C283 54 295 74 303 102 Z"/>
+    <path fill="#07080c" d="M110 40 Q200 27 290 40 L294 46 Q200 34 106 46 Z"/>
+    <path fill="url(#bc-body)" d="M30 122 C26 150 24 178 36 196 Q40 204 56 204 L344 204 Q360 204 364 196 C376 178 374 150 370 122 C360 111 338 107 300 106 L100 106 C62 107 40 111 30 122 Z"/>
+    <path fill="#05060a" d="M44 186 L356 186 Q360 186 358 194 Q356 202 344 202 L56 202 Q44 202 42 194 Q40 186 44 186 Z"/>
+    <path fill="none" stroke="#ffc9a0" stroke-opacity="0.38" stroke-width="2" d="M124 37 Q200 27 276 37"/>
+    <path fill="none" stroke="#ffc9a0" stroke-opacity="0.22" stroke-width="1.6" d="M30 122 C40 111 62 107 100 106 L300 106 C338 107 360 111 370 122"/>
+    <g filter="url(#bc-glow)">
+      <path fill="url(#bc-lamp)" d="M40 127 L118 123 Q125 123 125 129 L123 139 L44 142 Q37 142 37 136 Z"/>
+      <path fill="url(#bc-lamp)" d="M360 127 L282 123 Q275 123 275 129 L277 139 L356 142 Q363 142 363 136 Z"/>
+      <rect x="125" y="130" width="150" height="3" rx="1.5" fill="#ff3a36" opacity="0.75"/>
+    </g>
+    <rect x="166" y="152" width="68" height="20" rx="2.5" fill="#e9e6dd"/>
+    <rect x="173" y="158" width="54" height="8" rx="1" fill="#2a2d36" opacity="0.55"/>
+    <ellipse cx="318" cy="199" rx="9" ry="3.5" fill="#000"/>
+  </svg>
+
+  <div class="boot__shade"></div>
+
+  <header class="boot__brand">
+    <p class="boot__studio"><img src="assets/brand/gs-mark.webp" alt="">A Gravity Studios game</p>
+    <h1 class="boot__title">Open<br>Road</h1>
+  </header>
+
+  <div class="boot__panel">
+    <div class="boot__tip" aria-live="off"></div>
+    <div class="boot__readout">
+      <p class="boot__stage"><span class="boot__stage-name">Starting the engine</span><b class="boot__stage-count"></b></p>
+      <p class="boot__pct"><span class="boot__pct-n">0</span><small>%</small></p>
+    </div>
+  </div>
+  <div class="boot__bar"><i id="boot-fill"></i></div>
+  <p id="boot-status" class="boot__status" aria-live="polite">starting up</p>
+
+  <div class="boot__error" role="alert">
+    <strong>The road's closed</strong>
+    <span class="boot__error-text">Something stopped the game from starting.</span>
+    <br><code class="boot__error-detail"></code>
+    <br><button type="button" class="boot__retry">Try again</button>
   </div>
 </div>
 
 <noscript>
-  <div class="boot"><div class="boot__inner">
-    <h1 class="boot__title">OPEN&nbsp;ROAD</h1>
-    <p class="boot__status">This game needs JavaScript.</p>
-  </div></div>
+  <div class="boot"><div class="boot__sky"></div>
+    <header class="boot__brand"><h1 class="boot__title">Open<br>Road</h1>
+    <p class="boot__studio">This game needs JavaScript switched on.</p></header>
+  </div>
 </noscript>
 
 <!-- The studio splash sits above everything and removes itself. Its script is a
@@ -97,6 +168,7 @@
   <button class="splash__skip" type="button" aria-label="Skip intro">Skip</button>
 </div>
 <script src="src/splash.js"></script>
+<script src="src/boot.js"></script>
 
 <script type="module" src="./src/main.js"></script>
 </body>

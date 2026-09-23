@@ -1,0 +1,472 @@
+/* ---------------------------------------------------------------------------
+   The loading screen: the drive in.
+
+   It is what a player looks at while the world builds, so instead of a bar on
+   an empty page it is already the drive — a dusk road running to the horizon,
+   your car's tail lights in front of you, the dashes streaming past.
+
+   The sky picks up where the Gravity Studios splash leaves off (the same deep
+   navy at the top) and warms to a sunset at the horizon, which is where the
+   game's own amber lives. The sun sits off-centre and the ground is plain
+   dark tarmac and verge: no striped sun, no neon grid.
+
+   Motion is transform-only. The world build holds the main thread for
+   stretches of a second and more; transform animations run on the compositor
+   and keep the road moving through them, which is the entire point of having
+   motion on a loading screen.
+
+   main.js knows only #boot, #boot-fill (it sets the width) and #boot-status (it
+   sets the text), plus .is-done when the world is ready. Everything else here
+   is driven by src/boot.js, which watches those.
+   ------------------------------------------------------------------------ */
+
+.boot {
+  --horizon: 54%;
+  --amber: #ffb24a;
+  --amber-hot: #ffd08a;
+  --ink: #eef2f7;
+  --ink-soft: rgb(222 230 242 / 0.72);
+  --ink-faint: rgb(200 212 230 / 0.46);
+  --display: "Bahnschrift", "DIN Condensed", "DIN Alternate", "Avenir Next Condensed",
+             "Roboto Condensed", "Arial Narrow", sans-serif;
+  --text: "Avenir Next", "Segoe UI", system-ui, sans-serif;
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  overflow: hidden;
+  background: #060811;
+  color: var(--ink);
+  font-family: var(--text);
+  transition: opacity 0.7s ease;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.boot.is-done { opacity: 0; pointer-events: none; }
+
+/* ---- sky ------------------------------------------------------------------ */
+
+.boot__sky {
+  position: absolute;
+  inset: 0 0 calc(100% - var(--horizon)) 0;
+  background: linear-gradient(180deg,
+    #02040c 0%,            /* the splash's navy */
+    #0a1030 28%,
+    #262048 52%,
+    #6a3350 72%,
+    #c2573f 86%,
+    #f09a4c 96%,
+    #ffc875 100%);
+}
+/* A few early stars in the deep part of the sky only. */
+.boot__sky::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 45% 0;
+  background:
+    radial-gradient(1px 1px at 12% 18%, rgb(255 255 255 / 0.8), transparent 60%),
+    radial-gradient(1px 1px at 27% 9%, rgb(255 255 255 / 0.55), transparent 60%),
+    radial-gradient(1.4px 1.4px at 41% 23%, rgb(210 225 255 / 0.7), transparent 60%),
+    radial-gradient(1px 1px at 58% 12%, rgb(255 255 255 / 0.5), transparent 60%),
+    radial-gradient(1.2px 1.2px at 71% 28%, rgb(255 255 255 / 0.6), transparent 60%),
+    radial-gradient(1px 1px at 83% 7%, rgb(220 230 255 / 0.75), transparent 60%),
+    radial-gradient(1px 1px at 91% 31%, rgb(255 255 255 / 0.45), transparent 60%),
+    radial-gradient(1px 1px at 6% 34%, rgb(255 255 255 / 0.4), transparent 60%);
+}
+
+.boot__sun {
+  position: absolute;
+  left: 66%;
+  top: calc(var(--horizon) - 12vh - 5.5vmin);
+  width: 11vmin;
+  height: 11vmin;
+  margin-left: -5.5vmin;
+  border-radius: 50%;
+  /* A hot, near-white core falling off to deep orange at the limb — a low sun
+     through thick air, not a flat coin. */
+  background: radial-gradient(circle at 50% 46%, #fffaf0 0%, #ffe7b8 22%, #ffc06a 52%, #ff8a3d 78%, #f06a34 100%);
+  box-shadow: 0 0 3vmin 1vmin rgb(255 170 90 / 0.55), 0 0 14vmin 6vmin rgb(255 130 70 / 0.28), 0 0 40vmin 18vmin rgb(255 110 70 / 0.12);
+}
+
+.boot__ridges {
+  position: absolute;
+  left: 0;
+  width: 100%;
+  top: calc(var(--horizon) - 17vh);
+  height: 17.2vh;
+  display: block;
+}
+
+/* ---- ground and road ------------------------------------------------------ */
+
+.boot__ground {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: var(--horizon);
+  bottom: 0;
+  overflow: hidden;
+  background: linear-gradient(180deg, #1b1622 0%, #0d0c14 22%, #07070c 100%);
+  perspective: 30vh;
+  perspective-origin: 50% 0%;
+}
+/* Haze where the ground meets the sky, so the road dissolves into distance
+   rather than ending at a line. */
+.boot__ground::after {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 26%;
+  background: linear-gradient(180deg, rgb(240 150 90 / 0.55), rgb(120 60 70 / 0.18) 45%, transparent);
+  pointer-events: none;
+}
+
+/* The verges: a wide plane under the road, scrolling with it, so the whole
+   ground rushes past rather than just the paint. */
+.boot__field {
+  position: absolute;
+  left: 50%;
+  bottom: 0;
+  width: 500vh;
+  height: 900vh;
+  margin-left: -250vh;
+  transform-origin: 50% 100%;
+  transform: rotateX(86.2deg);
+  overflow: hidden;
+}
+.boot__field i {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -12vh;
+  bottom: 0;
+  background:
+    radial-gradient(0.9vh 0.5vh at 30% 40%, rgb(64 52 70 / 0.9), transparent 70%) 0 0 / 7vh 6vh,
+    radial-gradient(0.7vh 0.45vh at 70% 20%, rgb(8 6 12 / 0.9), transparent 70%) 2vh 0 / 11vh 4vh,
+    radial-gradient(1.3vh 0.6vh at 50% 60%, rgb(80 62 76 / 0.55), transparent 70%) 5vh 0 / 17vh 12vh,
+    radial-gradient(0.6vh 0.4vh at 20% 80%, rgb(96 76 88 / 0.5), transparent 70%) 1vh 0 / 5vh 3vh;
+  will-change: transform;
+}
+.boot.is-live .boot__field i { animation: boot-drive 0.55s linear infinite; }
+
+/* The road surface: a long plane hinged at the bottom edge of the screen and
+   laid almost flat, so perspective carries it to the vanishing point on the
+   horizon. Nothing here moves; the markings strip inside it does. */
+.boot__road {
+  position: absolute;
+  left: 50%;
+  bottom: 0;
+  width: 46vh;
+  height: 900vh;
+  margin-left: -34.5vh;
+  transform-origin: 50% 100%;
+  transform: rotateX(86.2deg);
+  background:
+    linear-gradient(90deg,
+      transparent 0, transparent 3%,
+      #3a3a44 3%, #3a3a44 3.6%,           /* kerb shoulder */
+      #d9dde6 4.4%, #d9dde6 6%,           /* left edge line */
+      #22232b 6%, #26272f 50%, #22232b 94%,
+      #d9dde6 94%, #d9dde6 95.6%,         /* right edge line */
+      #3a3a44 96.4%, #3a3a44 97%,
+      transparent 97%, transparent 100%);
+}
+/* Centre dashes and reflector posts, on a strip one pattern-period taller
+   than the road, scrolled toward the viewer. */
+.boot__marks {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -12vh;
+  bottom: 0;
+  background:
+    /* centre dashes */
+    linear-gradient(90deg, transparent 48.9%, #f2c46a 48.9%, #f2c46a 51.1%, transparent 51.1%)
+      0 0 / 100% 12vh,
+    /* reflector posts, both sides */
+    linear-gradient(90deg, transparent 0.6%, #ffd9a0 0.6%, #ffd9a0 1.8%, transparent 1.8%,
+                           transparent 98.2%, #ff5a4a 98.2%, #ff5a4a 99.4%, transparent 99.4%)
+      0 0 / 100% 24vh;
+  -webkit-mask: linear-gradient(180deg, #000 0 42%, transparent 42% 100%) 0 0 / 100% 12vh repeat-y;
+  mask:
+    linear-gradient(180deg, #000 0 42%, transparent 42% 100%) 0 0 / 100% 12vh repeat-y;
+  will-change: transform;
+}
+.boot.is-live .boot__marks { animation: boot-drive 0.55s linear infinite; }
+@keyframes boot-drive { from { transform: translateY(0); } to { transform: translateY(12vh); } }
+
+/* The car's own headlights, thrown up the road ahead of it. */
+.boot__beam {
+  position: absolute;
+  left: 50%;
+  bottom: 20%;
+  width: 34vh;
+  height: 30vh;
+  margin-left: -17vh;
+  /* Centred inside its box and fading to nothing on every side: brightest at
+     the box's own bottom edge, it drew a hard line across the road on tall
+     screens, where the car no longer covers that edge. */
+  background: radial-gradient(ellipse 46% 44% at 50% 62%, rgb(255 238 205 / 0.32), rgb(255 222 175 / 0.1) 55%, transparent 100%);
+  pointer-events: none;
+}
+/* Red spill from the tail lights onto the road behind. */
+.boot__spill {
+  position: absolute;
+  left: 50%;
+  bottom: 1%;
+  width: 48vh;
+  height: 12vh;
+  margin-left: -24vh;
+  background: radial-gradient(ellipse 50% 50% at 50% 30%, rgb(255 50 40 / 0.26), transparent 70%);
+  pointer-events: none;
+}
+
+.boot__car {
+  position: absolute;
+  left: 50%;
+  bottom: 4.5%;
+  width: 34vh;
+  margin-left: -17vh;
+  display: block;
+  overflow: visible;
+  will-change: transform;
+}
+.boot.is-live .boot__car { animation: boot-bob 0.9s ease-in-out infinite alternate; }
+@keyframes boot-bob {
+  0%   { transform: translateY(0) rotate(0deg); }
+  60%  { transform: translateY(-0.18vh) rotate(0.12deg); }
+  100% { transform: translateY(0.1vh) rotate(-0.1deg); }
+}
+
+/* Darkens the bottom corners, where the tip and the readout sit, and frames
+   the whole picture. Above the road and the car, below the words. */
+.boot__shade {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(0deg, rgb(4 5 10 / 0.92) 0%, rgb(4 5 10 / 0.55) 16%, transparent 34%),
+    radial-gradient(ellipse 80% 70% at 50% 45%, transparent 60%, rgb(0 0 0 / 0.5) 100%);
+}
+
+/* ---- words ---------------------------------------------------------------- */
+
+.boot__brand {
+  position: absolute;
+  left: max(6vw, env(safe-area-inset-left));
+  top: max(7vh, env(safe-area-inset-top));
+  margin: 0;
+}
+.boot__studio {
+  display: flex;
+  align-items: center;
+  gap: 0.7em;
+  margin: 0 0 1.1vh;
+  font: 600 clamp(10px, 1.25vh, 13px)/1 var(--text);
+  letter-spacing: 0.34em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+.boot__studio img { width: 2.4em; height: auto; display: block; }
+.boot__title {
+  margin: 0;
+  font: 700 clamp(3.2rem, 11vh, 8.6rem)/0.86 var(--display);
+  letter-spacing: 0.015em;
+  text-transform: uppercase;
+  background: linear-gradient(180deg, #ffffff 0%, #eef1f6 48%, #b9c1ce 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  filter: drop-shadow(0 0.6vh 2vh rgb(0 0 0 / 0.45));
+}
+.boot__title span { color: var(--amber); -webkit-text-fill-color: var(--amber); }
+.boot__tagline {
+  margin: 1.6vh 0 0;
+  max-width: 34ch;
+  font: 500 clamp(13px, 1.8vh, 17px)/1.4 var(--text);
+  color: var(--ink-soft);
+}
+
+/* ---- the readout: tip on the left, progress on the right ----------------- */
+
+.boot__panel {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 0 max(6vw, env(safe-area-inset-left)) max(4.2vh, env(safe-area-inset-bottom));
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 3vw;
+  pointer-events: none;
+}
+
+.boot__tip {
+  position: relative;
+  max-width: 44ch;
+  min-height: 4.6em;
+}
+.boot__tip-card {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  opacity: 0;
+  transform: translateY(0.6em);
+  transition: opacity 0.5s ease, transform 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.boot__tip-card.is-on { opacity: 1; transform: translateY(0); }
+.boot__tip-label {
+  display: block;
+  margin-bottom: 0.7em;
+  font: 700 11px/1 var(--text);
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: var(--amber);
+}
+.boot__tip-text {
+  margin: 0;
+  font: 500 clamp(14px, 1.9vh, 18px)/1.45 var(--text);
+  color: var(--ink);
+  text-shadow: 0 1px 12px rgb(0 0 0 / 0.6);
+}
+.boot kbd {
+  display: inline-block;
+  min-width: 1.7em;
+  padding: 0.18em 0.45em 0.22em;
+  margin: 0 0.12em;
+  border-radius: 0.32em;
+  border: 1px solid rgb(255 255 255 / 0.28);
+  border-bottom-width: 3px;
+  background: linear-gradient(180deg, rgb(255 255 255 / 0.16), rgb(255 255 255 / 0.05));
+  font: 700 0.82em/1 var(--display);
+  letter-spacing: 0.04em;
+  text-align: center;
+  color: #fff;
+  vertical-align: 0.08em;
+}
+
+.boot__readout {
+  text-align: right;
+  font-family: var(--display);
+  font-variant-numeric: tabular-nums;
+}
+.boot__stage {
+  margin: 0 0 0.9vh;
+  font: 600 clamp(11px, 1.45vh, 14px)/1.2 var(--text);
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+.boot__stage b { color: var(--ink-faint); font-weight: 600; margin-left: 0.9em; letter-spacing: 0.12em; }
+.boot__pct {
+  margin: 0;
+  font: 700 clamp(2.6rem, 8.4vh, 5.6rem)/0.82 var(--display);
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+.boot__pct small { font-size: 0.42em; margin-left: 0.08em; color: var(--amber); vertical-align: 0.95em; }
+
+/* A full-width line along the very bottom, with a bright leading head. */
+.boot__bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 3px;
+  background: rgb(255 255 255 / 0.08);
+}
+.boot__bar i {
+  position: relative;
+  display: block;
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, rgb(255 178 74 / 0.25), var(--amber));
+  transition: width 0.45s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.boot__bar i::after {
+  content: "";
+  position: absolute;
+  right: -3px;
+  top: -4px;
+  width: 10px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--amber-hot);
+  box-shadow: 0 0 14px 4px rgb(255 190 90 / 0.8);
+}
+
+/* main.js writes its raw stage name here; it stays for screen readers and the
+   visible, friendlier name above comes from boot.js. */
+.boot__status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* ---- something went wrong ------------------------------------------------- */
+
+.boot__error {
+  position: absolute;
+  left: max(6vw, env(safe-area-inset-left));
+  right: max(6vw, env(safe-area-inset-right));
+  bottom: 16vh;
+  display: none;
+  max-width: 56ch;
+  padding: 1.1em 1.3em;
+  border-left: 3px solid var(--amber);
+  background: rgb(8 10 18 / 0.86);
+  font: 500 15px/1.5 var(--text);
+  color: var(--ink);
+}
+.boot__error strong { display: block; margin-bottom: 0.3em; font: 700 18px/1.2 var(--display); letter-spacing: 0.04em; text-transform: uppercase; }
+.boot__error code { color: var(--ink-faint); font-size: 12px; word-break: break-word; }
+.boot__error button {
+  margin-top: 0.9em;
+  padding: 0.6em 1.3em;
+  border: 0;
+  border-radius: 3px;
+  background: var(--amber);
+  color: #1a1008;
+  font: 700 13px/1 var(--display);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  cursor: pointer;
+  pointer-events: auto;
+}
+.boot.is-error .boot__error { display: block; }
+.boot.is-error .boot__marks { animation-play-state: paused; }
+.boot.is-error .boot__tip { visibility: hidden; }
+
+/* ---- small screens: phones in portrait ------------------------------------ */
+
+@media (max-aspect-ratio: 3/4) {
+  .boot { --horizon: 50%; }
+  .boot__title { font-size: clamp(2.8rem, 16vw, 5rem); }
+  .boot__panel { grid-template-columns: 1fr; gap: 2vh; }
+  .boot__readout { text-align: left; display: flex; align-items: baseline; justify-content: space-between; }
+  .boot__car { width: 27vh; margin-left: -13.5vh; bottom: 22%; }
+  .boot__spill { bottom: 18%; }
+  .boot__beam { bottom: 30%; }
+  /* A phone has a tall band of empty sky under the title; the tip reads far
+     better there, on dark sky, than laid over the road at the bottom. */
+  .boot__tip {
+    /* fixed, not absolute: the tip's parent is the bottom panel, and an
+       absolute top offset measured from there lands below the screen. */
+    position: fixed;
+    left: max(6vw, env(safe-area-inset-left));
+    right: max(6vw, env(safe-area-inset-right));
+    top: calc(max(7vh, env(safe-area-inset-top)) + 32vw + 7vh);
+    max-width: none;
+  }
+  .boot__tip-card { top: 0; bottom: auto; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .boot.is-live .boot__marks,
+  .boot.is-live .boot__car { animation: none; }
+  .boot, .boot__bar i, .boot__tip-card { transition: none; }
+}

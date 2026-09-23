@@ -267,15 +267,23 @@ export function createGround(world, opts = {}) {
     const c = solve[n];
     if (Wt[c] > 0) delta[c] = Tg[c] / Wt[c];   // start close to the answer
   }
+  // Solved in a Float64 copy and written back once: rounding every store to
+  // float32 cost 15% of the solve, which is most of this layer's boot time.
+  // 120 sweeps, not 160: measured against 600 (converged), 160 left under
+  // 0.1 mm and 120 leaves 0.34 mm at the worst cell anywhere on the map, for
+  // a quarter less of the loading bar (1.2 s -> 0.8 s for the whole layer).
   const OMEGA = 1.86;
-  for (let it = 0; it < 160; it++) {
+  const SWEEPS = 120;
+  const D64 = Float64Array.from(delta);
+  for (let it = 0; it < SWEEPS; it++) {
     for (let n = 0; n < solve.length; n++) {
       const c = solve[n];
-      const avg = 0.25 * (delta[c - 1] + delta[c + 1] + delta[c - N] + delta[c + N]);
+      const avg = 0.25 * (D64[c - 1] + D64[c + 1] + D64[c - N] + D64[c + N]);
       const w = Wt[c];
-      delta[c] += OMEGA * ((w > 0 ? (avg + Tg[c]) / (1 + w) : avg) - delta[c]);
+      D64[c] += OMEGA * ((w > 0 ? (avg + Tg[c]) / (1 + w) : avg) - D64[c]);
     }
   }
+  for (let n = 0; n < solve.length; n++) delta[solve[n]] = D64[solve[n]];
 
   let pinnedCells = 0;
   for (let c = 0; c < Wt.length; c++) if (Wt[c] > 0) pinnedCells++;

@@ -55,6 +55,33 @@
 // up by about 0.8 EV at full night — enough to keep the road readable under
 // moonlight without pretending it is day.
 //
+// CHANGING TIER MID-GAME COSTS NO SHADER COMPILES
+//
+// main.js steps the post tier down on a machine that cannot hold 60 fps (and
+// back up when it can), so a tier change happens while someone is driving and
+// must not stall. Two things used to make it stall. The finish shader's tap
+// count and chromatic split were #defines, so every tier change compiled a new
+// program and threw the old one away (switching back compiled it again). They
+// are uniforms now: one program serves every tier. And the MSAA tier rebuilt
+// the whole chain — new targets, new materials, every post shader compiled
+// afresh — where only the scene pass differs. Now just that pass is swapped.
+//
+// RESOLUTION SCALE
+//
+// setResolutionScale() renders the frame at a fraction of the tier's pixel
+// ratio and lets the canvas scale it up: at 0.8 the GPU shades 64% of the
+// pixels. It is the gentlest lever there is on a GPU-bound machine — the image
+// softens slightly, nothing appears or disappears — so it is the first one the
+// automatic quality in main.js reaches for.
+//
+// GPU TIME
+//
+// With setGpuTiming(true) and EXT_disjoint_timer_query_webgl2 available, one
+// frame in every few is timed on the GPU and `gpuMs` holds a smoothed figure.
+// The query is read back frames later, never waited on, so it costs nothing
+// on the CPU. The automatic quality uses it to tell a GPU-bound machine (where
+// fewer pixels help) from a CPU-bound one (where they only blur the picture).
+//
 // WHY 'off' TEARS THE COMPOSER DOWN INSTEAD OF DISABLING EVERY PASS
 //
 // An EffectComposer costs two full-screen half-float render targets plus a copy
@@ -80,6 +107,10 @@ const KNEE = 0.36;
 // power fogs it.
 const RISE_TAU = 0.30;   // s
 const FALL_TAU = 0.16;   // s
+
+// Bloom strength per second when a tier change turns it on or off, so it fades
+// over about a second instead of every lamp losing its glow in one frame.
+const BLOOM_FADE = 0.35;
 
 // Exposure adaptation: seconds for the eye to follow a change in light.
 const ADAPT_TAU = 2.5;
@@ -152,6 +183,8 @@ uniform float uShift;      // longest radial displacement, in UV, at uAmount = 1
 uniform float uVignette;   // resting corner darkening
 uniform float uGrade;      // 0 = plain ACES, 1 = the full grade
 uniform float uSeed;       // changes every frame, so the dither never sits still
+uniform int   uTaps;       // blur taps, 2..MAX_TAPS: a uniform, not a define, so
+uniform float uChroma;     // a tier change never compiles a new program
 
 #include <tonemapping_pars_fragment>
 #include <colorspace_pars_fragment>
@@ -191,19 +224,22 @@ void main() {
   if (amt > 0.002) {
     vec3 csum = vec3(0.0), wsum = vec3(0.0);
     float asum = 0.0, awsum = 0.0;
-    for (int i = 0; i < TAPS; i++) {
-      float t = float(i) / float(TAPS - 1);
+    // A constant bound with a uniform exit, because GLSL ES 1.00 only allows
+    // constant loop bounds. uTaps is the same for every pixel, so the exit is
+    // uniform control flow and costs nothing over a compiled-in count.
+    float last = float(uTaps - 1);
+    for (int i = 0; i < MAX_TAPS; i++) {
+      if (i >= uTaps) break;
+      float t = float(i) / last;
       float w = 1.0 - 0.45 * t;
       vec4 s = texture2D(tDiffuse, vUv - d * (t * amt * uShift));
       vec3 cw = vec3(w);
-      #if CHROMA
-        // Lateral dispersion by moving each channel's centre of mass along the
-        // streak, not by adding displaced taps: every channel is still an
-        // average of every tap, so all three are equally blurred.
-        float bias = 0.9 * amt * (t - 0.5);
-        cw.r = w * (1.0 + bias);
-        cw.b = w * (1.0 - bias);
-      #endif
+      // Lateral dispersion by moving each channel's centre of mass along the
+      // streak, not by adding displaced taps: every channel is still an
+      // average of every tap, so all three are equally blurred.
+      float bias = uChroma * 0.9 * amt * (t - 0.5);
+      cw.r = w * (1.0 + bias);
+      cw.b = w * (1.0 - bias);
       csum += s.rgb * cw;
       wsum += cw;
       asum += s.a * w;
@@ -334,7 +370,24 @@ export function createEffects(renderer, scene, camera, opts = {}) {
 
   let composer = null;
   let renderPass = null, bloomPass = null, finishPass = null, fxaaPass = null;
-  let builtMsaa = -1;
+  // The scene pass for the MSAA tier, built the first time it is asked for and
+  // then kept, so stepping in and out of 'high' swaps one pass rather than
+  // rebuilding the chain. Out of use, its target is shrunk to 1x1: a 4x
+  // half-float target at 1080p is 66 MB nobody would be drawing into.
+  let msaaPass = null;
+  let activeMsaa = 0;
+
+  // Fraction of the tier's pixel ratio actually rendered. See setResolutionScale.
+  let resScale = 1;
+
+  // GPU timing: one query in flight at a time, read back when it is ready.
+  let timerExt = null, timing = false, query = null, queryWait = 0;
+  let gpuMs = NaN;
+
+  // Bloom fades rather than switching. bloomNow is what is drawn, bloomWant
+  // where the tier wants it; bloomScaleNow is the resolution its targets are
+  // kept at, which stays up until a fade out has finished.
+  let bloomNow = 0, bloomWant = 0, bloomScaleNow = 0, bloomSnap = true;
 
   let blur = 0;         // smoothed, what the shader sees
   let blurTarget = 0;   // shaped from the last setSpeedBlur
@@ -350,42 +403,69 @@ export function createEffects(renderer, scene, camera, opts = {}) {
     uVignette: { value: vignetteBase },
     uGrade: { value: 1 },
     uSeed: { value: 0 },
+    uTaps: { value: 8 },
+    uChroma: { value: 1 },
   };
 
   function buildChain(msaa) {
-    // The canvas's own antialias flag does nothing for a frame drawn
-    // off-screen, so MSAA has to be asked for on a render target — and only
-    // on the scene's (see MsaaRenderPass).
     const pr = pixelRatio();
     composer = new EffectComposer(renderer);
     composer.setPixelRatio(pr);
-    builtMsaa = msaa;
 
-    renderPass = msaa > 0 ? new MsaaRenderPass(scene, camera, msaa) : new RenderPass(scene, camera);
+    renderPass = new RenderPass(scene, camera);
     // Resolution is corrected in applySize(); the constructor value only has
     // to be non-zero, since addPass immediately overwrites it.
     bloomPass = new UnrealBloomPass(new THREE.Vector2(width, height), 0.5, 0.6, 1.0);
-    finishPass = new FinishPass({ TAPS: 8, CHROMA: 1 }, finishUniforms);
+    finishPass = new FinishPass({ MAX_TAPS: 8 }, finishUniforms);
     fxaaPass = new FXAAPass();
 
     composer.addPass(renderPass);
     composer.addPass(bloomPass);
     composer.addPass(finishPass);
     composer.addPass(fxaaPass);
+    activeMsaa = 0;
+    useMsaa(msaa);
+  }
+
+  /**
+   * The canvas's own antialias flag does nothing for a frame drawn
+   * off-screen, so MSAA has to be asked for on a render target — and only on
+   * the scene's (see MsaaRenderPass). Swaps the first pass; nothing else in
+   * the chain is touched, so nothing is recompiled.
+   */
+  function useMsaa(samples) {
+    if (!composer || samples === activeMsaa) return;
+    const current = composer.passes[0];
+    let next;
+    if (samples > 0) {
+      if (msaaPass && msaaPass.target.samples !== samples) { msaaPass.dispose(); msaaPass = null; }
+      if (!msaaPass) msaaPass = new MsaaRenderPass(scene, camera, samples);
+      next = msaaPass;
+    } else {
+      next = renderPass;
+    }
+    composer.removePass(current);
+    composer.insertPass(next, 0);        // insertPass sizes it to the composer
+    if (current === msaaPass && next !== msaaPass) msaaPass.setSize(1, 1);
+    activeMsaa = samples;
   }
 
   function teardown() {
+    bloomSnap = true;
     if (!composer) return;
     for (const pass of composer.passes) pass.dispose();
+    // Whichever scene pass was NOT in the chain is not in passes either.
+    if (msaaPass && composer.passes.indexOf(msaaPass) < 0) msaaPass.dispose();
+    if (renderPass && composer.passes.indexOf(renderPass) < 0) renderPass.dispose();
     composer.dispose();
     composer = null;
-    renderPass = bloomPass = finishPass = fxaaPass = null;
-    builtMsaa = -1;
+    renderPass = bloomPass = finishPass = fxaaPass = msaaPass = null;
+    activeMsaa = 0;
   }
 
   function pixelRatio() {
     const device = (typeof window !== 'undefined' && window.devicePixelRatio) || 1;
-    return Math.min(device, TIERS[quality].dpr, maxPixelRatio);
+    return Math.min(device, TIERS[quality].dpr, maxPixelRatio) * resScale;
   }
 
   function applySize() {
@@ -402,8 +482,11 @@ export function createEffects(renderer, scene, camera, opts = {}) {
     // Bloom is the one pass deliberately run below that, so it is corrected
     // afterwards. Switched off, its render targets shrink to nothing, because
     // the tier that turns bloom off is the tier with no VRAM to spare.
-    const t = TIERS[quality];
-    const scale = t.bloom ? t.bloomScale : 0;
+    sizeBloom(pr);
+  }
+
+  function sizeBloom(pr) {
+    const scale = bloomScaleNow;
     bloomPass.setSize(
       scale > 0 ? Math.max(64, Math.round(width * pr * scale)) : 64,
       scale > 0 ? Math.max(64, Math.round(height * pr * scale)) : 64,
@@ -417,24 +500,30 @@ export function createEffects(renderer, scene, camera, opts = {}) {
       applySize();
       return;
     }
-    // MSAA is a property of the render targets, so changing it rebuilds them.
-    if (composer && builtMsaa !== t.msaa) teardown();
-    if (!composer) buildChain(t.msaa);
+    if (!composer) { buildChain(t.msaa); bloomSnap = true; }
+    else useMsaa(t.msaa);
 
-    bloomPass.enabled = t.bloom !== null;
+    // Radius, threshold and target size change at once; the strength fades
+    // in render(). A bloom on its way out keeps its last settings and size.
+    bloomWant = t.bloom ? t.bloom.strength : 0;
     if (t.bloom) {
-      bloomPass.strength = t.bloom.strength;
       bloomPass.radius = t.bloom.radius;
       bloomPass.threshold = t.bloom.threshold;
+      bloomScaleNow = t.bloomScale;
     }
+    if (bloomSnap) {
+      // A new chain (first build, or back from 'off') has nothing on screen to
+      // fade from.
+      bloomNow = bloomWant;
+      if (!t.bloom) bloomScaleNow = 0;
+      bloomSnap = false;
+    }
+    bloomPass.strength = bloomNow;
+    bloomPass.enabled = bloomNow > 0;
     fxaaPass.enabled = t.fxaa;
 
-    const defines = finishPass.material.defines;
-    if (defines.TAPS !== t.taps || defines.CHROMA !== t.chroma) {
-      defines.TAPS = t.taps;
-      defines.CHROMA = t.chroma;
-      finishPass.material.needsUpdate = true;
-    }
+    finishUniforms.uTaps.value = t.taps;
+    finishUniforms.uChroma.value = t.chroma;
     finishUniforms.uShift.value = t.shift;
     finishUniforms.uVignette.value = vignetteBase * t.vignette;
     finishUniforms.uGrade.value = t.grade;
@@ -458,14 +547,54 @@ export function createEffects(renderer, scene, camera, opts = {}) {
     exposure += (want - exposure) * (1 - Math.exp(-d / ADAPT_TAU));
     renderer.toneMappingExposure = exposure;
 
+    const timed = beginTiming();
     if (!composer) {
       renderer.render(scene, camera);
-      return;
+    } else {
+      if (bloomNow !== bloomWant) fadeBloom(d);
+      finishUniforms.uAmount.value = blur;
+      frameSeed = (frameSeed + 17.3) % 997;
+      finishUniforms.uSeed.value = frameSeed;
+      composer.render(d);
     }
-    finishUniforms.uAmount.value = blur;
-    frameSeed = (frameSeed + 17.3) % 997;
-    finishUniforms.uSeed.value = frameSeed;
-    composer.render(d);
+    if (timed) endTiming();
+  }
+
+  function fadeBloom(d) {
+    const step = BLOOM_FADE * d;
+    bloomNow = bloomNow < bloomWant ? Math.min(bloomWant, bloomNow + step) : Math.max(bloomWant, bloomNow - step);
+    bloomPass.strength = bloomNow;
+    bloomPass.enabled = bloomNow > 0;
+    // Faded all the way out: now the targets can shrink.
+    if (bloomNow === 0 && bloomWant === 0 && bloomScaleNow > 0) {
+      bloomScaleNow = 0;
+      sizeBloom(pixelRatio());
+    }
+  }
+
+  // A GPU timer query brackets one frame in every few. Reading it back is
+  // polled, never waited for — waiting would stall the CPU on the GPU, which is
+  // the one thing this must not do. `disjoint` means the GPU was interrupted
+  // (a context switch, a power-state change) and that sample is discarded.
+  function beginTiming() {
+    if (!timing || !timerExt) return false;
+    const gl = renderer.getContext();
+    if (query) {
+      if (!gl.getQueryParameter(query, gl.QUERY_RESULT_AVAILABLE)) return false;
+      const disjoint = gl.getParameter(timerExt.GPU_DISJOINT_EXT);
+      const ms = gl.getQueryParameter(query, gl.QUERY_RESULT) / 1e6;
+      if (!disjoint && ms >= 0 && ms < 1000) gpuMs = Number.isFinite(gpuMs) ? gpuMs + (ms - gpuMs) * 0.25 : ms;
+      gl.deleteQuery(query);
+      query = null;
+      queryWait = 3;               // leave a few frames untimed between samples
+    }
+    if (queryWait > 0) { queryWait--; return false; }
+    query = gl.createQuery();
+    gl.beginQuery(timerExt.TIME_ELAPSED_EXT, query);
+    return true;
+  }
+  function endTiming() {
+    renderer.getContext().endQuery(timerExt.TIME_ELAPSED_EXT);
   }
 
   /** Size in CSS pixels. The device pixel ratio is applied here, not by you. */
@@ -492,7 +621,48 @@ export function createEffects(renderer, scene, camera, opts = {}) {
     blurTarget = s * s * (3 - 2 * s);   // smoothstep: no kink at the knee
   }
 
+  /**
+   * Render at `s` (0.5..1) of the tier's pixel ratio. The canvas keeps its size
+   * and the browser scales the frame up, so the picture softens a little
+   * rather than changing. Reallocates the render targets, so it is for a
+   * decision made every few seconds, not every frame.
+   */
+  function setResolutionScale(s) {
+    const v = Math.min(1, Math.max(0.5, Number(s) || 1));
+    if (v === resScale) return;
+    resScale = v;
+    applySize();
+  }
+
+  /** Start or stop timing frames on the GPU. False if the browser cannot. */
+  function setGpuTiming(on) {
+    timing = !!on;
+    if (timing && !timerExt) {
+      try { timerExt = renderer.getContext().getExtension('EXT_disjoint_timer_query_webgl2'); }
+      catch { timerExt = null; }
+    }
+    if (!timing) gpuMs = NaN;
+    return !!(timing && timerExt);
+  }
+
+  /**
+   * Compile every post pass now, including the ones this tier has switched
+   * off, by drawing one frame with all of them on. Call it from a loading
+   * screen: a pass switched on later (the automatic quality stepping back up to
+   * bloom) then finds its shaders already built instead of stalling the frame
+   * it first appears in.
+   */
+  function prewarm() {
+    if (!composer) return;
+    const bloomWas = bloomPass.enabled, fxaaWas = fxaaPass.enabled;
+    bloomPass.enabled = true;
+    fxaaPass.enabled = true;
+    try { composer.render(1 / 60); }
+    finally { bloomPass.enabled = bloomWas; fxaaPass.enabled = fxaaWas; }
+  }
+
   function dispose() {
+    if (query) { try { renderer.getContext().deleteQuery(query); } catch { /* context gone */ } query = null; }
     teardown();
   }
 
@@ -500,10 +670,16 @@ export function createEffects(renderer, scene, camera, opts = {}) {
 
   return {
     render, setSize, setQuality, setSpeedBlur, dispose,
+    setResolutionScale, setGpuTiming, prewarm,
     // Exposed so a harness can measure the effect rather than guess at it.
     get bloom() { return bloomPass; },
     get composer() { return composer; },
     get quality() { return quality; },
     get exposure() { return exposure; },
+    get resolutionScale() { return resScale; },
+    /** Smoothed GPU milliseconds per frame, or NaN when not measured. */
+    get gpuMs() { return gpuMs; },
+    /** The pixel ratio actually rendered at: device, tier cap and scale. */
+    get pixelRatio() { return pixelRatio(); },
   };
 }

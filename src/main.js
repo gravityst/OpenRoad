@@ -25,6 +25,7 @@ import { loadSettings, saveSettings, suggestName } from './game/settings.js';
 // Pure arithmetic, no three.js and no DOM, so imported directly for the same
 // reason as roomUrl above. See the render-interpolation note in the loop.
 import { createPoseBuffer, settleAccumulator, blendFactor, springAngleStep, followLinear } from './core/interp.js';
+import { createAdaptiveQuality } from './core/adaptive.js';
 
 const BUILD = '2026-08-22';
 const PHYS_HZ = 120;
@@ -590,6 +591,35 @@ async function boot() {
   sky.setTime(clockHours);
   sky.setWeather(settings.weather || 'clear', 0);
   effects.setQuality(settings.post || 'medium');
+
+  // ---- automatic quality ----
+  // Steps the render resolution, then the post tier, down on a machine that
+  // cannot hold 60 fps and back up when it can (src/core/adaptive.js). Never
+  // above what the player picked, never the shadows or the draw distance.
+  // The level it reaches is remembered, so a slow laptop starts the next
+  // session where it left off instead of juddering for its first few seconds.
+  // settings.autoQuality === false turns it off.
+  const AUTO_KEY = 'openroad.autoquality.v1';
+  const autoOn = () => settings.autoQuality !== false;
+  let autoPost = settings.post || 'medium';
+  const auto = createAdaptiveQuality({ post: autoPost, level: autoRemembered(autoPost) });
+  if (effects.setGpuTiming) effects.setGpuTiming(autoOn());
+  function autoRemembered(post) {
+    try {
+      const v = JSON.parse(localStorage.getItem(AUTO_KEY));
+      return v && v.post === post && Number.isFinite(v.level) ? v.level : 0;
+    } catch { return 0; }
+  }
+  function applyAuto(save) {
+    const on = autoOn();
+    const r = auto.rung;
+    if (effects.setResolutionScale) effects.setResolutionScale(on ? r.scale : 1);
+    effects.setQuality(on ? r.post : autoPost);
+    if (save) {
+      try { localStorage.setItem(AUTO_KEY, JSON.stringify({ post: autoPost, level: auto.level })); }
+      catch { /* private browsing: it just forgets */ }
+    }
+  }
   terrain.setQuality(settings.quality || 'medium');
   city.setQuality(settings.quality || 'medium');
   props.setQuality(settings.quality || 'medium');
@@ -638,7 +668,13 @@ async function boot() {
   menus.on('teleport', (p) => { if (p) { spawnOnRoad(p.x, p.z); startDriving(); } });
 
   function applySettings() {
-    effects.setQuality(settings.post || 'medium');
+    // A new post tier (or auto quality switched) is a new ladder, from the top.
+    // Anything else — a new name, the weather — leaves the level alone, or a
+    // kid renaming themselves would put a slow laptop back to juddering.
+    const post = settings.post || 'medium';
+    if (post !== autoPost || !autoOn()) { autoPost = post; auto.reset(post, 0); }
+    if (effects.setGpuTiming) effects.setGpuTiming(autoOn());
+    applyAuto(true);
     terrain.setQuality(settings.quality || 'medium');
     city.setQuality(settings.quality || 'medium');
     props.setQuality(settings.quality || 'medium');
@@ -750,11 +786,16 @@ async function boot() {
     requestAnimationFrame(frame);
     let dt = (now - last) / 1000;
     last = now;
+    const raw = dt;
     if (!(dt > 0)) dt = 0.016;
     // A tab that was in the background hands back a dt of several seconds.
     // Clamping is what stops the car teleporting across the city on return.
     dt = Math.min(dt, 0.1);
     stepFrame(dt);
+    // Judged on the real interval between frames, and only while driving: the
+    // menus draw over the world and cost differently, and a harness calling
+    // frame() directly is not a frame rate at all.
+    if (mode === 'driving' && autoOn() && auto.sample(raw * 1000, effects.gpuMs)) applyAuto(true);
   }
 
   // The R key's bookkeeping: a scratch road record and how long the car has
@@ -1691,6 +1732,35 @@ async function boot() {
     props.update(camera.position, 0);
   });
 
+  // ---- shaders, before anything needs them --------------------------------
+  // A material's shader program is compiled the first time something using it
+  // is drawn, and that compile stalls the frame. A cold 60 s drive across the
+  // map compiled 20 programs mid-drive, the worst frame 172 ms. So everything
+  // that exists at boot is compiled here, on the loading bar, instead — the
+  // same drive now compiles 8 (goal markers built on demand, a few car parts)
+  // and its worst frame is 37 ms:
+  //  * the traffic pool's cars are built now rather than on the first frame
+  //    (they are hidden until they spawn, but a hidden car's materials still
+  //    compile — that is the point);
+  //  * compileAsync() compiles every material in the scene, hidden or not, in
+  //    parallel where the browser can, and waits until they are ready;
+  //  * one frame through every post pass compiles those, and the shadow pass.
+  // Capped at 8 s, so a driver that never reports ready cannot hold the game
+  // on the loading screen.
+  await stage(0.985, 'warming up the paint shop', async () => {
+    syncTrafficModels(0, 0);
+    if (renderer.compileAsync) {
+      await Promise.race([
+        renderer.compileAsync(scene, camera),
+        new Promise((resolve) => setTimeout(resolve, 8000)),
+      ]);
+    }
+    if (effects.prewarm) effects.prewarm();
+    // The remembered automatic-quality level goes on AFTER the warm-up, so the
+    // passes a low level switches off were still compiled.
+    applyAuto(false);
+  });
+
   // ---- done ---------------------------------------------------------------
   progress(1, failures.length ? `ready — ${failures.length} module(s) unavailable` : 'ready');
   await nextFrame();
@@ -1765,6 +1835,15 @@ async function boot() {
     setTime: (h) => { clockHours = h % 24; settings.time = clockHours; sky.setTime(clockHours); },
     setWeather: (w) => { settings.weather = w; sky.setWeather(w, 0); },
     fps: () => Math.round(fpsSmooth),
+    /** The automatic quality: where it is and why. force(n) pins a level for a look. */
+    get autoQuality() {
+      const r = auto.rung;
+      return {
+        on: autoOn(), level: auto.level, of: auto.levels, scale: r.scale, post: r.post,
+        gpuMs: effects.gpuMs, ...auto.stats,
+        force: (n) => { auto.force(n); applyAuto(false); return auto.level; },
+      };
+    },
     teleport: (x, z) => spawnOnRoad(x, z),
     /** Deterministic tick, so a headless harness drives the same code the player does. */
     tick: (n = 1, dt = PHYS_DT) => { for (let i = 0; i < n; i++) car.step(dt); return car; },

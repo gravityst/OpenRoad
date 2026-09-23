@@ -26,6 +26,7 @@ import {
   createPoseBuffer, settleAccumulator, blendFactor, springAngleStep, followLinear, wrapPi,
 } from '../src/core/interp.js';
 import { createVehicle } from '../src/physics/vehicle.js';
+import { createAdaptiveQuality, ladderFor } from '../src/core/adaptive.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 let fail = 0;
@@ -288,6 +289,107 @@ function makeLoop(car, physics) {
   const tagsAt = src.indexOf('tags.update(camera');
   check('the camera is placed before anything projects through it',
     camAt > 0 && tagsAt > 0 && camAt < tagsAt, 'updateCamera runs before the name tags');
+}
+
+// ---------------------------------------------------------------------------
+// 6. Automatic quality, against simulated machines.
+// ---------------------------------------------------------------------------
+// A machine is a CPU time and a GPU time per frame. The GPU part shrinks with
+// the resolution (a fixed 15% that does not, e.g. the shadow map, and the rest
+// with the pixel count) and with the post tier, by the costs measured for
+// adaptive.js. The frame takes the longer of the two, plus 4% noise, and on a
+// 60 Hz screen waits for the next vsync. Every so often a hitch lands on top:
+// a 300 ms stall and a burst of streaming frames, which must never move it.
+{
+  const POST = { off: 0.6, low: 0.65, medium: 1, high: 1.65 };
+  function machine({ cpu, gpu, chosen = 'medium', vsync = true, hitches = true, timing = true, level = 0 }) {
+    const q = createAdaptiveQuality({ post: chosen, level });
+    let t = 0, frame = 0, slowFrames = 0, drawnFrames = 0, below = 0;
+    const levels = [];
+    return {
+      q,
+      run(seconds) {
+        const end = t + seconds * 1000;
+        while (t < end) {
+          const r = q.rung;
+          const g = gpu * (0.15 + 0.85 * r.scale * r.scale) * POST[r.post] / POST[chosen];
+          let ms = Math.max(cpu, g) * (0.98 + rnd() * 0.04);
+          if (hitches && frame % 300 === 150) ms += 300;                 // every ~5 s
+          if (hitches && frame % 600 >= 400 && frame % 600 < 410) ms += 22;   // streaming burst
+          if (vsync) ms = Math.ceil(ms / (1000 / 60) - 0.02) * (1000 / 60);
+          q.sample(ms, timing ? g * (0.97 + rnd() * 0.06) : NaN);
+          t += ms; frame++;
+          if (t > 15000) {             // judged after the first 15 s
+            drawnFrames++;
+            if (ms > 18.5 && ms < 250) slowFrames++;
+            if (q.level > 0) below += ms;
+          }
+          if (!levels.length || levels[levels.length - 1][1] !== q.level) levels.push([Math.round(t / 1000), q.level]);
+        }
+      },
+      get slowShare() { return drawnFrames ? slowFrames / drawnFrames : 0; },
+      get belowShare() { return below / Math.max(1, t - 15000); },
+      levels,
+    };
+  }
+  const trace = (m) => m.levels.map(([s, l]) => `${s}s:${l}`).join(' ');
+
+  {
+    const m = machine({ cpu: 6, gpu: 9 });
+    m.run(300);
+    check('a fast machine is left alone for five minutes, hitches and all', m.q.changes === 0,
+      `${m.q.changes} changes, level ${m.q.level}`);
+  }
+  {
+    // An integrated GPU that needs 28 ms for the full picture.
+    const m = machine({ cpu: 7, gpu: 28 });
+    m.run(20);
+    const settledAt = m.levels.length ? m.levels[m.levels.length - 1][0] : 0;
+    m.run(280);
+    check('a GPU-bound laptop steps down until it holds 60 fps',
+      m.slowShare < 0.03 && m.q.level > 0,
+      `level ${m.q.level} (${m.q.rung.scale} res, ${m.q.rung.post}), ${(m.slowShare * 100).toFixed(1)}% slow frames after 15 s`);
+    check('...gets there within ten seconds and then stays put',
+      settledAt <= 10 && m.q.changes <= 4, `settled at ${settledAt} s, ${m.q.changes} changes in 5 min: ${trace(m)}`);
+  }
+  for (const timing of [true, false]) {
+    // On the edge: one level holds 60, the level above it does not, quite.
+    // Without GPU timing it has to try; the back-off keeps the trying rare.
+    const m = machine({ cpu: 6, gpu: 22.4, timing });
+    m.run(600);
+    check(`a machine on the edge does not flicker between levels (GPU timing ${timing ? 'on' : 'off'})`,
+      m.q.changes <= (timing ? 3 : 16) && m.slowShare < 0.05,
+      `${m.q.changes} changes in 10 min, ${(m.slowShare * 100).toFixed(1)}% slow frames: ${trace(m).slice(0, 110)}`);
+  }
+  for (const timing of [true, false]) {
+    // Slow because of the CPU. Fewer pixels would only blur the picture.
+    const m = machine({ cpu: 24, gpu: 6, timing });
+    m.run(600);
+    check(`a CPU-bound machine is not blurred for nothing (GPU timing ${timing ? 'on' : 'off'})`,
+      timing ? m.q.changes === 0 : m.belowShare < 0.12,
+      `${(m.belowShare * 100).toFixed(0)}% of 10 min below full quality, ${m.q.changes} changes, now level ${m.q.level}`);
+  }
+  {
+    const m = machine({ cpu: 8, gpu: 70, chosen: 'high' });
+    m.run(12);
+    check('a very slow machine reaches the bottom rung within 12 s', m.q.level === m.q.levels - 1,
+      `level ${m.q.level} of ${m.q.levels - 1} after 12 s: ${trace(m)}`);
+  }
+  {
+    // Remembered from a bad day; today it has room. GPU timing says so.
+    const m = machine({ cpu: 6, gpu: 9, level: 4 });
+    m.run(20);
+    check('a remembered low level climbs back when there is room', m.q.level === 0,
+      `level ${m.q.level} after 20 s: ${trace(m)}`);
+  }
+  {
+    const hi = ladderFor('high'), md = ladderFor('medium'), lo = ladderFor('low'), off = ladderFor('off');
+    const posts = (l) => [...new Set(l.map((r) => r.post))].join(',');
+    check('it never goes above the chosen post tier, or down to "off"',
+      hi[0].post === 'high' && md.every((r) => r.post !== 'high') && lo.every((r) => r.post === 'low') &&
+      off.every((r) => r.post === 'off') && [hi, md, lo].every((l) => l.every((r) => r.post !== 'off')),
+      `high: ${posts(hi)}; medium: ${posts(md)}; low: ${posts(lo)}; off: ${posts(off)}`);
+  }
 }
 
 console.log(fail === 0 ? '\nSmooth at every frame rate.' : `\n${fail} CHECK(S) FAILED`);

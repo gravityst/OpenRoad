@@ -694,12 +694,16 @@ export function createHUD(root, opts = {}) {
 
   // ---- the dial ----------------------------------------------------------
 
+  // Patterns over the two lit canvases, made on first use after each bake: a
+  // pattern snapshots its canvas, so drawDialBase() drops them.
+  let litPat = null, hotPat = null;
+
   /**
    * Bakes everything on the dial that does not move, and two copies of the
    * tach's segments fully lit — one in the band colours, one all red for the
    * shift light. drawDial() then shows as much of the lit copy as the revs
-   * reach by clipping it to a wedge: one blit, one clipped blit, whatever
-   * the rev count, instead of fifty strokes a frame.
+   * reach by filling a wedge with it as a pattern: one blit and one fill,
+   * whatever the rev count, instead of fifty strokes a frame.
    */
   function drawDialBase(redline) {
     const w = dialCanvas.width, h = dialCanvas.height;
@@ -711,6 +715,7 @@ export function createHUD(root, opts = {}) {
     dialBase.width = w; dialBase.height = h;
     dialLit.width = w; dialLit.height = h;
     dialHot.width = w; dialHot.height = h;
+    litPat = null; hotPat = null;
     const g = dialBaseCtx;
 
     const face = g.createRadialGradient(cx, cy - R * 0.3, R * 0.1, cx, cy, R);
@@ -788,15 +793,20 @@ export function createHUD(root, opts = {}) {
     g.drawImage(dialBase, 0, 0);
 
     const tr = clamp(rpm / dialScale, 0, 1);
+    // The lit segments as far as the revs reach: a wedge filled with the
+    // baked lit canvas as a pattern. Measured per whole HUD update in Chrome,
+    // all variants interleaved, six rounds, two runs (median): this 10.2 and
+    // 11.4 us; a save/clip/drawImage/restore of the same canvas 15.3; stroking
+    // the lit segments grouped by colour 21.6-24.7; the old arc-and-needle
+    // dial 10.4-12.4. So the segmented tach costs what the old one did.
     if (tr > 0.004) {
-      g.save();
+      if (!litPat) { litPat = g.createPattern(dialLit, 'no-repeat'); hotPat = g.createPattern(dialHot, 'no-repeat'); }
       g.beginPath();
       g.moveTo(cx, cy);
       g.arc(cx, cy, R, DIAL_START, DIAL_START + DIAL_SWEEP * tr);
       g.closePath();
-      g.clip();
-      g.drawImage(hot ? dialHot : dialLit, 0, 0);
-      g.restore();
+      g.fillStyle = hot ? hotPat : litPat;
+      g.fill();
     }
 
     g.lineCap = 'butt';

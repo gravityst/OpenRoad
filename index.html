@@ -25,6 +25,12 @@
 <link rel="stylesheet" href="styles/ui.css">
 <link rel="stylesheet" href="styles/hud.css">
 <link rel="stylesheet" href="styles/touch.css">
+<link rel="stylesheet" href="styles/splash.css">
+<!-- Fetched first, in parallel with everything else, so the studio splash never
+     starts its reveal over an image that is still downloading. -->
+<link rel="preload" as="image" href="assets/brand/gs-mark.webp" type="image/webp">
+<link rel="preload" as="image" href="assets/brand/gs-gravity.webp" type="image/webp">
+<link rel="preload" as="image" href="assets/brand/gs-studios.webp" type="image/webp">
 
 <!--
   three.js is vendored, not fetched. The game has to run from a file:// URL or an
@@ -64,6 +70,33 @@
     <p class="boot__status">This game needs JavaScript.</p>
   </div></div>
 </noscript>
+
+<!-- The studio splash sits above everything and removes itself. Its script is a
+     plain classic script placed before main.js, so it runs the moment the page
+     parses — the splash covers the game's load instead of adding to it. -->
+<div id="splash" class="splash" role="img" aria-label="Made by Gravity Studios">
+  <div class="splash__ambient"></div>
+  <div class="splash__motes"></div>
+  <div class="splash__stage">
+    <div class="splash__part splash__bloom" aria-hidden="true"><img src="assets/brand/gs-mark.webp" alt=""></div>
+    <div class="splash__part splash__mark">
+      <img src="assets/brand/gs-mark.webp" alt="">
+      <div class="splash__shine" style="-webkit-mask-image:url(assets/brand/gs-mark.webp);mask-image:url(assets/brand/gs-mark.webp)"><i class="splash__band"></i></div>
+    </div>
+    <i class="splash__glow"></i>
+    <div class="splash__part splash__gravity">
+      <img src="assets/brand/gs-gravity.webp" alt="Gravity">
+      <div class="splash__shine" style="-webkit-mask-image:url(assets/brand/gs-gravity.webp);mask-image:url(assets/brand/gs-gravity.webp)"><i class="splash__band"></i></div>
+    </div>
+    <i class="splash__line"></i>
+    <i class="splash__flare"></i>
+    <div class="splash__part splash__studios"><img src="assets/brand/gs-studios.webp" alt="Studios"></div>
+    <p class="splash__made">Made by</p>
+  </div>
+  <p class="splash__copy">&copy; 2026 Gravity Studios</p>
+  <button class="splash__skip" type="button" aria-label="Skip intro">Skip</button>
+</div>
+<script src="src/splash.js"></script>
 
 <script type="module" src="./src/main.js"></script>
 </body>

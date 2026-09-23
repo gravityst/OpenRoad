@@ -78,6 +78,9 @@ import { SURFACES } from '../world/ground.js';
 import { fbm, hash1, hash2, mulberry, clamp, lerp, smoothstep } from '../world/noise.js';
 
 const LIFT = 0.04;          // m of clearance over the physics surface
+// The road's depth pull (V_PULL below): fraction of distance, cap in metres.
+// Anything drawn ON the road uses the same two numbers.
+const ROAD_PULL_V = [0.004, 0.15];
 const KERB = 0.085;         // m of kerb lip — the car has no kerb to stand on
 const WALK_W = 4.2;         // m of sidewalk, matching ground.js's SIDEWALK_W
 const TILE = 24;            // m of road per texture repeat
@@ -2429,7 +2432,7 @@ export function createRoads(world, ground, opts = {}) {
     uSkyZenith: { value: new THREE.Color(0.30, 0.52, 0.95) },
     uSkyHorizon: { value: new THREE.Color(0.95, 1.10, 1.25) },
     uVerge: { value: new THREE.Color(lin(verge[0]), lin(verge[1]), lin(verge[2])) },
-    uPull: { value: new THREE.Vector2(0.004, 0.15) },
+    uPull: { value: new THREE.Vector2(0.004, 0.15) },   // = ROAD_PULL_V
     uBeam: { value: Array.from({ length: BEAMS }, () => new THREE.Vector4()) },
     uBeamDir: { value: Array.from({ length: BEAMS }, () => new THREE.Vector4()) },
     uBeamCount: { value: 0 },
@@ -2872,6 +2875,19 @@ export function planRoadside(world, ground, opts = {}) {
     }
   }
 
+  // ---- road studs ("cat's eyes") on the centre line ---------------------
+  // Every 18 m down the middle of the marked country roads: by day a row of
+  // dots you barely notice, at night the line of lights that tells you where
+  // the road goes long before your headlamps reach it.
+  plan.studs = [];
+  for (const e of world.edges) {
+    if (e.kind !== 'rural' || !e.pts || e.length < 30) continue;
+    for (let s = 12; s < e.length - 12; s += 18) {
+      const p = pointOnEdge(e, s);
+      plan.studs.push({ x: p.x, y: ground.heightAt(p.x, p.z) + LIFT, z: p.z, yaw: Math.atan2(p.tx, p.tz) });
+    }
+  }
+
   // ---- chevron boards round sharp bends ----------------------------------
   for (const e of world.edges) {
     const rural = PAVED_KINDS[e.kind] === 1, gravel = e.kind === 'gravel';
@@ -3183,6 +3199,17 @@ function postGeometry() {
   }
   return k.build();
 }
+/** A road stud: a low dark shoe with a reflector facing each way along the road. */
+function studGeometry() {
+  const k = kitBuilder();
+  k.box(-0.1, 0.0, -0.06, 0.1, 0.022, 0.06, 0x2c2d2f);
+  for (const s of [-1, 1]) {
+    const z = s * 0.0605;
+    k.quad([-0.07 * s, 0.004, z], [0.07 * s, 0.004, z], [0.07 * s, 0.019, z], [-0.07 * s, 0.019, z], [0, 0, s], 0xf6f3e4, 1.4);
+  }
+  return k.build();
+}
+
 /** Snow pole: tall and slender, banded orange and black, a reflector near the top. */
 function snowPoleGeometry() {
   const k = kitBuilder();
@@ -3482,7 +3509,18 @@ const FURN_FRAG_EMIT = /* glsl */`
 totalEmissiveRadiance += diffuseColor.rgb * vGlow * 5.5;
 `;
 
-function furnitureMaterial(uniforms, { atlas = null, bend = false } = {}) {
+// Studs sit ON the road, which is pulled toward the eye in depth (V_PULL);
+// pulled by the same amount they keep their 2 cm over it at any distance.
+const STUD_PULL = /* glsl */`
+{
+  float pullLen = length( mvPosition.xyz );
+  float pullBy = min( ${ROAD_PULL_V[0]} * pullLen, ${ROAD_PULL_V[1]} );
+  mvPosition.xyz *= 1.0 - pullBy / max( pullLen, 1e-3 );
+  gl_Position = projectionMatrix * mvPosition;
+}
+`;
+
+function furnitureMaterial(uniforms, { atlas = null, bend = false, pull = false } = {}) {
   const m = new THREE.MeshStandardMaterial({
     color: 0xffffff, vertexColors: true, roughness: 0.62, metalness: 0.08,
   });
@@ -3493,13 +3531,13 @@ function furnitureMaterial(uniforms, { atlas = null, bend = false } = {}) {
     shader.vertexShader = defs + shader.vertexShader
       .replace('#include <common>', '#include <common>\n' + FURN_VERT_PARS)
       .replace('#include <begin_vertex>', '#include <begin_vertex>\n' + FURN_VERT)
-      .replace('#include <project_vertex>', '#include <project_vertex>\n' + FURN_VERT_GLOW);
+      .replace('#include <project_vertex>', '#include <project_vertex>\n' + (pull ? STUD_PULL : '') + FURN_VERT_GLOW);
     shader.fragmentShader = defs + shader.fragmentShader
       .replace('#include <common>', '#include <common>\n' + FURN_FRAG_PARS)
       .replace('#include <map_fragment>', '#include <map_fragment>\n' + FURN_FRAG_MAP)
       .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\n' + FURN_FRAG_EMIT);
   };
-  m.customProgramCacheKey = () => `openroad-furniture-1${atlas ? '-a' : ''}${bend ? '-b' : ''}`;
+  m.customProgramCacheKey = () => `openroad-furniture-1${atlas ? '-a' : ''}${bend ? '-b' : ''}${pull ? '-p' : ''}`;
   return m;
 }
 
@@ -3636,6 +3674,12 @@ export function createRoadside(plan, opts = {}) {
   plan.posts.forEach((p, i) => putUpright(posts, i, p.x, p.y, p.z, p.yaw));
   const snow = add(makeFurnitureField('snowPoles', snowPoleGeometry(), flex, plan.snowPoles.length, 'small', { extras: { aBend: 3 }, track: true }));
   plan.snowPoles.forEach((p, i) => putUpright(snow, i, p.x, p.y, p.z, p.yaw));
+
+  const studMat = furnitureMaterial(uniforms, { pull: true });
+  disposables.push(studMat);
+  const studList = plan.studs || [];
+  const studs = add(makeFurnitureField('studs', studGeometry(), studMat, studList.length, 'small'));
+  studList.forEach((p, i) => putUpright(studs, i, p.x, p.y, p.z, p.yaw));
 
   const rails = add(makeFurnitureField('rails', railGeometry(), furn, plan.rails.length, 'rail', { shadow: true }));
   plan.rails.forEach((r, i) => {

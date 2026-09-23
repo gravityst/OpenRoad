@@ -368,6 +368,7 @@ function addPlayer(name, k, opts = {}) {
     name, x: s.x, z: s.z, yaw: s.yaw, vx: 0, vz: 0, seq: 0, tele: false,
     drive: null, events: [], heard: [], alive: true, holdTrail: [], placed: 0, v1: !!opts.v1,
   };
+  P.drawn = { x: s.x, z: s.z, yaw: s.yaw };
   const heard = (d) => { if (typeof d === 'string') { try { P.heard.push(JSON.parse(d)); } catch { /* binary */ } } };
   const now = () => sim.t * (1 + (k - 2) * 20e-6) + 1000 * k;       // every clock its own origin and drift
   const factory = LIVE ? liveSocketFactory(heard) : simSocketFactory(100 + k, heard);
@@ -397,7 +398,10 @@ function addPlayer(name, k, opts = {}) {
     rec.flags = P.tele ? 64 : 0; rec.respawnSeq = P.seq & 0xff; P.tele = false;
     P.net.update(dt, rec);
     if (P.modes) {
-      P.modes.update(dt, P, true);
+      // As in the game: the controller is handed where the car is DRAWN
+      // (main.js's pose), which trails a placement by a frame.
+      P.modes.update(dt, P.drawn, true);
+      P.drawn.x = P.x; P.drawn.z = P.z; P.drawn.yaw = P.yaw;
       for (const e of P.modes.events) P.events.push({ t: sim.t, ...e });
       P.modes.events.length = 0;
       if (P.party) P.party.update(dt, P, null);
@@ -481,6 +485,8 @@ try {
   check(gridBad.length === 0 && new Set(slots).size === 3 && [A, B, C].every((p) => p.modes.hold),
     'everyone who joins is put on their own grid slot and held there', gridBad.join('; ') || `slots ${slots.join(', ')}`);
 
+  const falseStarts = [A, B, C].filter((p) => p.events.some((e) => e.k === 'jumpstart')).map((p) => p.name);
+  check(!falseStarts.length, 'being put on the grid is not itself a jump start', falseStarts.join(', ') || 'none');
   // Bee creeps forward on the grid (as if the hold were not wired): put back.
   const s1 = MODES.gridSpot(c, grid[1].e.slot, {});
   place(B, s1.x - Math.sin(s1.yaw) * 6, s1.z - Math.cos(s1.yaw) * 6, s1.yaw);

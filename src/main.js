@@ -363,11 +363,19 @@ async function boot() {
   // layer list above, which destructures by position and is shared with every
   // other part of the game; each of these may be null, and the game without
   // them is the game with multiplayer and no way to find anybody.
-  const [mParty, mRoster, mBeacons] = net ? await Promise.all([
+  //
+  // And playing together: race your friends, tag, coin rush, emotes
+  // (game/modes.js, refereed by the room in server/modes.js), drawn on screen
+  // by game/modesUi.js and in the world by render/modeFx.js. Same rules: any
+  // of them may be null and the game carries on without it.
+  const [mParty, mRoster, mBeacons, mModes, mModesUi, mModeFx] = net ? await Promise.all([
     layer('./game/party.js', 'friends'),
     layer('./game/roster.js', 'friends list'),
     layer('./render/beacons.js', 'player beacons'),
-  ]) : [null, null, null];
+    layer('./game/modes.js', 'party games'),
+    layer('./game/modesUi.js', 'party games screen'),
+    layer('./render/modeFx.js', 'party games world'),
+  ]) : [null, null, null, null, null, null];
   const party = mParty ? safe(() => mParty.createParty({
     net, world, ground,
     // The goals layer already built the road graph; borrow it. Read at the
@@ -376,18 +384,36 @@ async function boot() {
     place: (x, z, yaw) => placeCar(x, z, yaw),
   })) : null;
   const colourOf = party ? party.colourFor : null;
+  const modes = mModes && party ? safe(() => mModes.createModes({
+    net, world,
+    // Read at the first game, long after `goals` exists: its races.
+    goals: () => goals,
+    place: (x, z, yaw) => placeCar(x, z, yaw),
+    abandonGoals: () => { if (goals) goals.abandon(); },
+    colourOf,
+    self: () => ({ name: settings.name || '', carId: chosenCar, colour: chosenColour }),
+    goTo: (id) => party.goTo(id),
+  })) : null;
   const roster = mRoster && party ? safe(() => mRoster.createRoster({
-    party, net, onGo: goToFriend, onGuide: guideToFriend,
+    party, net, modes, onGo: goToFriend, onGuide: guideToFriend,
     onStopGuide: () => party.stopGuide(),
   })) : null;
   if (net && roster) net.onEvent = (e) => roster.onNetEvent(e);
   const beacons = mBeacons && party ? safe(() => mBeacons.createBeacons(scene, {
     quality: settings.quality || 'medium', heightAt: ground.heightAt,
   })) : null;
+  const modesUi = mModesUi && modes ? safe(() => mModesUi.createModesUi({
+    modes, toast: (t, css) => { if (roster) roster.toast(t, css); }, online: () => party.online,
+  })) : null;
+  const modeFx = mModeFx && modes ? safe(() => mModeFx.createModeFx(scene, {
+    quality: settings.quality || 'medium', heightAt: ground.heightAt,
+  })) : null;
 
   /** "Go": onto the road right behind them, facing their way. */
   function goToFriend(id) {
     if (!party) return;
+    // Mid-race or mid-tag, Go would be a teleport past everyone.
+    if (modes && modes.blocksGo) { if (roster) roster.toast(modes.blocksGo); return; }
     if (goals && goals.activeRace) goals.abandon();
     const s = party.goTo(id);
     if (!s) { if (roster) roster.toast('They are not on the road yet — try again in a moment'); return; }
@@ -398,6 +424,7 @@ async function boot() {
   /** "Guide": a route along the roads that keeps pointing at them. */
   function guideToFriend(id) {
     if (!party) return;
+    if (modes && modes.blocksGo) { if (roster) roster.toast(modes.blocksGo); return; }
     if (goals && goals.activeRace) {
       if (roster) roster.toast('Finish the race first — or press Backspace to leave it');
       return;
@@ -1251,9 +1278,21 @@ async function boot() {
         // While guiding, the minimap's GPS line leads to the friend instead.
         if (party.nav && driving) hudState.nav = party.nav;
       }
+      // Party games. The race line (or the coins) take over the minimap, and
+      // while a game or a Guide leads, the challenge GPS stands down — a
+      // party race holding its grid also holds the car, through goals.hold.
+      const onRoad = mode === 'driving' && !menus.current;
+      if (modes) {
+        modes.update(dt, pose, onRoad);
+        if (modes.nav && driving) hudState.nav = modes.nav;
+        if (modesUi) modesUi.update(dt, onRoad, pose);
+        if (modeFx) modeFx.update(dt, camera, modes, pose, net.room);
+      }
+      if (goals) goals.setExternalGuide(modes && modes.hold ? 'hold' : !!(modes && modes.owns) || !!(party && party.guide.id >= 0));
       if (beacons) {
         beacons.setVisible(settings.nameTags !== false);
-        beacons.update(dt, camera, net.room.cars, colourOf, party ? party.guide : null, driving);
+        beacons.update(dt, camera, net.room.cars, colourOf,
+          (modes && modes.raceGuide) || (party ? party.guide : null), driving, modes ? modes.view.it : -1);
       }
       if (roster) roster.update(dt, pose, mode);
     }
@@ -1270,7 +1309,7 @@ async function boot() {
       // Only on the road: over a menu they are clutter on top of its text.
       tags.setVisible(mode === 'driving');
       camera.updateMatrixWorld();
-      tags.update(camera, net.room.cars, pose, colourOf, party ? party.guide.id : -1);
+      tags.update(camera, net.room.cars, pose, colourOf, party ? party.guide.id : -1, modes, net.id);
     }
 
     // ---- streaming ----

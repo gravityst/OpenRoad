@@ -150,7 +150,7 @@ export function createModes(opts) {
 
   // ---- my race ---------------------------------------------------------------
   const my = {
-    gid: -1, placed: false, spot: { x: 0, z: 0, yaw: 0, d: 0 },
+    gid: -1, placed: false, onSpot: false, spot: { x: 0, z: 0, yaw: 0, d: 0 },
     next: 0, hint: -1, d: 0, prevX: 0, prevZ: 0, prevValid: false, prevD: 0,
     lastGate: -1, sentFor: -1, lost: 0,
   };
@@ -351,6 +351,7 @@ export function createModes(opts) {
       gridSpot(c, e.slot, my.spot);
       if (opts.place) opts.place(my.spot.x, my.spot.z, my.spot.yaw);
       my.placed = true;
+      my.onSpot = false;
       my.prevValid = false;
       my.next = 0;
       my.d = my.spot.d;
@@ -359,9 +360,13 @@ export function createModes(opts) {
     }
     // Held on the grid (main.js reads `hold`). Should anything let the car
     // roll anyway, a wheel off the spot before GO is a jump start: back on it.
-    if (my.placed && (m.phase === 'lobby' || m.phase === 'grid') && driving &&
-        Math.hypot(self.x - my.spot.x, self.z - my.spot.z) > JUMP_START) {
+    // Only once the car has been SEEN on its spot: `self` is where the car is
+    // drawn, and for the frame of the placement that is still where it was.
+    const offSpot = Math.hypot(self.x - my.spot.x, self.z - my.spot.z);
+    if (my.placed && offSpot < 0.5) my.onSpot = true;
+    if (my.placed && my.onSpot && (m.phase === 'lobby' || m.phase === 'grid') && driving && offSpot > JUMP_START) {
       if (opts.place) opts.place(my.spot.x, my.spot.z, my.spot.yaw);
+      my.onSpot = false;
       my.prevValid = false;
       events.push({ k: 'jumpstart' });
     }
@@ -458,7 +463,7 @@ export function createModes(opts) {
       i++;
       r.id = e.id; r.me = e.id === id;
       r.name = nameOf(e.id); r.css = cssOf(e.id);
-      r.g = e.g; r.fin = e.fin; r.place = e.place; r.d = 0; r.rank = 1e9;
+      r.g = e.g; r.ms = e.ms; r.fin = e.fin; r.place = e.place; r.d = 0; r.rank = 1e9;
       if (m.kind === 'race') {
         // Finished: by place. Otherwise by gates the room has confirmed (mine
         // counts as soon as I cross — the room will agree), then by how far
@@ -530,6 +535,7 @@ export function createModes(opts) {
     /** The reaction over car `id` right now, or ''. */
     say(id) { const s = say.get(id); return s ? EMOTE_TEXT[s.e] : ''; },
     nameOf, cssOf,
+    myId: () => me(),
   };
 }
 

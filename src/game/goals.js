@@ -58,6 +58,7 @@ const OFF_ROUTE = 35;           // m from the GPS line before it re-plans
 const REPLAN_HOLD = 1.2;        // s off the line before it re-plans
 const RACE_LOST = 60;           // m off a race route before the "press R" hint
 const TOKEN_R = 5.5;            // m pickup radius, generous: a token is a gift
+const NO_RINGS = [];            // the rings to test while another guide leads (none)
 
 /**
  * opts: {
@@ -206,6 +207,13 @@ export function createGoals(opts) {
   const nav = { route: null, hint: -1, d: 0, off: 0, planFor: null, planAt: -1, dist: 0 };
   let started = false;              // first Drive of the session has happened
   let ringHint = '';
+  // Something else is leading the player — a friend's Guide, or a party game
+  // (game/party.js, game/modes.js). The challenge GPS stands down (a cyan
+  // arrow pointing at a speed trap beside a friend's chevrons is two answers
+  // to one question), and no race ring snaps the car onto a grid. A party
+  // race holding its grid for the count also holds the car, through the same
+  // `hold` main.js already obeys for a solo race's 3-2-1.
+  let external = false, externalHold = false;
   const cooldown = Object.create(null);   // id -> clock time it may re-trigger
   // A race ring re-arms only once the car has LEFT it. A lap finishes on its
   // own start line, and with a timed cooldown alone a kid who pulls up just
@@ -817,6 +825,7 @@ export function createGoals(opts) {
   // ---- the GPS ----------------------------------------------------------------------
 
   function navStep(dt) {
+    if (external) { vs.route = null; hudNav.route = null; vs.arrow = false; return; }
     // While a race runs, the race IS the route.
     let routeC = race.c && race.phase ? race.c : zone.c;
     if (!routeC) {
@@ -861,7 +870,7 @@ export function createGoals(opts) {
 
   function objectiveText() {
     const o = ui.objective;
-    const c = race.c || zone.c || target;
+    const c = race.c || zone.c || (external ? null : target);
     const mode = race.c ? race.phase : zone.c ? 'zone' : 'target';
     const first = !race.c && !zone.c && c === rookie && !progress.flag('rookieDone');
     const near = !race.c && !zone.c && !!nav.route && nav.dist < 120;
@@ -958,7 +967,7 @@ export function createGoals(opts) {
         // following the arrow to a speed trap gets snapped onto a grid for a
         // race nobody asked for.
         ringHint = '';
-        for (const c of list) {
+        for (const c of external ? NO_RINGS : list) {
           if (c.kind !== 'race') continue;
           const dx = car.x - c.start.x, dz = car.z - c.start.z;
           const r = c.start.hw + 4;
@@ -1146,8 +1155,8 @@ export function createGoals(opts) {
   return {
     list, tokens, ramps, graph, progress, byId,
     genMs,
-    /** For main.js: hold the car on the brakes (the countdown). */
-    get hold() { return race.phase === 'countdown'; },
+    /** For main.js: hold the car on the brakes (the countdown, or a party race's grid). */
+    get hold() { return race.phase === 'countdown' || externalHold; },
     get activeRace() { return race.c; },
     get target() { return target; },
     get nav() { return hudNav; },
@@ -1204,6 +1213,14 @@ export function createGoals(opts) {
       return what;
     },
     setTarget: (id) => { const c = byId[id]; if (c) setTarget(c, true); return !!c; },
+    /**
+     * On while something else leads the player (a friend's Guide, a party
+     * game): the challenge GPS, its arrow and the objective banner step aside,
+     * and race rings do not start races. 'hold' as well holds the car on the
+     * brakes, as a solo countdown does (a party race's grid). Off, everything
+     * is as it was.
+     */
+    setExternalGuide(on) { external = !!on; externalHold = on === 'hold'; },
     cycleTarget, resync, recommend: () => recommend(null),
     /** For the harness: the internals it needs to drive a race from code. */
     _race: race, _zone: zone,

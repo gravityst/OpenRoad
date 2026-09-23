@@ -18,6 +18,13 @@
 // march along the road ahead, exactly as the challenge GPS's cyan ones do
 // (same shape, same spacing, same depth offset over the road ribbon).
 //
+// TAG. The car that is IT (game/modes.js) keeps its column but in signal red,
+// twice as wide and pulsing: from anywhere on the map you can see where the
+// chaser is, which is half of the fun of running from it.
+//
+// The chevrons also draw a party race's line (the race's amber), exactly as
+// they draw a Guide.
+//
 // COST. One beam and one ring per player, at most sixteen of each, plus one
 // InstancedMesh of chevrons; no per-frame allocation. 'low' drops the rings.
 
@@ -86,11 +93,14 @@ function chevronGeometry() {
 
 const smooth = (a, b, x) => { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
 
+const IT_HEX = 0xff4d3a;
+
 /**
  * opts: { quality, heightAt(x, z) }
- * update(dt, camera, cars, colourOf(car) -> {hex}, guide, driving)
+ * update(dt, camera, cars, colourOf(car) -> {hex}, guide, driving, itId)
  *   cars     net.room.cars (read only)
- *   guide    party.guide ({ id, hex, route, d }) or null
+ *   guide    party.guide or a party race's line ({ id, hex, route, d }), or null
+ *   itId     the player who is IT in tag, or -1
  */
 export function createBeacons(scene, opts = {}) {
   const low = opts.quality === 'low';
@@ -168,7 +178,7 @@ export function createBeacons(scene, opts = {}) {
     return heightAt ? heightAt(x, z) : fallback;
   }
 
-  function update(dt, camera, cars, colourOf, guide, driving) {
+  function update(dt, camera, cars, colourOf, guide, driving, itId = -1) {
     time += dt;
     tex.offset.y = (tex.offset.y - dt * 0.55) % 1;
     camera.getWorldPosition(camPos);
@@ -181,9 +191,10 @@ export function createBeacons(scene, opts = {}) {
       }
       if (i >= MAX) continue;
       const s = slot(i);
+      const it = c.id === itId;
       const col = colourOf ? colourOf(c) : null;
-      const hex = col ? col.hex : 0xffffff;
-      const guided = guide && guide.id === c.id;
+      const hex = it ? IT_HEX : col ? col.hex : 0xffffff;
+      const guided = (guide && guide.id === c.id) || it;
       const dx = c.x - camPos.x, dz = c.z - camPos.z;
       const dist = Math.sqrt(dx * dx + dz * dz);
       // Colour in HDR so the bloom pass (threshold ~2.1 linear) makes it glow;
@@ -202,7 +213,7 @@ export function createBeacons(scene, opts = {}) {
         // About 1.6 degrees wide at any range: 4 m at 150 m, 67 m at 2.4 km,
         // ~20 px on a laptop screen wherever they are. At 0.2 degrees (the
         // first try) a purple column against a blue sky was a hairline.
-        const w = Math.max(3, dist * 0.028) * (guided ? 1.35 : 1);
+        const w = Math.max(3, dist * 0.028) * (it ? 2 : guided ? 1.35 : 1);
         s.beam.position.set(c.x, gy, c.z);
         // Turned to face the camera about the vertical only, so it stays a
         // column from every side.
@@ -224,7 +235,8 @@ export function createBeacons(scene, opts = {}) {
 
     // The guide's chevrons, marching along the road ahead.
     let shown = 0;
-    const route = guide && guide.id >= 0 ? guide.route : null;
+    // A Guide (party.js clears its route when it stops) or a party race's line.
+    const route = guide ? guide.route : null;
     if (route && driving && visible) {
       tmpCol.setHex(guide.hex);
       const flow = (time * 9) % CHEV_GAP;

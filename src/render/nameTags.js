@@ -19,6 +19,11 @@
  * list. A kid looking for "the orange one" finds the same orange on all four.
  * Tags used to vanish past 320 m, which is exactly when you need them; far
  * away they now keep a compact name-and-distance instead.
+ *
+ * Party games (game/modes.js) add two things to a tag: a badge — IT in tag,
+ * the running position in a race — and a speech bubble when that player sends
+ * one of the four emotes. Your own emote gets a bubble over your own car. The
+ * styles are in styles/multiplayer.css.
  */
 
 import * as THREE from 'three';
@@ -26,35 +31,6 @@ import * as THREE from 'three';
 const MAX_TAGS = 14;            // nearest N; a busy room must not become a wall of text
 const COMPACT = 320;            // past this, just the name and how far away
 const EDGE = 50;                // px inset for off-screen arrows
-
-const CSS = `
-.ortag-layer{position:absolute;inset:0;overflow:hidden;pointer-events:none;z-index:9;
-  --ortag-font:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
-.ortag{position:absolute;left:0;top:0;will-change:transform;transform-origin:50% 100%}
-.ortag__in{display:flex;flex-direction:column;align-items:center;transform-origin:50% 100%}
-.ortag__name{display:flex;align-items:center;gap:6px;font:800 15px/1.2 var(--ortag-font);
-  background:rgba(10,14,20,.72);border:2px solid currentColor;
-  border-radius:8px;padding:3px 9px 3px 7px;white-space:nowrap;
-  text-shadow:0 1px 2px rgba(0,0,0,.9);box-shadow:0 0 14px -2px currentColor}
-.ortag__name i{width:9px;height:9px;border-radius:50%;background:currentColor;flex:0 0 auto}
-.ortag__name span{color:#fff}
-.ortag__dist{font:700 12px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace;
-  color:#fff;text-shadow:0 1px 3px rgba(0,0,0,.95);margin-top:2px}
-.ortag__stem{width:2px;height:12px;background:linear-gradient(currentColor,transparent)}
-.ortag.is-guide .ortag__name{animation:ortag-pulse 1s ease-in-out infinite}
-@keyframes ortag-pulse{50%{box-shadow:0 0 22px 2px currentColor}}
-.orarrow{position:absolute;left:0;top:0;width:0;height:0;will-change:transform}
-.orarrow__tri{position:absolute;left:-12px;top:-12px;width:0;height:0;
-  border-left:12px solid transparent;border-right:12px solid transparent;
-  border-bottom:22px solid currentColor;filter:drop-shadow(0 1px 3px rgba(0,0,0,.9)) drop-shadow(0 0 6px currentColor)}
-.orarrow__lbl{position:absolute;transform:translate(-50%,-50%);
-  font:800 13px/1 var(--ortag-font);color:#fff;background:rgba(10,14,20,.72);
-  border:1px solid currentColor;border-radius:7px;padding:3px 7px;
-  text-shadow:0 1px 3px rgba(0,0,0,.95);white-space:nowrap}
-.orarrow.is-guide .orarrow__tri{animation:orarrow-pulse .8s ease-in-out infinite}
-@keyframes orarrow-pulse{50%{transform:scale(1.25)}}
-@media (prefers-reduced-motion: reduce){.ortag *,.orarrow *{animation:none!important}}
-`;
 
 const DEFAULT_CSS = '#7ef29a';
 
@@ -65,10 +41,15 @@ function fmt(d) {
 export function createNameTags(root, opts = {}) {
   const layer = document.createElement('div');
   layer.className = 'ortag-layer';
-  const style = document.createElement('style');
-  style.textContent = CSS;
-  layer.appendChild(style);
   (root || document.body).appendChild(layer);
+  // Your own car's speech bubble.
+  const selfSay = document.createElement('div');
+  selfSay.className = 'ortag-self';
+  selfSay.hidden = true;
+  const selfSayText = document.createElement('b');
+  selfSay.appendChild(selfSayText);
+  layer.appendChild(selfSay);
+  let selfTxt = '', selfCol = '';
 
   const tags = [];              // pooled DOM, never rebuilt per frame
   const arrows = [];
@@ -90,19 +71,30 @@ export function createNameTags(root, opts = {}) {
     el.className = 'ortag';
     const inner = document.createElement('div');
     inner.className = 'ortag__in';
+    const say = document.createElement('div');
+    say.className = 'ortag__say';
+    say.hidden = true;
+    const sayText = document.createElement('b');
+    say.appendChild(sayText);
     const name = document.createElement('div');
     name.className = 'ortag__name';
-    const dot = document.createElement('i');
     const label = document.createElement('span');
-    name.append(dot, label);
+    const badge = document.createElement('span');
+    badge.className = 'ortag__badge';
+    const badgeText = document.createElement('b');
+    badge.appendChild(badgeText);
+    name.append(label, badge);
     const dist = document.createElement('div');
     dist.className = 'ortag__dist';
     const stem = document.createElement('div');
     stem.className = 'ortag__stem';
-    inner.append(name, dist, stem);
+    inner.append(say, name, dist, stem);
     el.appendChild(inner);
     layer.appendChild(el);
-    const t = { el, inner, label, dist, txt: '', dtxt: '', col: '', guide: false, shown: false, k: '', o: '' };
+    const t = {
+      el, inner, label, dist, say, sayText, badgeText, txt: '', dtxt: '', col: '', guide: false, shown: false, k: '', o: '',
+      stxt: '', btxt: '',
+    };
     tags.push(t);
     return t;
   }
@@ -116,7 +108,7 @@ export function createNameTags(root, opts = {}) {
     lbl.className = 'orarrow__lbl';
     el.append(tri, lbl);
     layer.appendChild(el);
-    const a = { el, lbl, txt: '', col: '', guide: false, shown: false };
+    const a = { el, lbl, txt: '', col: '', guide: false, shown: false, it: false };
     arrows.push(a);
     return a;
   }
@@ -134,12 +126,54 @@ export function createNameTags(root, opts = {}) {
     if (o.guide !== guide) { o.el.classList.toggle('is-guide', guide); o.guide = guide; }
   }
 
+  /** A badge ('IT', 'P2') and a bubble on a tag; strings compared, never rebuilt. */
+  function deco(t, id, games) {
+    const b = games ? games.badge(id) : '';
+    if (b !== t.btxt) {
+      t.btxt = b;
+      t.badgeText.textContent = b;
+      t.el.classList.toggle('has-badge', !!b);
+      t.el.classList.toggle('is-it', b === 'IT');
+    }
+    const w = games ? games.say(id) : '';
+    if (w !== t.stxt) {
+      t.stxt = w;
+      t.sayText.textContent = w;
+      t.say.hidden = !w;
+    }
+  }
+
+  /** Your own emote, over your own car (`self` is where it is drawn). */
+  const vs = new THREE.Vector3();
+  function selfBubble(camera, self, games, selfId) {
+    const w = games && self && selfId >= 0 ? games.say(selfId) : '';
+    if (!w || !showTags) { if (!selfSay.hidden) { selfSay.hidden = true; selfTxt = ''; } return; }
+    vs.set(self.x, (self.y || 0) + 1.9, self.z);
+    vs.project(camera);
+    if (vs.z > 1) { selfSay.hidden = true; return; }
+    const sx = (vs.x * 0.5 + 0.5) * w, sy = (-vs.y * 0.5 + 0.5) * h;
+    if (w !== selfTxt) {
+      selfTxt = w;
+      selfSayText.textContent = w;
+      // Re-inserted so the pop-in animation runs for every new reaction.
+      selfSay.hidden = true;
+      void selfSay.offsetWidth;
+    }
+    const col = games.cssOf ? games.cssOf(selfId) : DEFAULT_CSS;
+    if (col !== selfCol) { selfSay.style.color = col; selfCol = col; }
+    selfSay.hidden = false;
+    selfSay.style.transform = `translate(${sx.toFixed(1)}px,${sy.toFixed(1)}px) translate(-50%,-100%)`;
+  }
+
   /**
    * `cars` is the remote pool from net/room.js. Nothing here writes to it.
    * `colourOf(car)` -> { css } and `guided` (the id being guided to) are
-   * optional; without them every tag is the original green.
+   * optional; without them every tag is the original green. `games` is
+   * game/modes.js ({ badge(id), say(id) }) and `selfId` this player's id, for
+   * the party games' badges and bubbles; both optional.
    */
-  function update(camera, cars, self, colourOf, guided = -1) {
+  function update(camera, cars, self, colourOf, guided = -1, games = null, selfId = -1) {
+    selfBubble(camera, self, games, selfId);
     if (!cars || !cars.length || (!showTags && !showArrows)) {
       for (const t of tags) show(t, false);
       for (const a of arrows) show(a, false);
@@ -209,6 +243,7 @@ export function createNameTags(root, opts = {}) {
         const os = (Math.round(c.fade * 20) / 20).toFixed(2);
         if (t.o !== os) { t.inner.style.opacity = os; t.o = os; }
         if (nm !== t.txt) { t.label.textContent = nm; t.txt = nm; }   // textContent, never innerHTML
+        deco(t, c.id, games);
         // Far off, the car itself is a few pixels; how far is what matters.
         const dt = c.dist < COMPACT ? fmt(c.dist) : `${fmt(c.dist)} away`;
         if (dt !== t.dtxt) { t.dist.textContent = dt; t.dtxt = dt; }
@@ -220,6 +255,9 @@ export function createNameTags(root, opts = {}) {
         ai++;
         show(a, true);
         paint(a, css, guide);
+        // IT, off screen, gets a pulsing arrow: where the chaser is matters.
+        const isIt = !!games && games.badge(c.id) === 'IT';
+        if (a.it !== isIt) { a.el.classList.toggle('is-it', isIt); a.it = isIt; }
         let dx = sx - cx, dy = sy - cy;
         if (behind) { dx = -dx; dy = -dy; }   // un-flip the mirrored projection
         const len = Math.hypot(dx, dy) || 1;
@@ -246,7 +284,8 @@ export function createNameTags(root, opts = {}) {
         a.el.style.transform =
           `translate(${px.toFixed(1)}px,${py.toFixed(1)}px) rotate(${ang.toFixed(3)}rad)`;
         a.el.style.opacity = (Math.round(c.fade * 20) / 20).toFixed(2);
-        const lbl = `${nm}  ${fmt(c.dist)}`;
+        const say = games ? games.say(c.id) : '';
+        const lbl = say ? `${nm}: ${say}` : `${nm}  ${fmt(c.dist)}`;
         if (lbl !== a.txt) { a.lbl.textContent = lbl; a.txt = lbl; }
         // Counter-rotate the label so text stays upright whatever the arrow does.
         a.lbl.style.transform =

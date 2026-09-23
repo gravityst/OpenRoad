@@ -305,7 +305,7 @@ function crash(car) {
   }
 }
 
-// ---- 6. Grinding along a wall is a thin trickle ---------------------------
+// ---- 5. Grinding along a wall is a thin trickle ---------------------------
 //
 // main.js calls impactCue() for every 120 Hz substep that reports a hit past
 // severity 0.04, and a car held against a wall can report one on every
@@ -396,7 +396,7 @@ function crash(car) {
       `${scrape.knocks} contacts past 0.04, ${scrape.billows} billows` : 'no scrape run'));
 }
 
-// ---- 5. The wiring holds --------------------------------------------------
+// ---- 6. The wiring holds --------------------------------------------------
 //
 // Read main.js for the four places the switch has to reach. If a merge drops
 // one of these, the fire comes back and nothing else here would notice.

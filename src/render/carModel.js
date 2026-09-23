@@ -498,17 +498,21 @@ function lampTextures() {
     g.fillRect(W * 0.08, H * 0.08, W * 0.86, H * 0.11);
     g.fillRect(W * 0.86, H * 0.08, W * 0.08, H * 0.7);
   });
+  // The fields behind the graphics are mid grey, not dark: the same picture is
+  // the emissive map, and a near-black field (0.04 in linear light) meant a
+  // lit lamp was only its thin light pipe — which averages to almost nothing
+  // at chase-camera range, where a brake light has to be unmissable.
   const tail = make((g) => {
-    g.fillStyle = '#3a3a3a'; g.fillRect(0, 0, W, H);
+    g.fillStyle = '#9a9a9a'; g.fillRect(0, 0, W, H);
     // Light pipe: a C round the outside of the lamp, and fine horizontal
     // louvres inside it.
     g.strokeStyle = '#ffffff'; g.lineWidth = 12;
     g.beginPath(); g.moveTo(W * 0.1, H * 0.2); g.lineTo(W * 0.88, H * 0.2); g.lineTo(W * 0.88, H * 0.8); g.lineTo(W * 0.1, H * 0.8); g.stroke();
-    g.fillStyle = '#6e6e6e';
+    g.fillStyle = '#c8c8c8';
     for (let y = H * 0.32; y < H * 0.72; y += 9) g.fillRect(W * 0.1, y, W * 0.7, 3);
   });
   const strip = make((g) => {
-    g.fillStyle = '#444444'; g.fillRect(0, 0, W, H);
+    g.fillStyle = '#9a9a9a'; g.fillRect(0, 0, W, H);
     g.fillStyle = '#ffffff';
     for (let x = 6; x < W; x += 16) g.fillRect(x, H * 0.18, 10, H * 0.64);
   });
@@ -630,8 +634,17 @@ function envUniforms(shader) {
   shader.fragmentShader = shader.fragmentShader.replace('#include <envmap_physical_pars_fragment>', ENV_CHUNK);
 }
 
-/** Every environment-lit car surface except paint and glass. */
-function patchEnv(shader) { envUniforms(shader); }
+/**
+ * Every environment-lit car surface except paint and glass. The sun's
+ * direct highlight is capped under the bloom threshold here too: a lamp lens
+ * or chrome tip at roughness 0.1 lined up with the sun otherwise flares into
+ * a white star at the corner of the car.
+ */
+function patchEnv(shader) {
+  envUniforms(shader);
+  shader.fragmentShader = shader.fragmentShader.replace('#include <lights_fragment_begin>',
+    '#include <lights_fragment_begin>\nreflectedLight.directSpecular = min( reflectedLight.directSpecular, vec3( 1.2 ) );');
+}
 
 /**
  * Glass. Alpha blending scales EVERYTHING a transparent surface returns by its
@@ -639,11 +652,14 @@ function patchEnv(shader) { envUniforms(shader); }
  * at 35% strength and looked like tinted cellophane. Real glass transmits AND
  * reflects: the reflection sits on top of what is behind it. Dividing the
  * specular term by alpha before the blend puts it back at full strength.
+ * The SUN's part is capped first: a 0.04-roughness pane mirrors it at
+ * hundreds, and boosted by 1/alpha that bloomed into a white star on every
+ * rear window facing the light.
  */
 function patchGlass(shader) {
   envUniforms(shader);
   shader.fragmentShader = shader.fragmentShader.replace('#include <opaque_fragment>',
-    'outgoingLight = totalDiffuse + totalSpecular / max( diffuseColor.a, 0.12 ) + totalEmissiveRadiance;\n#include <opaque_fragment>');
+    'outgoingLight = totalDiffuse + ( min( reflectedLight.directSpecular, vec3( 0.5 ) ) + reflectedLight.indirectSpecular ) / max( diffuseColor.a, 0.12 ) + totalEmissiveRadiance;\n#include <opaque_fragment>');
 }
 
 /**
@@ -726,9 +742,9 @@ float carSeams( vec3 p ) {
 // A curved panel edge can line up with the sun over a long strip. At full
 // strength that strip blew through the bloom threshold and read as a lit
 // light bar across the boot lid; capped just under it, it reads as a glint.
-reflectedLight.directSpecular = min( reflectedLight.directSpecular, vec3( 1.5 ) );
+reflectedLight.directSpecular = min( reflectedLight.directSpecular, vec3( 0.9 ) );
 #ifdef USE_CLEARCOAT
-	clearcoatSpecularDirect = min( clearcoatSpecularDirect, vec3( 1.2 ) );
+	clearcoatSpecularDirect = min( clearcoatSpecularDirect, vec3( 0.9 ) );
 	material.clearcoatRoughness = carCcKeep;
 #endif`)
     .replace('#include <opaque_fragment>', `outgoingLight *= 1.0 - 0.82 * carSeams( vCarPos );
@@ -767,8 +783,8 @@ function acquireKit() {
       return m;
     };
     kit.mats = {
-      glass: glass(0x16202a, 0.34),
-      glassDark: glass(0x07090c, 0.8),
+      glass: glass(0x0e151c, 0.6),
+      glassDark: glass(0x06080b, 0.84),
       chrome: envMaterial(THREE.MeshStandardMaterial, { color: 0xdfe3e8, roughness: 0.07, metalness: 1 }, E),
       plastic: envMaterial(THREE.MeshStandardMaterial, { color: 0x141518, roughness: 0.52, metalness: 0 }, E),
       grille: envMaterial(THREE.MeshStandardMaterial, { color: 0xffffff, roughness: 0.45, metalness: 0.4, map: T.grille }, E),
@@ -1056,13 +1072,14 @@ function gridNormals(P, R, C, wrapC) {
  */
 function emit(G, cells, { inset = 0, uv = 'grid', flipUV = false } = {}) {
   const { P, N, R, C, wrapC } = G;
-  const map = new Map();
+  const map = new Int32Array(R * C).fill(-1);
+  const used = [];
   const pos = [], nrm = [], idx = [];
   const vert = (r, c) => {
     const k = r * C + c;
-    let i = map.get(k);
-    if (i !== undefined) return i;
-    i = pos.length / 3; map.set(k, i);
+    let i = map[k];
+    if (i >= 0) return i;
+    i = pos.length / 3; map[k] = i; used.push(k);
     const o = k * 3;
     pos.push(P[o] - N[o] * inset, P[o + 1] - N[o + 1] * inset, P[o + 2] - N[o + 2] * inset);
     nrm.push(N[o], N[o + 1], N[o + 2]);
@@ -1082,7 +1099,7 @@ function emit(G, cells, { inset = 0, uv = 'grid', flipUV = false } = {}) {
   const n = pos.length / 3;
   const U = new Float32Array(n * 2);
   if (uv === 'grid') {
-    for (const [k, i] of map) { U[i * 2] = (k % C) / Math.max(1, C - 1); U[i * 2 + 1] = Math.floor(k / C) / Math.max(1, R - 1); }
+    for (const k of used) { const i = map[k]; U[i * 2] = (k % C) / Math.max(1, C - 1); U[i * 2 + 1] = Math.floor(k / C) / Math.max(1, R - 1); }
   } else {
     const [ua, va] = uv;                        // axis indices, e.g. [0, 2]
     let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
@@ -1450,102 +1467,134 @@ const _K = [];
 
 const _half = [];
 
-/** Closed polygon (x, y) of the full section at z, no tub. */
-function sectionPoly(d, z) {
+/**
+ * The full section at z, no tub, as a flat closed polygon of (x, y) pairs
+ * written into `out`. Returns the point count.
+ */
+function sectionRing(d, z, out) {
   halfRing(d, z, 0, 0, true, _half, null);
-  const K = _K;
-  const pts = [[0, K[1]]];
-  for (let i = 0; i < _half.length; i += 2) pts.push([_half[i], _half[i + 1]]);
-  pts.push([0, K[19]]);
-  for (let i = _half.length - 2; i >= 0; i -= 2) pts.push([-_half[i], _half[i + 1]]);
-  return pts;
+  const K = _K, M = _half.length / 2;
+  let w = 0;
+  out[w++] = 0; out[w++] = K[1];
+  for (let i = 0; i < M; i++) { out[w++] = _half[i * 2]; out[w++] = _half[i * 2 + 1]; }
+  out[w++] = 0; out[w++] = K[19];
+  for (let i = M - 1; i >= 0; i--) { out[w++] = -_half[i * 2]; out[w++] = _half[i * 2 + 1]; }
+  return w / 2;
 }
 
-function insidePoly(pts, x, y) {
+/** Even-odd point-in-polygon over a flat ring, starting at float offset `o`. */
+function insideRing(R, o, C, x, y) {
   let inside = false;
-  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
-    const [xi, yi] = pts[i], [xj, yj] = pts[j];
+  for (let i = 0, j = C - 1; i < C; j = i++) {
+    const xi = R[o + i * 2], yi = R[o + i * 2 + 1], xj = R[o + j * 2], yj = R[o + j * 2 + 1];
     if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
   }
   return inside;
 }
 
+// Scratch for one section and one blended section.
+const _ringA = new Float64Array(512), _ringB = new Float64Array(512);
+
 /**
- * The front surface: the first z at which (x, y) is inside the body. The
- * search stops short of the front arch — inside it the section is cut away
- * from below, so "inside" stops being monotonic and a point by the chin would
- * read as outside the car.
+ * The two ends of the body, sampled once per build.
+ *
+ * Every lamp, grille and plate vertex is found by searching along z for where
+ * it enters the body, and each step of that search used to rebuild a section
+ * from scratch — fillets and all. That was two thirds of a car's build time,
+ * and a traffic spawn builds up to fifteen cars in one frame. Ahead of the
+ * arches a section's point count never changes, so sections are sampled here
+ * at 48 stations per end, packed tighter toward the tip where the shape turns
+ * fastest, and the search blends between neighbours instead.
  */
-function frontZ(d, x, y, zLim = d.zAxleF - d.archLen - 0.006) {
-  let lo = d.zF0, hi = zLim;
-  if (insidePoly(sectionPoly(d, lo), x, y)) return lo;
-  if (!insidePoly(sectionPoly(d, hi), x, y)) return NaN;
-  for (let i = 0; i < 20; i++) {
-    const m = (lo + hi) * 0.5;
-    if (insidePoly(sectionPoly(d, m), x, y)) hi = m; else lo = m;
-  }
-  return hi;
-}
-
-/** The rear surface: the last z at which (x, y) is inside the body. */
-function rearZ(d, x, y, zLim = d.zAxleR + d.archLen + 0.006) {
-  let lo = zLim, hi = d.zR0;
-  if (insidePoly(sectionPoly(d, hi), x, y)) return hi;
-  if (!insidePoly(sectionPoly(d, lo), x, y)) return NaN;
-  for (let i = 0; i < 20; i++) {
-    const m = (lo + hi) * 0.5;
-    if (insidePoly(sectionPoly(d, m), x, y)) lo = m; else hi = m;
-  }
-  return lo;
+function endCache(d) {
+  if (d.ends) return d.ends;
+  const n = 48;
+  const C = sectionRing(d, d.zF0, _ringA);
+  const make = (z0, z1) => {
+    const zs = new Float64Array(n), rings = new Float64Array(n * C * 2);
+    for (let i = 0; i < n; i++) {
+      const t = Math.pow(i / (n - 1), 1.6);
+      zs[i] = lerp(z0, z1, t);
+      sectionRing(d, zs[i], _ringA);
+      rings.set(_ringA.subarray(0, C * 2), i * C * 2);
+    }
+    return { zs, rings };
+  };
+  d.ends = {
+    C, n,
+    front: make(d.zF0, d.zAxleF - d.archLen - 0.006),
+    rear: make(d.zR0, d.zAxleR + d.archLen + 0.006),
+  };
+  return d.ends;
 }
 
 /**
- * Where a point seen from one end lands on the body, as [y, z]. A point that
- * sits ABOVE the body there — the top corner of a lamp outline that runs up
- * over a rounded wing — never enters it, and returning the search limit would
- * throw that vertex back to the axle line and stretch the lamp into a spike.
- * Instead it is slid down onto the highest part of the body under it.
+ * Where (x, y) first enters the body, searching from the tip of one end back
+ * toward its arch. The search stops short of the arch: inside it the section
+ * is cut away from below, so "inside" stops being monotonic and a point by
+ * the chin would read as outside the car. NaN when it never enters.
+ */
+function endZ(d, face, x, y) {
+  const E = endCache(d), C = E.C, S = face === 'front' ? E.front : E.rear;
+  const stride = C * 2;
+  let k = -1;
+  for (let i = 0; i < E.n; i++) if (insideRing(S.rings, i * stride, C, x, y)) { k = i; break; }
+  if (k < 0) return NaN;
+  if (k === 0) return S.zs[0];
+  // Bisect between the last sample outside and the first inside, on a
+  // point-by-point blend of the two sections.
+  const a = (k - 1) * stride, b = k * stride;
+  let lo = 0, hi = 1;
+  for (let it = 0; it < 14; it++) {
+    const m = (lo + hi) * 0.5;
+    for (let i = 0; i < stride; i++) _ringB[i] = S.rings[a + i] + (S.rings[b + i] - S.rings[a + i]) * m;
+    if (insideRing(_ringB, 0, C, x, y)) hi = m; else lo = m;
+  }
+  return lerp(S.zs[k - 1], S.zs[k], hi);
+}
+
+/**
+ * Where a point seen from one end lands on the body, as [y, z]. A point above
+ * or below the body there — the top corner of a lamp outline that runs up over
+ * a rounded wing — never enters it, and returning the search limit would throw
+ * that vertex back to the axle line and stretch the lamp into a spike. So it is
+ * first clamped into the body's vertical extent where the section is whole.
  */
 function projectEnd(d, face, x, y) {
-  const zLim = face === 'front' ? d.zAxleF - d.archLen - 0.006 : d.zAxleR + d.archLen + 0.006;
-  // The body's vertical extent at this x, where the section is whole.
-  const pts = sectionPoly(d, zLim), ax = Math.abs(x);
+  const E = endCache(d), C = E.C, S = face === 'front' ? E.front : E.rear;
+  const o = (E.n - 1) * C * 2, R = S.rings, ax = Math.abs(x);
   let lo = Infinity, hi = -Infinity;
-  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
-    const [x0, y0] = pts[j], [x1, y1] = pts[i];
+  for (let i = 0, j = C - 1; i < C; j = i++) {
+    const x0 = R[o + j * 2], y0 = R[o + j * 2 + 1], x1 = R[o + i * 2], y1 = R[o + i * 2 + 1];
     if ((x0 - ax) * (x1 - ax) > 0 || x0 === x1) continue;
     const yc = y0 + (y1 - y0) * (ax - x0) / (x1 - x0);
     lo = Math.min(lo, yc); hi = Math.max(hi, yc);
   }
   const yy = lo < hi ? clamp(y, lo + 0.003, hi - 0.003) : y;
-  const z = face === 'front' ? frontZ(d, x, yy, zLim) : rearZ(d, x, yy, zLim);
-  return [yy, Number.isNaN(z) ? zLim : z];
+  const z = endZ(d, face, x, yy);
+  return [yy, Number.isNaN(z) ? S.zs[E.n - 1] : z];
 }
 
 /** The right flank: the outermost x of the section at z, at height y. */
 function sideX(d, z, y) {
-  const pts = sectionPoly(d, z);
+  const C = sectionRing(d, z, _ringA), half = (C >> 1) + 1;
   let best = 0;
-  const half = Math.ceil(pts.length / 2);
-  for (let i = 0; i < half; i++) {
-    const [x0, y0] = pts[i], [x1, y1] = pts[i + 1];
+  for (let i = 0; i < half - 1; i++) {
+    const x0 = _ringA[i * 2], y0 = _ringA[i * 2 + 1], x1 = _ringA[i * 2 + 2], y1 = _ringA[i * 2 + 3];
     if ((y0 - y) * (y1 - y) > 0 || y0 === y1) continue;
-    const t = (y - y0) / (y1 - y0);
-    best = Math.max(best, x0 + (x1 - x0) * t);
+    best = Math.max(best, x0 + (x1 - x0) * (y - y0) / (y1 - y0));
   }
   return best;
 }
 
 /** The top of the section at z, at lateral position x. */
 function topY(d, z, x) {
-  const pts = sectionPoly(d, z);
+  const C = sectionRing(d, z, _ringA), half = (C >> 1) + 1;
   let best = -Infinity;
-  const half = Math.ceil(pts.length / 2);
-  for (let i = 0; i < half; i++) {
-    const [x0, y0] = pts[i], [x1, y1] = pts[i + 1];
+  for (let i = 0; i < half - 1; i++) {
+    const x0 = _ringA[i * 2], y0 = _ringA[i * 2 + 1], x1 = _ringA[i * 2 + 2], y1 = _ringA[i * 2 + 3];
     if ((x0 - x) * (x1 - x) > 0 || x0 === x1) continue;
-    const t = (x - x0) / (x1 - x0);
-    best = Math.max(best, y0 + (y1 - y0) * t);
+    best = Math.max(best, y0 + (y1 - y0) * (x - x0) / (x1 - x0));
   }
   return best > -Infinity ? best : _K[19];
 }
@@ -1811,6 +1860,15 @@ function canopyRows(d, L, hi) {
   return out;
 }
 
+/** The roof rail / A- and C-pillar line at z, as [x, y]. */
+function canopyRail(d, L, z) {
+  const tmp = [], lab = [];
+  canopySection(d, L, z, false, tmp, lab);
+  // The fillet start is the point labelled 'corner' first.
+  const i = lab.indexOf('corner');
+  return [tmp[i * 2], tmp[i * 2 + 1]];
+}
+
 /** One canopy section: the right half from the belt up, then the centre. */
 function canopySection(d, L, z, hi, out, labels) {
   const n = hi ? CANOPY.high : CANOPY.low;
@@ -1980,18 +2038,23 @@ function frontEnd(d, B, hi) {
 
   // ---- headlamps --------------------------------------------------------
   const hl = {
-    swept: { x: [0.37, 0.975], y: [yN - 0.105, yN + 0.025], sweep: 0.035, tuck: 0.08 },
-    slim: { x: [0.42, 0.98], y: [yN - 0.06, yN + 0.025], sweep: 0.035, tuck: 0.07 },
-    square: { x: [0.45, 0.95], y: [yN - 0.15, yN + 0.0], sweep: 0, tuck: 0.02 },
+    swept: { x: [0.37, 0.945], y: [yN - 0.105, yN + 0.025], sweep: 0.035, tuck: 0.08 },
+    slim: { x: [0.42, 0.95], y: [yN - 0.06, yN + 0.025], sweep: 0.035, tuck: 0.07 },
+    square: { x: [0.45, 0.93], y: [yN - 0.15, yN + 0.0], sweep: 0, tuck: 0.02 },
   }[st.head] || { x: [0.42, 0.96], y: [yN - 0.09, yN + 0.02], sweep: 0.02, tuck: 0.04 };
   const head = projectedPatch(d, lampQuad(d, hl.x[0], hl.x[1], hl.y[0], hl.y[1], hl.sweep, hl.tuck), nu, nv, 'front', { lift: 0.004, dome: 0.006 });
   pair(B.lHead, head);
-  // A black bezel round each lamp, so it sits IN the body.
+  // A black bezel along the top and bottom of each lamp, so it sits IN the
+  // body. Not round the outer end: out there the wing turns to face sideways,
+  // and a thin strip projected along z onto a side-facing surface smears into
+  // a long sliver down the wing.
   if (hi) {
-    for (const f of projectedFrame(d, lampQuad(d, hl.x[0], hl.x[1], hl.y[0], hl.y[1], hl.sweep, hl.tuck), 0.006, 'front', 0.002)) pair(B.plastic, f);
+    const f = projectedFrame(d, lampQuad(d, hl.x[0], Math.min(0.9, hl.x[1]), hl.y[0], hl.y[1], hl.sweep, hl.tuck), 0.006, 'front', 0.002);
+    pair(B.plastic, f[0]); pair(B.plastic, f[1]); pair(B.plastic, f[2]);
   }
-  // Indicators: an amber strip under the outer half of the headlamp.
-  const ind = projectedPatch(d, lampQuad(d, hl.x[0] + (hl.x[1] - hl.x[0]) * 0.45, hl.x[1] - 0.01, hl.y[0] - 0.03, hl.y[0] - 0.008, hl.sweep * 0.5, 0), hi ? 5 : 2, 1, 'front', { lift: 0.004, dome: 0.002 });
+  // Indicators: an amber strip under the headlamp, kept off the corner for
+  // the same reason.
+  const ind = projectedPatch(d, lampQuad(d, hl.x[0] + (hl.x[1] - hl.x[0]) * 0.4, 0.88, hl.y[0] - 0.03, hl.y[0] - 0.008, hl.sweep * 0.5, 0), hi ? 5 : 2, 1, 'front', { lift: 0.004, dome: 0.002 });
   B.lIndR.push(ind); B.lIndL.push(mirror(ind));
 
   // ---- grille -----------------------------------------------------------
@@ -2017,10 +2080,13 @@ function frontEnd(d, B, hi) {
   const iy0 = yChin + 0.04, iy1 = Math.min(yN - 0.17, yChin + (d.style === 'sports' || d.style === 'coupe' ? 0.2 : 0.17));
   const intake = [[-0.62 * hw, iy0], [0.62 * hw, iy0], [0.7 * hw, iy1], [-0.7 * hw, iy1]];
   B.plastic.push(projectedPatch(d, intake, hi ? 8 : 2, 1, 'front', { lift: 0.004, dome: 0 }));
-  const split = [[-0.86 * hw, yChin - 0.012], [0.86 * hw, yChin - 0.012], [0.9 * hw, yChin + 0.02], [-0.9 * hw, yChin + 0.02]];
-  B.plastic.push(projectedPatch(d, split, hi ? 10 : 2, 1, 'front', { lift: 0.014, dome: 0 }));
+  // The lip under the nose: a black band standing a couple of centimetres
+  // proud of the bumper and following its curve. (A straight plate stuck out
+  // past the corners like a snow plough; one projected down to the chin was
+  // clamped into a saw-tooth.)
+  B.plastic.push(projectedPatch(d, [[-0.8 * hw, yChin + 0.004], [0.8 * hw, yChin + 0.004], [0.8 * hw, yChin + 0.024], [-0.8 * hw, yChin + 0.024]], hi ? 16 : 4, 1, 'front', { lift: 0.022, dome: 0 }));
   if (hi && (d.style === 'sedan' || d.style === 'suv' || d.style === 'pickup' || d.style === 'hatch')) {
-    const fog = projectedPatch(d, [[0.70 * hw, iy0 + 0.01], [0.84 * hw, iy0 + 0.02], [0.84 * hw, iy0 + 0.055], [0.70 * hw, iy0 + 0.05]], 3, 1, 'front', { lift: 0.006, dome: 0.003 });
+    const fog = projectedPatch(d, [[0.62 * hw, iy0 + 0.012], [0.76 * hw, iy0 + 0.018], [0.76 * hw, iy0 + 0.052], [0.62 * hw, iy0 + 0.048]], 3, 1, 'front', { lift: 0.006, dome: 0.003 });
     pair(B.lHead, fog);
   }
 
@@ -2064,7 +2130,10 @@ function rearEnd(d, B, hi) {
   // separate buckets because each lights on its own — laid side by side on the
   // same projected surface so they read as one lamp.
   let x0, x1, y0, y1, sweep = 0;
-  if (st.tail === 'tall') { x0 = 0.74; x1 = 0.985; y0 = yT - (st.cargo ? 0.42 : 0.30); y1 = yT + 0.015; }
+  // A pickup's lamps sit on the tailgate corners below the rail: any higher and
+  // their wrap runs forward over the open bed.
+  if (st.tail === 'tall' && st.bed) { x0 = 0.8; x1 = 0.97; y0 = yT - 0.36; y1 = yT - 0.07; }
+  else if (st.tail === 'tall') { x0 = 0.74; x1 = 0.975; y0 = yT - (st.cargo ? 0.44 : 0.34); y1 = yT - 0.035; }
   else if (st.tail === 'bar') { x0 = 0.50; x1 = 0.975; y0 = yT - 0.09; y1 = yT + 0.03; sweep = 0.012; }
   else { x0 = 0.42; x1 = 0.975; y0 = yT - 0.13; y1 = yT + 0.035; sweep = 0.02; }
   const Q = (u0, u1, v0, v1) => {
@@ -2095,8 +2164,8 @@ function rearEnd(d, B, hi) {
 
   // ---- lower bumper: diffuser, plate, exhausts ------------------------------
   const dy1 = yChin + (d.style === 'sports' || d.style === 'coupe' ? 0.16 : 0.12);
-  const diff = [[-0.84 * hw, yChin - 0.01], [0.84 * hw, yChin - 0.01], [0.88 * hw, dy1], [-0.88 * hw, dy1]];
-  B.plastic.push(projectedPatch(d, diff, hi ? 10 : 2, 1, 'rear', { lift: 0.006, dome: 0 }));
+  const diff = [[-0.76 * hw, yChin + 0.006], [0.76 * hw, yChin + 0.006], [0.8 * hw, dy1], [-0.8 * hw, dy1]];
+  B.plastic.push(projectedPatch(d, diff, hi ? 14 : 3, hi ? 2 : 1, 'rear', { lift: 0.006, dome: 0 }));
   if (hi && (d.style === 'sports' || d.style === 'coupe')) {
     for (const x of [-0.3, -0.1, 0.1, 0.3]) {
       const zf = projectEnd(d, 'rear', x * hw, yChin + 0.03)[1];
@@ -2112,6 +2181,14 @@ function rearEnd(d, B, hi) {
   if (hi) {
     const [yy, zz] = projectEnd(d, 'rear', 0, yT - 0.03);
     B.chrome.push(place(cyl(0.03, 0.03, 0.01, 20), 0, yy, zz + 0.008, Math.PI * 0.5, 0, 0));
+  }
+  if (st.bed && hi) {
+    // A step bumper across the back, and the tailgate handle: plastic, and
+    // behind carDamage's rear-bumper line, so both leave with the bumper.
+    const zb = projectEnd(d, 'rear', 0, yChin + 0.08)[1];
+    B.plastic.push(place(rbox(hw * 1.9, 0.11, 0.16, 0.02, null, 1), 0, yChin + 0.055, zb + 0.05));
+    const [yh, zh] = projectEnd(d, 'rear', 0, yT - 0.09);
+    B.plastic.push(place(rbox(0.2, 0.035, 0.03, 0.01, null, 1), 0, yh, zh + 0.008));
   }
   const tips = { single: [0.55], twin: [-0.55, 0.55], quad: [-0.62, -0.46, 0.46, 0.62] }[st.exhaust] || [0.55];
   const er = d.style === 'sports' ? 0.042 : 0.035;
@@ -2250,53 +2327,87 @@ function merge2(a, b) {
 // The cabin
 // ===========================================================================
 
-/** Seats, dash and a driver, because an empty car looks wrong. */
+/**
+ * Seats, dash and a driver, because an empty car looks wrong.
+ *
+ * Everything is sized to the headroom actually available where it sits. The
+ * first cut sized seats by legroom and put them at a fixed height, and in a
+ * car with a 0.97 m roof the headrests stood a hand's width out through it —
+ * the "ears" on every sports car in the lineup.
+ */
 function cabin(d, B, hi) {
   const st = d.st;
+  const L = canopyLines(d);
   const K = sectionKeys(d, (d.cabF + d.cabR) * 0.5, 0, []);
   const inner = K[12] - 0.07;                      // inside of the door cards
-  const yB = K[13];
   const floor = d.tubs[0].floor;
   const roofEnd = st.cargo ? d.cabR : d.roofR;
-  const headZ = lerp(d.roofF, roofEnd, st.cargo ? 0.5 : 0.30);
-  const headroom = d.yRoof - yB;
-  const headY = yB + Math.min(headroom * 0.52, headroom - 0.17);
   const seatX = inner * 0.5;
   const cloth = st.seat;
   const P = B.interior;
+  const beltAt = (z) => sectionKeys(d, z, 0, _K)[13];
+  // The underside of the roof above a point, allowing for its thickness.
+  const ceilingAt = (z) => canopyTop(d, L, z) - 0.035;
 
-  // Dash: a padded top across the car, the binnacle in front of the driver.
-  const dz0 = d.cabF + 0.02, dz1 = d.dashEnd + 0.06;
-  P.push(place(rbox(inner * 2, 0.16, dz1 - dz0, 0.05, 0x1b1c1f, hi ? 2 : 1), 0, yB - 0.06, (dz0 + dz1) * 0.5));
-  if (hi) P.push(place(rbox(0.3, 0.07, 0.12, 0.03, 0x121314, 1), -seatX, yB + 0.025, dz1 - 0.06));
+  // A seated body, measured from the head: cushion 0.74 m below the eyes
+  // at most, never through the floor, headrest never through the roof.
+  const seatAt = (z) => {
+    const yB = beltAt(z), ceil = ceilingAt(z);
+    const headY = Math.min(ceil - 0.15, yB + (ceil - yB) * 0.55);
+    const cushY = Math.max(floor + 0.07, headY - 0.74);
+    return { headY, cushY, yB, ceil };
+  };
+
+  // Dash: a padded top across the car at the local window line — on a wedge
+  // that is well below the belt at the doors — with the binnacle in front of
+  // the driver.
+  const dz1 = d.dashEnd + 0.06;
+  const dashTop = Math.min(beltAt(dz1) + 0.02, ceilingAt(dz1) - 0.12);
+  // Start the dash only where the windscreen has risen clear of it at the
+  // A-pillars — on a steep wedge the glass at the cowl is below the dash top,
+  // and a dash that ran all the way forward stood out through it.
+  let dz0 = d.cabF + 0.02;
+  for (let z = d.cabF + 0.02; z < dz1 - 0.12; z += 0.01) {
+    dz0 = z;
+    const [, yr] = canopyRail(d, L, z);
+    if (yr > dashTop + 0.025) break;
+  }
+  P.push(place(rbox(inner * 2, 0.16, dz1 - dz0, 0.05, 0x1b1c1f, hi ? 2 : 1), 0, dashTop - 0.08, (dz0 + dz1) * 0.5));
+  if (hi) P.push(place(rbox(0.3, 0.07, 0.12, 0.03, 0x121314, 1), -seatX, dashTop + 0.02, dz1 - 0.06));
 
   // Front seats.
+  const headZ = lerp(d.roofF, roofEnd, st.cargo ? 0.5 : 0.30);
   const backZ = headZ + 0.13;
-  const cushY = Math.max(floor + 0.2, yB - 0.34);
-  for (const s of [-1, 1]) {
-    const x = s * seatX;
-    if (hi) P.push(place(rbox(0.46, 0.12, 0.48, 0.05, cloth, 1), x, cushY, backZ - 0.24));
-    P.push(place(rbox(0.46, 0.62, 0.13, 0.05, cloth, hi ? 2 : 1), x, cushY + 0.32, backZ, 0.2, 0, 0));
-    P.push(place(rbox(0.24, 0.16, 0.09, 0.04, cloth, 1), x, cushY + 0.72, backZ + 0.07, 0.15, 0, 0));
-  }
-  // Rear bench, where there is room for one UNDER THE ROOF: a bench placed by
-  // legroom alone ended up beneath a sedan's sloping backlight with its
-  // headrests standing through the glass.
+  const F = seatAt(headZ);
+  const seat = (x, z, S, lean = 0.2, width = 0.46) => {
+    const backH = Math.max(0.3, S.headY - 0.1 - S.cushY);
+    if (hi) P.push(place(rbox(width, 0.12, 0.48, 0.05, cloth, 1), x, S.cushY, z - 0.24));
+    P.push(place(rbox(width, backH, 0.13, 0.05, cloth, hi ? 2 : 1), x, S.cushY + backH * 0.5 + 0.03, z, lean, 0, 0));
+    P.push(place(rbox(0.24, 0.14, 0.09, 0.04, cloth, 1), x, S.headY + 0.01, z + 0.07, 0.15, 0, 0));
+  };
+  for (const s of [-1, 1]) seat(s * seatX, backZ, F);
+
+  // Rear bench, where there is room for one under the roof: a bench placed
+  // by legroom alone ended up beneath a sedan's backlight with its headrests
+  // standing through the glass.
   const rearBack = Math.min(backZ + 0.82, roofEnd - 0.1);
   if ((st.doors === 4 || d.style === 'coupe') && !st.cargo && rearBack - backZ > 0.52) {
-    P.push(place(rbox(inner * 1.9, 0.56, 0.14, 0.05, cloth, hi ? 2 : 1), 0, cushY + 0.27, rearBack, 0.22, 0, 0));
-    if (hi) for (const s of [-1, 1]) P.push(place(rbox(0.22, 0.14, 0.09, 0.04, cloth, 1), s * seatX, cushY + 0.63, rearBack + 0.07, 0.18, 0, 0));
+    const R = seatAt(rearBack - 0.1);
+    const backH = Math.max(0.3, R.headY - 0.1 - R.cushY);
+    P.push(place(rbox(inner * 1.9, backH, 0.14, 0.05, cloth, hi ? 2 : 1), 0, R.cushY + backH * 0.5 + 0.03, rearBack, 0.22, 0, 0));
+    if (hi) for (const s of [-1, 1]) P.push(place(rbox(0.22, 0.13, 0.09, 0.04, cloth, 1), s * seatX, R.headY + 0.0, rearBack + 0.07, 0.18, 0, 0));
   }
-  if (hi) P.push(place(rbox(0.2, 0.12, 0.5, 0.03, 0x17181b, 1), 0, cushY + 0.02, backZ - 0.35));
+  if (hi) P.push(place(rbox(0.2, 0.12, 0.5, 0.03, 0x17181b, 1), 0, F.cushY + 0.02, backZ - 0.35));
 
   // The driver: left-hand drive, by convention.
-  const dx = -seatX;
-  P.push(place(rbox(0.38, 0.46, 0.22, 0.08, 0x31445e, hi ? 2 : 1), dx, headY - 0.33, backZ - 0.09, -0.12, 0, 0));
+  const dx = -seatX, headY = F.headY;
+  const torsoH = Math.max(0.28, headY - 0.16 - F.cushY);
+  P.push(place(rbox(0.38, torsoH, 0.22, 0.08, 0x31445e, hi ? 2 : 1), dx, F.cushY + torsoH * 0.5 + 0.02, backZ - 0.09, -0.12, 0, 0));
   P.push(place(sphere(0.105, hi ? 14 : 8, hi ? 10 : 6, 0xc08a6a), dx, headY, backZ - 0.11));
   P.push(place(sphere(0.11, hi ? 14 : 8, hi ? 6 : 4, 0x2a1d14), dx, headY + 0.025, backZ - 0.095));
   if (!hi) return;
   // Steering wheel, and the arms reaching for it.
-  const wz = dz1 + 0.12, wy = yB - 0.02;
+  const wz = dz1 + 0.12, wy = dashTop - 0.03;
   const rim = fromGeometry(new THREE.TorusGeometry(0.18, 0.018, 6, 20), 0x141517);
   P.push(place(rim, dx, wy, wz, Math.PI * 0.5 - 0.35, 0, 0));
   for (const s of [-1, 1]) {

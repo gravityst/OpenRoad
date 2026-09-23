@@ -9,7 +9,7 @@
  * ?server= link would let anyone point another player's client at a relay that
  * then receives their name and live position. localStorage cannot be set by a link.
  */
-export const DEFAULT_ROOM_URL = 'wss://openroad-room.waldnerc34.workers.dev';
+export const DEFAULT_ROOM_URL = 'wss://openroad-room.cwaldner.workers.dev';
 
 export function roomUrl() {
   let override = null;

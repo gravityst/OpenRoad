@@ -69,6 +69,7 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { Pass, FullScreenQuad } from 'three/addons/postprocessing/Pass.js';
 import { FXAAPass } from 'three/addons/postprocessing/FXAAPass.js';
+import { CopyShader } from 'three/addons/shaders/CopyShader.js';
 
 // Speed blur is fed a normalised 0..1 and the knee is here rather than in the
 // caller, so that "subtle below 120 km/h" is a property of the effect and not
@@ -259,6 +260,49 @@ class FinishPass extends Pass {
 }
 
 /**
+ * The scene render for the MSAA tier. Only the scene needs multisampling:
+ * post passes are full-screen quads with no edges of their own, and running
+ * them into 4x targets as well — which is what asking the composer for MSAA
+ * does, since it clones one target for both buffers — spent a millisecond at
+ * 720p resolving every pass. So the scene goes into its own multisampled
+ * target, which resolves once, and a plain copy hands it to the chain.
+ */
+class MsaaRenderPass extends Pass {
+  constructor(scene, camera, samples) {
+    super();
+    this.scene = scene;
+    this.camera = camera;
+    this.needsSwap = false;
+    this.target = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples });
+    this.material = new THREE.ShaderMaterial({
+      uniforms: THREE.UniformsUtils.clone(CopyShader.uniforms),
+      vertexShader: CopyShader.vertexShader,
+      fragmentShader: CopyShader.fragmentShader,
+      depthTest: false,
+      depthWrite: false,
+    });
+    this._quad = new FullScreenQuad(this.material);
+  }
+
+  setSize(w, h) { this.target.setSize(w, h); }
+
+  render(renderer, writeBuffer, readBuffer) {
+    renderer.setRenderTarget(this.target);
+    renderer.clear();
+    renderer.render(this.scene, this.camera);
+    this.material.uniforms.tDiffuse.value = this.target.texture;
+    renderer.setRenderTarget(this.renderToScreen ? null : readBuffer);
+    this._quad.render(renderer);
+  }
+
+  dispose() {
+    this.target.dispose();
+    this.material.dispose();
+    this._quad.dispose();
+  }
+}
+
+/**
  * @param {THREE.WebGLRenderer} renderer
  * @param {THREE.Scene} scene
  * @param {THREE.PerspectiveCamera} camera  kept by reference; mutate it, do not swap it
@@ -309,18 +353,15 @@ export function createEffects(renderer, scene, camera, opts = {}) {
   };
 
   function buildChain(msaa) {
-    // The render targets are the composer's; asking for samples on them is
-    // the only way three offers MSAA once a composer is in the path — the
-    // canvas's own antialias flag does nothing for a frame drawn off-screen.
+    // The canvas's own antialias flag does nothing for a frame drawn
+    // off-screen, so MSAA has to be asked for on a render target — and only
+    // on the scene's (see MsaaRenderPass).
     const pr = pixelRatio();
-    const rt = new THREE.WebGLRenderTarget(Math.max(1, width * pr), Math.max(1, height * pr), {
-      type: THREE.HalfFloatType, samples: msaa,
-    });
-    composer = new EffectComposer(renderer, rt);
+    composer = new EffectComposer(renderer);
     composer.setPixelRatio(pr);
     builtMsaa = msaa;
 
-    renderPass = new RenderPass(scene, camera);
+    renderPass = msaa > 0 ? new MsaaRenderPass(scene, camera, msaa) : new RenderPass(scene, camera);
     // Resolution is corrected in applySize(); the constructor value only has
     // to be non-zero, since addPass immediately overwrites it.
     bloomPass = new UnrealBloomPass(new THREE.Vector2(width, height), 0.5, 0.6, 1.0);

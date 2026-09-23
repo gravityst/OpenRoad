@@ -384,6 +384,10 @@ async function boot() {
     place: (x, z, yaw) => placeCar(x, z, yaw),
   })) : null;
   const colourOf = party ? party.colourFor : null;
+  // The paint this player's friends see (a shop paint included; see the
+  // 'drive' handler below), so their own row and bubble match it. A `let`
+  // declared here because createModes asks for it at once.
+  let selfWire = chosenColour;
   const modes = mModes && party ? safe(() => mModes.createModes({
     net, world,
     // Read at the first game, long after `goals` exists: its races.
@@ -391,7 +395,7 @@ async function boot() {
     place: (x, z, yaw) => placeCar(x, z, yaw),
     abandonGoals: () => { if (goals) goals.abandon(); },
     colourOf,
-    self: () => ({ name: settings.name || '', carId: chosenCar, colour: chosenColour }),
+    self: () => ({ name: settings.name || '', carId: chosenCar, colour: selfWire }),
     goTo: (id) => party.goTo(id),
   })) : null;
   const roster = mRoster && party ? safe(() => mRoster.createRoster({
@@ -706,9 +710,11 @@ async function boot() {
   // after goals.onDrive, so the challenge GPS is set up either way.
   // The paint goes too: a special paint from the shop as well as a factory one.
   const wireColourOf = (index, paintId) => (mParty ? mParty.wireColour(index, paintId) : index | 0);
-  if (net && goals) net.setCar(chosenCar, wireColourOf(chosenColour, goals.progress.livery(chosenCar)));
+  if (goals) selfWire = wireColourOf(chosenColour, goals.progress.livery(chosenCar));
+  if (net) net.setCar(chosenCar, selfWire);
   menus.on('drive', (p) => {
-    if (net && p && p.id) net.setCar(p.id, wireColourOf(p.colour, p.paint));
+    if (p && p.id) selfWire = wireColourOf(p.colour, p.paint);
+    if (net && p && p.id) net.setCar(p.id, selfWire);
     if (!party || !p || !p.fresh) return;
     // A friend's game is inviting (the title said "Press Play to join in"):
     // Play joins it, and the game puts you where it wants you.

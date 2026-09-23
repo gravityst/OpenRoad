@@ -222,7 +222,9 @@ export function createBeacons(scene, opts = {}) {
         s.beamMat.opacity = far * c.fade;
       }
       if (s.ring) {
-        const on = dist < 700;
+        // IT has its own red ring and ripple (render/modeFx.js); a second,
+        // friend-coloured one under it was two circles saying one thing.
+        const on = dist < 700 && !it;
         s.ring.visible = on;
         if (on) {
           const r = 2.6 + Math.max(0, dist - 40) * 0.012 + 0.25 * Math.sin(time * 3.2 + i);

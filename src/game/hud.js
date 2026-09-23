@@ -79,6 +79,13 @@ const COL_COOL = '#5fd0e6';
 // not the cyan of villages — at a glance on a busy map the only question that
 // matters is "is that a person?", so it gets a hue nothing else owns.
 const COL_PLAYER = '#7ef29a';
+// The goals layer's GPS line and challenge pins. Cyan is the GPS everywhere —
+// the chevrons on the road, the arrow over the car, this line — so the three
+// read as one instruction.
+const COL_GPS = '#4fd8f0';
+const COL_TOKEN = '#ffcf3a';
+const MARKER_COL = { race: '#ffb43c', trap: '#ff5a5a', jump: '#4fe38a', drift: '#e45cff' };
+const MEDAL_RING = ['', '#d08a4c', '#e6edf3', '#ffd23f'];
 const COL_GO = '#4ad295';
 const COL_NEEDLE = '#ffe7bd';
 const COL_NEEDLE_SOFT = 'rgba(255,231,189,0.22)';
@@ -860,7 +867,7 @@ export function createHUD(root, opts = {}) {
 
   let zoom = clamp(opts.minimapZoom || 1, ZOOM_MIN, ZOOM_MAX);
 
-  function drawMap(px, pz, heading, players) {
+  function drawMap(px, pz, heading, players, nav) {
     const w = mapCanvas.width;
     if (!worldMap || w < 16) return;
     const g = mapCtx;
@@ -922,6 +929,8 @@ export function createHUD(root, opts = {}) {
       g.fillStyle = onRim ? COL_LABEL_DIM : COL_LABEL;
       g.fillText(p.name, r + sx, ly);
     }
+
+    if (nav) drawNav(g, nav, px, pz, ch, sh, mpp, r, edge, w, range);
 
     // Other drivers. Same rim-clamping the place labels use: a blip that would
     // fall outside the disc is pulled to the edge and hollowed out, so "north
@@ -992,6 +1001,94 @@ export function createHUD(root, opts = {}) {
     g.stroke();
 
     g.restore();
+  }
+
+  /**
+   * The goals layer's GPS on the minimap: the route ahead as a bright line,
+   * each challenge as a coloured pin, tokens as gold specks.
+   *
+   * `nav` is goals.nav — { route: {xs, zs, n} | null, from, markers[],
+   * tokens: {xs, zs, taken, n} } — all typed arrays or records made once, so
+   * this draws without allocating. The GPS target is the one pin that is
+   * never allowed to fall off the disc: clamped to the rim with an arrowhead,
+   * it says which way to go even when the route line has run out of map.
+   */
+  function drawNav(g, nav, px, pz, ch, sh, mpp, r, edge, w, range) {
+    const route = nav.route;
+    if (route && route.n > 1) {
+      const lim = range * 1.2;
+      g.beginPath();
+      let started = false;
+      for (let i = Math.max(0, nav.from); i < route.n; i++) {
+        const dx = route.xs[i] - px, dz = route.zs[i] - pz;
+        const sx = (dx * ch - dz * sh) / mpp, sy = (dx * sh + dz * ch) / mpp;
+        if (!started) { g.moveTo(r, r); started = true; }
+        g.lineTo(r + sx, r + sy);
+        if (dx * dx + dz * dz > lim * lim) break;
+      }
+      g.lineJoin = 'round';
+      g.lineCap = 'round';
+      g.strokeStyle = COL_HALO;
+      g.lineWidth = w * 0.034;
+      g.stroke();
+      g.strokeStyle = COL_GPS;
+      g.lineWidth = w * 0.018;
+      g.stroke();
+    }
+    const tk = nav.tokens;
+    if (tk && tk.n) {
+      g.fillStyle = COL_TOKEN;
+      const s = w * 0.011;
+      for (let i = 0; i < tk.n; i++) {
+        if (tk.taken[i]) continue;
+        const dx = tk.xs[i] - px, dz = tk.zs[i] - pz;
+        if (dx * dx + dz * dz > range * range) continue;
+        const sx = (dx * ch - dz * sh) / mpp, sy = (dx * sh + dz * ch) / mpp;
+        if (sx * sx + sy * sy > edge * edge) continue;
+        g.beginPath();
+        g.moveTo(r + sx, r + sy - s); g.lineTo(r + sx + s, r + sy); g.lineTo(r + sx, r + sy + s); g.lineTo(r + sx - s, r + sy);
+        g.closePath();
+        g.fill();
+      }
+    }
+    const ms = nav.markers;
+    if (!ms) return;
+    for (let i = 0; i < ms.length; i++) {
+      const m = ms[i];
+      const dx = m.x - px, dz = m.z - pz;
+      let sx = (dx * ch - dz * sh) / mpp, sy = (dx * sh + dz * ch) / mpp;
+      const sd = Math.sqrt(sx * sx + sy * sy);
+      const off = sd > edge;
+      if (off && !m.target) continue;
+      if (off) { const f = edge / sd; sx *= f; sy *= f; }
+      const rad = w * (m.target ? 0.034 : 0.026);
+      g.beginPath();
+      g.arc(r + sx, r + sy, rad, 0, TAU);
+      g.fillStyle = MARKER_COL[m.kind] || COL_ACCENT;
+      g.fill();
+      g.lineWidth = w * (m.medal ? 0.012 : 0.008);
+      g.strokeStyle = m.medal ? MEDAL_RING[m.medal] : COL_HALO;
+      g.stroke();
+      if (m.target) {
+        g.beginPath();
+        g.arc(r + sx, r + sy, rad * 1.6, 0, TAU);
+        g.lineWidth = w * 0.008;
+        g.strokeStyle = COL_GPS;
+        g.stroke();
+        if (off) {
+          // An arrowhead on the rim, pointing out along the bearing.
+          const ux = sx / edge, uy = sy / edge;
+          const tipX = r + ux * (edge + rad * 2.2), tipY = r + uy * (edge + rad * 2.2);
+          g.beginPath();
+          g.moveTo(tipX, tipY);
+          g.lineTo(r + ux * (edge + rad * 1.1) - uy * rad * 0.9, r + uy * (edge + rad * 1.1) + ux * rad * 0.9);
+          g.lineTo(r + ux * (edge + rad * 1.1) + uy * rad * 0.9, r + uy * (edge + rad * 1.1) - ux * rad * 0.9);
+          g.closePath();
+          g.fillStyle = COL_GPS;
+          g.fill();
+        }
+      }
+    }
   }
 
   // ---- the damage panel --------------------------------------------------
@@ -1601,7 +1698,7 @@ export function createHUD(root, opts = {}) {
 
     drawDial(rpm, redline, kmhF, s.throttle || 0, s.brake || 0, shift);
     drawCompass(bearing);
-    drawMap(s.x || 0, s.z || 0, yaw, s.players);
+    drawMap(s.x || 0, s.z || 0, yaw, s.players, s.nav);
   }
 
   // ---- the rest of the surface -------------------------------------------

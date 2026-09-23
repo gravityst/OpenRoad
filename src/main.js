@@ -146,7 +146,8 @@ async function boot() {
   // middle of the array below silently shifts every module after it onto the
   // wrong variable — the kind of bug that looks like six unrelated bugs.
   const [mTerrain, mRoads, mCity, mProps, mCar, mSky, mFx, mParticles, mTraffic, mHud, mMenus, mAudio, mTouch,
-         mCarDamage, mDebris, mDamageFx, mDrift, mModels, mNet, mTags, mBoom, mWreck] =
+         mCarDamage, mDebris, mDamageFx, mDrift, mModels, mNet, mTags, mBoom, mWreck,
+         mGoals, mGates, mObjectives] =
     await stage(0.50, 'loading modules', () => Promise.all([
       layer('./render/terrain.js', 'terrain'),
       layer('./render/roads.js', 'roads'),
@@ -177,6 +178,9 @@ async function boot() {
       layer('./render/nameTags.js', 'name tags'),
       layer('./render/explosion.js', 'explosions'),
       layer('./game/wreck.js', 'wreck sequence'),
+      layer('./game/goals.js', 'goals'),
+      layer('./render/gates.js', 'goal markers'),
+      layer('./game/objectives.js', 'objectives'),
     ])) || [];
 
   const sky = await stage(0.56, 'raising the sky', () =>
@@ -513,6 +517,53 @@ async function boot() {
     if (wreck) wreck.reset();
   }
 
+  // ---- goals: races, traps, jumps, drift zones, tokens, GPS ---------------
+  // One layer (src/game/goals.js) with two optional faces: the world markers
+  // (render/gates.js) and the on-screen objectives (game/objectives.js). Any of
+  // the three may be null; with goals null this is the free-roam it was.
+  function placeCar(x, z, yaw) {
+    car.reset(x, z, yaw);
+    if (carDamage) carDamage.reset();
+    damageFx.reset();
+    respawnSeq = (respawnSeq + 1) & 0xff;
+    teleported = true;
+    if (wreck) wreck.reset();
+  }
+  // The drift scorer counts only if it really built: when createDrift()
+  // throws, `drift` is the stub, whose bank never moves, and every drift zone
+  // would be on the map and impossible to score. The stub is the one whose
+  // update is NOOP.
+  const driftLive = drift.update !== NOOP;
+  const goals = mGoals ? safe(() => mGoals.createGoals({
+    world, ground, car, settings, place: placeCar,
+    drift: driftLive ? drift : null, particles, cars: CARS, audio,
+    grant: settings.car ? [settings.car] : [],
+    toast: (m, secs) => hud.toast(m, secs),
+    scene, root: document.getElementById('hud'),
+    createView: mGates ? mGates.createGoalGates : null,
+    createOverlay: mObjectives ? mObjectives.createObjectives : null,
+  })) : null;
+  if (goals) {
+    // Boot straight onto a road 200 m short of whatever is next, facing it —
+    // so the title screen shows its beacon and Drive has somewhere to go.
+    goals.placeInitial();
+    if (menus.setGoals) menus.setGoals(goals);
+    menus.on('drive', (p) => goals.onDrive(!!(p && p.fresh)));
+    menus.on('goal-travel', (id) => { if (goals.travelTo(id)) startDriving(); });
+    menus.on('goal-target', (id) => goals.setTarget(id));
+    menus.on('goal-restart', () => { goals.restart(); startDriving(); });
+    menus.on('goal-abandon', () => { goals.abandon(); startDriving(); });
+    menus.on('teleport', () => goals.abandon());
+    menus.on('quit-to-title', () => goals.abandon());
+  }
+  // menus.js saves the car a Drive takes out. This object is the one main.js
+  // saves back (the steering keys, the settings screen), and it still holds
+  // the car read at boot — so keep it in step, or the next save puts the old
+  // car back on disk and the next visit starts in it.
+  menus.on('drive', (p) => { if (p && p.id) { settings.car = p.id; settings.colour = p.colour | 0; } });
+  // Handed to goals.update() every frame; one object, not one per frame.
+  const goalsFrame = { driving: false };
+
   // ---- state --------------------------------------------------------------
   const MODES = ['chase', 'chaseFar', 'bonnet', 'bumper', 'orbit'];
   let cameraMode = 0;
@@ -713,6 +764,15 @@ async function boot() {
     // A focused text field owns the keyboard. Zeroing here rather than skipping
     // the physics keeps the car settling naturally instead of freezing mid-slide.
     if (typing) { input.throttle = 0; input.brake = 0; input.steer = 0; input.handbrake = 0; }
+    // Mid-race, R goes back to the last gate, not the nearest road — which may
+    // be one the race never uses, facing the wrong way. Taken here, ahead of
+    // the plain reset below, so nothing in that block (placing, turning, its
+    // toast) ever runs on top of a race respawn. The repairs match it.
+    if (input.reset && mode === 'driving' && goals && goals.respawn()) {
+      if (car.damage) car.damage.reset();
+      drift.reset();
+      input.reset = false;
+    }
 
     if (input.pause && mode !== 'inspect') {
       if (mode === 'driving') { mode = 'paused'; menus.show('pause'); hud.setVisible(false); controls.reset(); }
@@ -795,6 +855,8 @@ async function boot() {
       car.input.brake = src.brake || 0;
       car.input.steer = src.steer || 0;
       car.input.handbrake = src.handbrake || 0;
+      // A race countdown holds the car on the brakes, whatever is pressed.
+      if (goals && goals.hold) { car.input.throttle = 0; car.input.brake = 1; }
     } else {
       car.input.throttle = 0; car.input.brake = 1; car.input.steer = 0; car.input.handbrake = 1;
     }
@@ -802,7 +864,11 @@ async function boot() {
     accumulator += dt;
     let steps = 0;
     while (accumulator >= PHYS_DT && steps < MAX_SUBSTEPS) {
+      // The jump ramps exist in the ground only for the length of car.step():
+      // preStep() puts them in, step() fires the lips and takes them out.
+      if (goals) goals.preStep();
       car.step(PHYS_DT);
+      if (goals) goals.step(PHYS_DT);
       if (collision) {
         const hit = collision.resolve(car, PHYS_DT);
         if (hit.hit && hit.severity > 0.04) {
@@ -900,6 +966,7 @@ async function boot() {
     pumpHints(dt);
 
     driftState = drift.update(dt, car) || drift.state;
+    if (goals) { goalsFrame.driving = driving; goals.update(dt, goalsFrame); hudState.nav = goals.nav; }
 
     // ---- car visuals ----
     carRoot.position.set(car.x, car.y, car.z);
@@ -1595,6 +1662,7 @@ async function boot() {
     get net() { return net; },
     get tags() { return tags; },
     get boom() { return boom; },
+    get goals() { return goals; },
     /** The aftermath director. Named to avoid colliding with wreck() below. */
     get aftermath() { return wreck; },
     /** Set off a blast at the car, for looking at one without crashing. */

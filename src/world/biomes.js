@@ -169,7 +169,7 @@ const FN = Math.round((2 * EXT) / FC) + 1;
 // tools/groundcheck.mjs samples the verge out to 40 m from the centreline and
 // ground.js blends the carriageway into the terrain over 3 + 26 m beyond the
 // shoulder, so nothing inside 38 m of an edge may move. Past that the ramps
-// differ by feature. A mountain flank is faded in over 150 m (a 190 m peak
+// differ by feature. A mountain flank is faded in over 210 m (a 290 m peak
 // over less would be an overhang). A canyon wall is not faded at all but
 // CAPPED: the rock may rise at most WALL metres per metre of distance from
 // the road, so where a mesa meets a road it stands as a straight wall at
@@ -179,7 +179,7 @@ const FN = Math.round((2 * EXT) / FC) + 1;
 const KEEP = 38;
 const WALL = 1.9;
 const RAMP_COAST = 100;
-const RAMP_PEAK = 150;
+const RAMP_PEAK = 210;
 const REACH = KEEP + RAMP_PEAK + 8;
 const RAMP_CANYON = 0;   // (capped, see WALL)
 
@@ -358,11 +358,17 @@ export function buildBiomes(world, terrain) {
   function alpinePeaks(x, z) {
     const wz = z + warpN(x, z);
     let h = 0;
-    const north = smoothstep(-1050, -2150, wz);
+    // Peaks begin just north of the pass and reach full height by the map's
+    // edge, and they go on past it: the north edge of the world is a wall of
+    // mountains, not a drop.
+    // A massif under the ridges, so every peak stands on high ground and the
+    // range reads as a range: 90 m of shoulder, and up to 200 m of ridge on
+    // top of it.
+    const north = smoothstep(-950, -1800, wz);
     if (north > 0) {
-      const r = ridged(x / 780, z / 780, s + 421, 3);
+      const r = ridged(x / 820, z / 820, s + 421, 3);
       const k = clamp((r + 0.3) / 1.3, 0, 1);
-      h += k * Math.sqrt(k) * 190 * north;
+      h += (90 + k * Math.sqrt(k) * 200) * north;
     }
     const hills = smoothstep(-600, -1250, wz);
     if (hills > 0) h += (fbm(x / 420, z / 420, s + 431, 3) * 0.5 + 0.5) * 30 * hills;

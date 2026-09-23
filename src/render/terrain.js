@@ -166,14 +166,14 @@ const SCRUB = [0.60, 0.46, 0.29];
 // Frostpeak Pass: snow a touch blue in its hollows, grey granite, and a dark
 // meadow green below the snow line. Snow's albedo is really 0.8-0.9, but under
 // this sun (4.6) and tone curve anything past about 0.8 sRGB clips to paper
-// white and a snowfield loses every fold in it; 0.76 keeps the shading.
-const SNOW = [0.76, 0.79, 0.84];
-const SNOW_SHADE = [0.60, 0.67, 0.79];
+// white and a snowfield loses every fold in it; 0.68 keeps the shading.
+const SNOW = [0.68, 0.71, 0.77];
+const SNOW_SHADE = [0.48, 0.56, 0.72];
 const GRANITE = [0.43, 0.43, 0.45];
 const MEADOW_ALP = [0.27, 0.34, 0.19];
 // Sunspray Bay: pale beach sand, wet sand at the waterline, bright coastal
 // turf and bleached marram on the dunes.
-const BEACH = [0.90, 0.83, 0.64];
+const BEACH = [0.84, 0.76, 0.57];
 const WET_SAND = [0.60, 0.53, 0.39];
 const COAST_TURF = [0.37, 0.45, 0.17];
 const MARRAM = [0.62, 0.58, 0.35];
@@ -188,7 +188,7 @@ const LITTER = [0.55, 0.29, 0.11];
 // shader's own default, F_MAIN, is the farmland one). Carried per vertex in
 // `rockTint`, doubled so a byte holds 0..0.5 at 0.002 steps.
 const ROCK_L = [0.18, 0.165, 0.145];
-const RED_ROCK_L = [0.30, 0.10, 0.045];
+const RED_ROCK_L = [0.27, 0.068, 0.030];
 const GRANITE_L = [0.14, 0.145, 0.155];
 
 // How much of each packed detail mask a surface shows, in the attribute's own
@@ -457,7 +457,7 @@ function macroTexture(seed) {
 
 const V_PARS = `
 attribute vec4 detailWeight;
-attribute vec4 rockTint;  // rgb: this biome's rock, linear, halved; a: how desert
+attribute vec4 rockTint;  // rgb: this biome's rock, linear, halved; a: desert (0..0.5) or snow (0.5..1)
 uniform vec2 orFade;
 varying vec4 vOrPos;      // xyz world position, w detail fade
 varying vec4 vOrWeight;
@@ -515,23 +515,34 @@ const F_MAIN = `
   // the way an eroded bank is, not a contour line. Cuttings and embankments
   // beside the roads are where this mostly shows.
   float orSl = 1.0 - orN.y + ( orMb.b - 0.5 ) * 0.05;
-  // Snow is the only ground that is both bright and bluer than it is red
-  // (beach sand is as bright, but warm), so it can be told from here without
-  // another attribute. It holds on steeper ground than turf does before the
-  // rock shows through, which is what leaves a mountainside white with dark
-  // crags rather than grey with white flecks.
-  float orSnowy = smoothstep( 0.22, 0.34, min( min( diffuseColor.r, diffuseColor.g ), diffuseColor.b ) )
-                * smoothstep( -0.01, 0.04, diffuseColor.b - diffuseColor.r );
+  // rockTint.a carries two things that never meet except in one corner of
+  // the map: how desert the ground is (0..0.5) and how snowy (0.5..1). Snow
+  // is carried explicitly because reading it off the colour flipped with
+  // each LOD ring's shading and drew a staircase seam across a snowfield.
+  // Snow holds on steeper ground than turf does before the rock shows
+  // through (from ~32 degrees rather than ~29), which leaves a mountainside
+  // white with dark crags rather than grey with white flecks. Per pixel, off
+  // the interpolated slope: an earlier per-VERTEX rock class for the crags
+  // drew its edge as a staircase at the vertex spacing.
+  float orSnowy = smoothstep( 0.55, 0.8, vOrRock.a );
+  float orDes = clamp( vOrRock.a * 2.0, 0.0, 1.0 ) * ( 1.0 - smoothstep( 0.45, 0.55, vOrRock.a ) );
   float orBare = smoothstep( 0.075, 0.125, orSl ) * orG;
   // In the canyon country rock shows on gentler ground (from ~23 degrees),
   // because a mesa's flank IS rock; elsewhere turf holds to ~30.
-  float orRock = smoothstep( mix( mix( 0.125, 0.075, vOrRock.a ), 0.22, orSnowy ),
-                             mix( mix( 0.19, 0.13, vOrRock.a ), 0.34, orSnowy ), orSl );
-  // Red rock is banded coarsely, the way sandstone beds are.
-  float orStrata = 0.84 + 0.16 * sin( vOrPos.y * mix( 2.7, 0.9, vOrRock.a ) + orMa.r * 9.0 );
-  vec3 orBareCol = mix( vec3( 0.095, 0.055, 0.024 ), vec3( 0.24, 0.085, 0.034 ), vOrRock.a );
+  float orRock = smoothstep( mix( mix( 0.125, 0.075, orDes ), 0.15, orSnowy ),
+                             mix( mix( 0.19, 0.13, orDes ), 0.27, orSnowy ), orSl );
+  // Red rock is banded coarsely and boldly, the way sandstone beds are: the
+  // stripes are most of what says "canyon" from the road.
+  // The fine bedding fades with distance: at 2.3 m a stripe it aliases into
+  // moire on a mountainside a few hundred metres off.
+  // Granite (the only rock bluer than it is red) is not bedded at all.
+  float orStrata = 0.84 + 0.16 * sin( vOrPos.y * 2.7 + orMa.r * 9.0 ) * ( 1.0 - smoothstep( 60.0, 220.0, length( vOrPos.xyz - cameraPosition ) ) )
+                 * ( 1.0 - smoothstep( 0.0, 0.004, vOrRock.b - vOrRock.r ) );
+  orStrata = mix( orStrata, 0.74 + 0.26 * sin( vOrPos.y * 0.85 + orMa.r * 4.0 ) * sin( vOrPos.y * 0.31 + 1.3 ), orDes );
+  vec3 orBareCol = mix( vec3( 0.095, 0.055, 0.024 ), vec3( 0.24, 0.085, 0.034 ), orDes );
   diffuseColor.rgb = mix( diffuseColor.rgb, orBareCol * ( 0.85 + orMb.b * 0.3 ), orBare );
-  diffuseColor.rgb = mix( diffuseColor.rgb, vOrRock.rgb * 2.0 * orStrata, orRock );
+  // rockTint is stored doubled (0..0.5 across a byte), so it is halved here.
+  diffuseColor.rgb = mix( diffuseColor.rgb, vOrRock.rgb * 0.5 * orStrata, orRock );
   orW = vec4( orW.x + orRock * 0.9, orW.y, orW.z * ( 1.0 - max( orBare, orRock ) ), orW.w + orBare * 0.8 );
   // ^4 rather than ^2, so the crossfade between projections is confined to
   // genuinely steep ground: at 20 degrees of slope the up plane still holds 98%
@@ -757,6 +768,8 @@ export function createTerrain(world, ground, opts = {}) {
   // and the tuft filler for the same point, so the woodland mask — three
   // fbm calls — is evaluated once a vertex rather than three times.
   let palWood = 0;
+  // ...and how snowy it is, 0..1, for the shader (rockTint.a).
+  let palSnow = 0;
   const fieldQ = { edge: 0, use: 0, id: 0, dx: 1, dz: 0, ripe: 0 };
   // The biome weights of the point palette() has just coloured, read again by
   // the rock tint in fillRows. Farmland only when the world has no biomes.
@@ -767,6 +780,7 @@ export function createTerrain(world, ground, opts = {}) {
 
   function palette(surface, x, z, ny, y, crest, out, fine = 1) {
     palWood = 0;
+    palSnow = 0;
     if (bio) bio.weightsAt(x, z, bw);
     const wF = bw[BIOME.farm], wD = bw[BIOME.desert], wA = bw[BIOME.alpine];
     const wC = bw[BIOME.coast], wU = bw[BIOME.autumn];
@@ -855,13 +869,22 @@ export function createTerrain(world, ground, opts = {}) {
       if (wA > 0.02) {
         const k = smoothstep(0.12, 0.5, bio.snowAt(x, z, y, wA)) * 0.75;
         if (k > 0) { out[0] = lerp(out[0], SNOW[0], k); out[1] = lerp(out[1], SNOW[1], k); out[2] = lerp(out[2], SNOW[2], k); }
+        palSnow = k;
       }
       return;
     }
     if (surface === 'snow') {
-      // Blue in the hollows, where it is lit by the sky and not the sun.
-      const k = clamp(-crest * 1.4, 0, 1) * 0.7;
+      // Blue in the hollows, where it is lit by the sky and not the sun, and
+      // thinner and greyer on the steeper flanks, where wind strips it: that
+      // is most of what gives a white mountain its shape from a distance.
+      // The hollow tint is held to half strength: `crest` is measured over a
+      // radius that grows with the LOD spacing, and on even white a stronger
+      // tint drew each ring's boundary.
+      palSnow = 1;
+      const k = clamp(-crest * 1.4, 0, 1) * 0.5;
       out[0] = lerp(SNOW[0], SNOW_SHADE[0], k); out[1] = lerp(SNOW[1], SNOW_SHADE[1], k); out[2] = lerp(SNOW[2], SNOW_SHADE[2], k);
+      const bare = smoothstep(0.10, 0.30, 1 - ny) * 0.55;
+      out[0] = lerp(out[0], GRANITE[0], bare); out[1] = lerp(out[1], GRANITE[1], bare); out[2] = lerp(out[2], GRANITE[2], bare);
       return;
     }
     if (surface === 'sand' || surface === 'water') {
@@ -879,7 +902,14 @@ export function createTerrain(world, ground, opts = {}) {
     out[0] = ((hex >> 16) & 255) / 255;
     out[1] = ((hex >> 8) & 255) / 255;
     out[2] = (hex & 255) / 255;
-    if (surface === 'dirt' && wD > 0) {
+    if (surface === 'gravel' && wD + wA > 0) {
+      // A shoulder is spread from what the land is made of: red grit in the
+      // canyon, and on the pass grey grit with the snow ploughed onto it.
+      const k = 0.55, wG = 1 - wD - wA;
+      out[0] = lerp(out[0], HARDPAN[0] * wD + SNOW[0] * wA + out[0] * wG, k);
+      out[1] = lerp(out[1], HARDPAN[1] * wD + SNOW[1] * wA + out[1] * wG, k);
+      out[2] = lerp(out[2], HARDPAN[2] * wD + SNOW[2] * wA + out[2] * wG, k);
+    } else if (surface === 'dirt' && wD > 0) {
       // Hardpan, in sun-baked plates of slightly different red.
       const k = 1 + valueNoise(x / 23, z / 23, tintSeed + 141) * 0.1 * wD;
       out[0] = lerp(out[0], HARDPAN[0], wD) * k; out[1] = lerp(out[1], HARDPAN[1], wD) * k;
@@ -889,6 +919,16 @@ export function createTerrain(world, ground, opts = {}) {
       out[0] = out[0] * base + RED_ROCK[0] * wD + GRANITE[0] * wA;
       out[1] = out[1] * base + RED_ROCK[1] * wD + GRANITE[1] * wA;
       out[2] = out[2] * base + RED_ROCK[2] * wD + GRANITE[2] * wA;
+      if (wA > 0.02) {
+        // Rock in snow country keeps the snow it would otherwise hold, both
+        // in its colour and in the shader's snow flag, so the line between
+        // crag and snow is drawn per pixel off the slope. Flagged as bare
+        // rock instead, the line followed the triangles and came out as a
+        // staircase at the vertex spacing.
+        palSnow = bio.snowAt(x, z, y, wA);
+        const k = palSnow * 0.5;
+        out[0] = lerp(out[0], SNOW[0], k); out[1] = lerp(out[1], SNOW[1], k); out[2] = lerp(out[2], SNOW[2], k);
+      }
     }
   }
 
@@ -1128,7 +1168,7 @@ export function createTerrain(world, ground, opts = {}) {
           rkt[o4] = (ROCK_L[0] * wR + RED_ROCK_L[0] * wD + GRANITE_L[0] * wA) * 510;
           rkt[o4 + 1] = (ROCK_L[1] * wR + RED_ROCK_L[1] * wD + GRANITE_L[1] * wA) * 510;
           rkt[o4 + 2] = (ROCK_L[2] * wR + RED_ROCK_L[2] * wD + GRANITE_L[2] * wA) * 510;
-          rkt[o4 + 3] = wD * 255;
+          rkt[o4 + 3] = (palSnow > 0.05 ? 0.5 + 0.5 * palSnow : Math.min(0.5, wD * 0.5)) * 255;
         }
         // Verge wear. The strip of grass just past a road's shoulder is where
         // wheels drop off, walkers walk and the mower scalps, so it is shorter,
@@ -1147,7 +1187,13 @@ export function createTerrain(world, ground, opts = {}) {
             const f = (roadQ.dist - roadQ.width * 0.5) / sh;
             if (f > 0) {
               const t = smoothstep(0.35, 1.05, f) * job.mud;
-              rgb[0] = lerp(rgb[0], GROWN[0], t * 0.6); rgb[1] = lerp(rgb[1], GROWN[1], t * 0.6); rgb[2] = lerp(rgb[2], GROWN[2], t * 0.6);
+              // What the outer shoulder grows into is the biome's own ground:
+              // grass in the country, red grit in the canyon, snow on the pass.
+              const wD = bw[BIOME.desert], wA = bw[BIOME.alpine], wG = 1 - wD - wA;
+              const gr0 = GROWN[0] * wG + HARDPAN[0] * wD + SNOW[0] * wA;
+              const gr1 = GROWN[1] * wG + HARDPAN[1] * wD + SNOW[1] * wA;
+              const gr2 = GROWN[2] * wG + HARDPAN[2] * wD + SNOW[2] * wA;
+              rgb[0] = lerp(rgb[0], gr0, t * 0.6); rgb[1] = lerp(rgb[1], gr1, t * 0.6); rgb[2] = lerp(rgb[2], gr2, t * 0.6);
               if (dtl) {
                 const o4 = v * 4;
                 dtl[o4 + 2] = Math.max(dtl[o4 + 2], t * 150);
@@ -1205,7 +1251,9 @@ export function createTerrain(world, ground, opts = {}) {
       for (let b = 1; b < last; b++) {
         const v = a * D + b, o = v * 3;
         const lap = hgrid[v] * 4 - hgrid[v - D] - hgrid[v + D] - hgrid[v - 1] - hgrid[v + 1];
-        const k = clamp(lap / (step * 1.6), -1, 1);
+        // Snow fills creases rather than shading them, and on even white the
+        // crease term, which only the fine rings carry, drew their outline.
+        const k = clamp(lap / (step * 1.6), -1, 1) * (mgrid[v] === 9 ? 0.3 : 1);
         const kk = 1 + k * aoW;
         let r = col[o] * (kk + k * warmW);
         let g = col[o + 1] * kk;

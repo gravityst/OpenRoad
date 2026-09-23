@@ -94,6 +94,73 @@
 
 import * as THREE from 'three';
 import { clamp, lerp, smoothstep } from '../world/noise.js';
+import { activeBiomes, BIOME } from '../world/biomes.js';
+
+// ---------------------------------------------------------------------------
+// The air of each biome
+//
+// Every biome gets its own air, read from where the camera is (the biome
+// field in world/biomes.js, through its registry, since this module is built
+// before the world is handed to anyone) and eased over a second and a half so
+// a teleport never snaps. Turbidity and visibility are scaled rather than the
+// fog colour repainted, because both feed the sky shader AND the haze, so the
+// horizon cannot come out two colours: the canyon's air is dusty and warm,
+// the pass's is thin, blue and clear enough to see the peaks, the coast's
+// carries a little sea haze, the autumn woods' is soft. The light is tinted
+// on top — warmer in the canyon and the woods, cooler on the snow — and the
+// ground bounce follows what the light bounced off: red rock, white snow.
+//
+//                 turbidity  visibility  sun tint            bounce
+//   farmland        1.00       1.00      —                   —
+//   canyon          1.45       0.55      warm (1.04,.98,.88)  red
+//   pass            0.70       1.35      cool (.96,.99,1.05)  bright
+//   coast           1.12       0.80      —                   —
+//   autumn          1.10       0.85      gold (1.04,.99,.90)  —
+// ---------------------------------------------------------------------------
+const BIO_AIR = [
+  { turb: 1.00, vis: 1.00, sun: [1.00, 1.00, 1.00], fog: [1.00, 1.00, 1.00], bounce: [1.00, 1.00, 1.00] },
+  { turb: 1.45, vis: 0.55, sun: [1.04, 0.98, 0.88], fog: [1.05, 0.99, 0.91], bounce: [1.25, 0.92, 0.74] },
+  { turb: 0.70, vis: 1.35, sun: [0.96, 0.99, 1.05], fog: [0.97, 1.00, 1.04], bounce: [1.18, 1.22, 1.30] },
+  { turb: 1.12, vis: 0.80, sun: [1.00, 1.00, 1.00], fog: [0.98, 1.01, 1.03], bounce: [1.00, 1.05, 1.08] },
+  { turb: 1.10, vis: 0.85, sun: [1.04, 0.99, 0.90], fog: [1.03, 1.00, 0.94], bounce: [1.10, 0.98, 0.85] },
+];
+
+// Snow in the air on the pass: a box of flakes that travels with the camera
+// and wraps, so a finite set of points is an endless gentle fall. One draw
+// call, only while the camera is in the mountains.
+const SNOW_VERT = `
+uniform float uT;
+uniform vec3 uCam;
+uniform float uBox;
+uniform float uAmt;
+uniform float uScale;
+varying float vA;
+void main() {
+  vec3 p = position;
+  p.y -= uT * 1.15;
+  p.x += uT * 0.55 + sin( uT * 0.9 + position.y * 1.3 ) * 0.45;
+  p.z += uT * 0.30 + cos( uT * 0.7 + position.x * 1.1 ) * 0.45;
+  p = mod( p - uCam + uBox * 0.5, uBox ) + uCam - uBox * 0.5;
+  vec4 mv = modelViewMatrix * vec4( p, 1.0 );
+  gl_Position = projectionMatrix * mv;
+  float d = max( -mv.z, 0.5 );
+  gl_PointSize = clamp( 0.075 * uScale / d, 1.0, 14.0 );
+  vec3 q = abs( p - uCam ) / ( uBox * 0.5 );
+  vA = uAmt * ( 1.0 - smoothstep( 0.65, 1.0, max( q.x, max( q.y, q.z ) ) ) ) * smoothstep( 0.6, 2.5, d );
+  // Thinner snow shows fewer flakes rather than fainter ones.
+  if ( fract( position.x * 7.13 + position.z * 3.71 ) > uAmt ) vA = 0.0;
+}
+`;
+const SNOW_FRAG = `
+uniform vec3 uLight;
+varying float vA;
+void main() {
+  vec2 c = gl_PointCoord - 0.5;
+  float r = dot( c, c );
+  if ( r > 0.25 || vA <= 0.0 ) discard;
+  gl_FragColor = vec4( uLight, vA * ( 1.0 - r * 4.0 ) );
+}
+`;
 
 const TAU = Math.PI * 2;
 const DEG = Math.PI / 180;
@@ -1059,6 +1126,60 @@ export function createSky(scene, renderer, opts = {}) {
   };
   scene.userData.sky = published;
 
+  // ---- biome air -----------------------------------------------------------
+  const bioW = new Float64Array(5);
+  const air = { turb: 1, vis: 1, sun: [1, 1, 1], fog: [1, 1, 1], bounce: [1, 1, 1], snow: 0, primed: false };
+  state.biome = air;
+  function biomeAir(cameraPos, step) {
+    const field = activeBiomes();
+    if (!field || !cameraPos) return;
+    field.weightsAt(cameraPos.x, cameraPos.z, bioW);
+    let turb = 0, vis = 0;
+    const sun = [0, 0, 0], fog = [0, 0, 0], bounce = [0, 0, 0];
+    for (let b = 0; b < 5; b++) {
+      const A = BIO_AIR[b], w = bioW[b];
+      turb += A.turb * w; vis += A.vis * w;
+      for (let c = 0; c < 3; c++) { sun[c] += A.sun[c] * w; fog[c] += A.fog[c] * w; bounce[c] += A.bounce[c] * w; }
+    }
+    const snow = smoothstep(0.35, 0.8, bioW[BIOME.alpine]);
+    const k = air.primed ? 1 - Math.exp(-step / 1.5) : 1;
+    air.primed = true;
+    air.turb += (turb - air.turb) * k;
+    air.vis += (vis - air.vis) * k;
+    air.snow += (snow - air.snow) * k;
+    for (let c = 0; c < 3; c++) {
+      air.sun[c] += (sun[c] - air.sun[c]) * k;
+      air.fog[c] += (fog[c] - air.fog[c]) * k;
+      air.bounce[c] += (bounce[c] - air.bounce[c]) * k;
+    }
+  }
+
+  // ---- falling snow -----------------------------------------------------------
+  const SNOW_N = 2600, SNOW_BOX = 64;
+  const snowPos = new Float32Array(SNOW_N * 3);
+  {
+    let a = 0x9e3779b9;
+    const r = () => { a = (a + 0x6D2B79F5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), 1 | t); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+    for (let i = 0; i < SNOW_N * 3; i++) snowPos[i] = r() * SNOW_BOX;
+  }
+  const snowGeo = new THREE.BufferGeometry();
+  snowGeo.setAttribute('position', new THREE.BufferAttribute(snowPos, 3));
+  const snowU = {
+    uT: { value: 0 }, uCam: { value: new THREE.Vector3() }, uBox: { value: SNOW_BOX },
+    uAmt: { value: 0 }, uScale: { value: 900 }, uLight: { value: new THREE.Color(1, 1, 1) },
+  };
+  const snowMat = new THREE.ShaderMaterial({
+    uniforms: snowU, vertexShader: SNOW_VERT, fragmentShader: SNOW_FRAG,
+    transparent: true, depthWrite: false, fog: false,
+  });
+  const snowPts = new THREE.Points(snowGeo, snowMat);
+  snowPts.name = 'snowfall';
+  snowPts.frustumCulled = false;
+  snowPts.renderOrder = 6;
+  snowPts.visible = false;
+  scene.add(snowPts);
+  let snowT = 0;
+
   function setTime(h) {
     hours = ((h % 24) + 24) % 24;
     state.hours = hours;
@@ -1118,6 +1239,11 @@ export function createSky(scene, renderer, opts = {}) {
       const k = WEATHER_KEYS[i];
       now[k] = from[k] + (to[k] - from[k]) * w;
     }
+    // The biome's air, applied to local copies: `now` is snapshotted by
+    // setWeather() and must stay the weather alone.
+    biomeAir(cameraPos, step);
+    const turbidity = now.turbidity * air.turb;
+    const visibility = now.visibility * air.vis;
 
     // ---- sun and moon -----------------------------------------------------
     const sunAlt = celestialDir(state.sunDir, hours, latRad, decRad, 0);
@@ -1135,15 +1261,15 @@ export function createSky(scene, renderer, opts = {}) {
     state.nightFactor = night;
     state.daylight = daylight;
     state.rainIntensity = now.rain;
-    state.turbidity = now.turbidity;
-    state.visibility = now.visibility;
+    state.turbidity = turbidity;
+    state.visibility = visibility;
 
     const ms = smoothstep(-0.16, 0.20, sy) * 0.55;
-    sunTransmittance(_trans, sy, now.turbidity);
+    sunTransmittance(_trans, sy, turbidity);
 
     uniforms.uSunDir.value.copy(state.sunDir);
     uniforms.uSunLit.value.set(_trans.r, _trans.g, _trans.b);
-    uniforms.uTurbidity.value = now.turbidity;
+    uniforms.uTurbidity.value = turbidity;
     uniforms.uMs.value = ms;
     uniforms.uNight.value = night;
     uniforms.uStars.value = stars;
@@ -1185,7 +1311,7 @@ export function createSky(scene, renderer, opts = {}) {
 
     // ---- colours read back out of the same model --------------------------
     skyRadiance(_zenith, 0, 1, 0, state.sunDir.x, sy, state.sunDir.z,
-      now.turbidity, skyBrightness, ms);
+      turbidity, skyBrightness, ms);
     addNightFloor(_zenith, 1, night);
 
     // The haze colour is the horizon at right angles to the sun; the extra
@@ -1196,10 +1322,10 @@ export function createSky(scene, renderer, opts = {}) {
     const hx = state.sunDir.x, hz = state.sunDir.z, hl = Math.hypot(hx, hz);
     const ax = hl > 1e-4 ? hx / hl : 1, az = hl > 1e-4 ? hz / hl : 0;
     skyRadiance(_horizon, -az * 0.9994, 0.035, ax * 0.9994,
-      state.sunDir.x, sy, state.sunDir.z, now.turbidity, skyBrightness, ms);
+      state.sunDir.x, sy, state.sunDir.z, turbidity, skyBrightness, ms);
     addNightFloor(_horizon, 0.035, night);
     skyRadiance(_toward, ax * 0.9994, 0.035, az * 0.9994,
-      state.sunDir.x, sy, state.sunDir.z, now.turbidity, skyBrightness, ms);
+      state.sunDir.x, sy, state.sunDir.z, turbidity, skyBrightness, ms);
     addNightFloor(_toward, 0.035, night);
 
     state.zenithColour.setRGB(_zenith.r, _zenith.g, _zenith.b);
@@ -1237,6 +1363,7 @@ export function createSky(scene, renderer, opts = {}) {
       lerp(_horizon.g, ca.y * deckBase * 1.15, grey),
       lerp(_horizon.b, ca.z * deckBase * 1.15, grey),
     );
+    state.fogColour.r *= air.fog[0]; state.fogColour.g *= air.fog[1]; state.fogColour.b *= air.fog[2];
     const glowK = (1 - grey) * (0.4 + 0.6 * now.light);
     HAZE_GLOW.x = Math.max(0, _toward.r - _horizon.r) * glowK;
     HAZE_GLOW.y = Math.max(0, _toward.g - _horizon.g) * glowK;
@@ -1247,7 +1374,7 @@ export function createSky(scene, renderer, opts = {}) {
 
     // The haze itself. Extinction from the visibility, thinning with height
     // above the ground under the camera, which is what lets valleys hold it.
-    HAZE.x = 3.912 / Math.max(50, now.visibility);
+    HAZE.x = 3.912 / Math.max(50, visibility);
     HAZE.y = 1 / Math.max(20, now.hazeH);
     HAZE.z = hazeFloor;
     HAZE.w = 1;
@@ -1258,9 +1385,9 @@ export function createSky(scene, renderer, opts = {}) {
     // sooner; `near` only matters to materials that fall back to linear fog.
     if (scene.fog && scene.fog.isFog) {
       scene.fog.color.copy(state.fogColour);
-      const far = Math.min(drawDistance, Math.max(160, now.visibility * 3.2));
+      const far = Math.min(drawDistance, Math.max(160, visibility * 3.2));
       scene.fog.far = far;
-      scene.fog.near = Math.min(far * 0.85, now.visibility * 0.35);
+      scene.fog.near = Math.min(far * 0.85, visibility * 0.35);
     }
 
     // ---- light ------------------------------------------------------------
@@ -1294,6 +1421,7 @@ export function createSky(scene, renderer, opts = {}) {
       lerp(0.94 * (lg / peak) + 0.06, 0.66, lunarRamp),
       lerp(0.94 * (lb / peak) + 0.06, 0.95, lunarRamp),
     );
+    state.sunLightColour.r *= air.sun[0]; state.sunLightColour.g *= air.sun[1]; state.sunLightColour.b *= air.sun[2];
     sun.color.copy(state.sunLightColour);
 
     if (cameraPos) {
@@ -1332,11 +1460,25 @@ export function createSky(scene, renderer, opts = {}) {
       lerp(_zenith.b / zMax, 1, 0.30),
     );
     hemi.groundColor.setRGB(
-      state.sunLightColour.r * 0.30 + 0.05,
-      state.sunLightColour.g * 0.30 + 0.06,
-      state.sunLightColour.b * 0.20 + 0.05,
+      (state.sunLightColour.r * 0.30 + 0.05) * air.bounce[0],
+      (state.sunLightColour.g * 0.30 + 0.06) * air.bounce[1],
+      (state.sunLightColour.b * 0.20 + 0.05) * air.bounce[2],
     );
     hemi.intensity = hemiPeak * (0.20 + 0.80 * smoothstep(-0.22, 0.16, sy)) * now.ambient;
+
+    // ---- falling snow -----------------------------------------------------
+    // Lit by the sky: bright by day, a faint grey drift under the moon.
+    const amt = air.snow * (1 - now.rain) * 0.9;
+    snowPts.visible = amt > 0.02 && !!cameraPos;
+    if (snowPts.visible) {
+      snowT = (snowT + step) % 3600;
+      snowU.uT.value = snowT;
+      snowU.uCam.value.copy(cameraPos);
+      snowU.uAmt.value = amt;
+      if (renderer && renderer.domElement) snowU.uScale.value = renderer.domElement.height * 1.0;
+      const lum = 0.10 + 0.85 * daylight * now.light;
+      snowU.uLight.value.setRGB(lum * 0.95, lum * 0.97, lum);
+    }
 
     // ---- publish ------------------------------------------------------------
     // Rain wets the world in about half a minute and it takes minutes to dry;
@@ -1351,6 +1493,9 @@ export function createSky(scene, renderer, opts = {}) {
   }
 
   function dispose() {
+    scene.remove(snowPts);
+    snowGeo.dispose();
+    snowMat.dispose();
     scene.remove(mesh);
     scene.remove(sun);
     scene.remove(sun.target);

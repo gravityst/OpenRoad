@@ -211,7 +211,9 @@ vec3 orBiomeLeaf( vec3 c ) {
   return c;
 }
 vec3 orBiomeSnow( vec3 c, float up ) {
-  return mix( c, vec3( 0.54, 0.59, 0.67 ), vOrBio.g * smoothstep( 0.1, 0.55, up ) * 0.88 );
+  // Only what faces well up holds snow, and never all of it: a conifer's
+  // crown normals all lean upward, and from 0.1 up the whole tree went white.
+  return mix( c, vec3( 0.50, 0.55, 0.63 ), vOrBio.g * smoothstep( 0.45, 0.85, up ) * 0.8 );
 }
 `;
 

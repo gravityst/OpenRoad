@@ -1474,8 +1474,8 @@ function buildProps(world, rnd, ground) {
   };
   // How much more (or less) wood each biome grows, as an offset on the
   // woodland mask, whose planting threshold is 0.08: the desert grows none,
-  // the coast a little less, the autumn woods a good deal more.
-  const WOOD_BIAS = [0, -1.2, 0.03, -0.07, 0.08];
+  // the coast much less (so its palms are seen), the autumn woods more.
+  const WOOD_BIAS = [0, -1.2, 0.03, -0.15, 0.08];
   const woodBias = (w) => w[0] * WOOD_BIAS[0] + w[1] * WOOD_BIAS[1] + w[2] * WOOD_BIAS[2] +
                           w[3] * WOOD_BIAS[3] + w[4] * WOOD_BIAS[4];
   // Above this in the mountains there is only rock and snow. The northern

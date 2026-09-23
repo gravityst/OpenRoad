@@ -81,8 +81,11 @@
 // is built once per model and shared by every car of that model.
 
 import * as THREE from 'three';
+import { createHeavyModel, HEAVY_BODIES } from './heavy.js';
 
 export const BODY_STYLES = ['sedan', 'coupe', 'hatch', 'suv', 'pickup', 'van', 'sports'];
+/** The working vehicles traffic also drives: see render/heavy.js. */
+export { HEAVY_BODIES };
 
 // ===========================================================================
 // Style table
@@ -2985,6 +2988,9 @@ export function setCarQuality(tier) {
  * opts: { colour, detail: 'high' | 'low' }
  */
 export function createCarModel(spec = {}, opts = {}) {
+  // The lorry, the bus and the tractor are built by heavy.js to this same
+  // interface, from this file's kit and materials.
+  if (HEAVY_BODIES.includes(spec.body)) return createHeavyModel(spec, opts, HEAVY_DEPS);
   const style = BODY_STYLES.includes(spec.body) ? spec.body : 'sedan';
   const detail = opts.detail === 'low' ? 'low' : 'high';
   const seed = hash(`${spec.id || style}:${spec.name || ''}`);
@@ -3301,6 +3307,12 @@ export function prewarmCarModels(specs = [], opts = {}) {
   return built;
 }
 
+// What heavy.js borrows from this file, so its vehicles share the kit.
+const HEAVY_DEPS = {
+  acquireKit, releaseKit, envMaterial, LAMPS, pullToward, paintFinish, patchEnv,
+  envKey: ENV_KEY, updateEnv, now,
+};
+
 /** Fill in anything the caller's spec left out, so a bare {body} still works. */
 function defaults(spec) {
   return {
@@ -3349,7 +3361,7 @@ const FLEET = {
   high:   { near: 64, maxNear: 14, flareFar: 900 },
 };
 // Lamp codes baked per vertex: which of the instance's lamp values lights it.
-const LAMP_CODE = { lHead: 1, lTail: 2, lIndL: 3, lIndR: 4, lBrake: 5, lRev: 6, lSign: 7, lBeacon: 8 };
+const LAMP_CODE = { lHead: 1, lTail: 2, lIndL: 3, lIndR: 4, lBrake: 5, lRev: 6, lSign: 7, lBeacon: 8, lMarker: 9 };
 // Far shading for everything that is not paint: sRGB colour, roughness,
 // metalness. Glass is opaque and darker than the real (see-through) glass,
 // because behind it is a dark cabin the far body does not have.
@@ -3380,7 +3392,8 @@ vRM = mix( aMat.yz, aFinish.yx, aMat.x );
     else if ( lc < 5.5 ) em = vec3( 1.0, 0.024, 0.011 ) * 2.6 * aLamp.y;
     else if ( lc < 6.5 ) em = vec3( 0.0 );
     else if ( lc < 7.5 ) em = vec3( 1.0, 0.42, 0.04 ) * 1.4;
-    else em = vec3( 1.0, 0.32, 0.006 ) * 3.4 * aFinish.z;
+    else if ( lc < 8.5 ) em = vec3( 1.0, 0.32, 0.006 ) * 3.4 * aFinish.z;
+    else em = vec3( 1.0, 0.36, 0.008 ) * ( 0.25 + 1.35 * aLamp.x );
   }
   vEmit = em;
 }
@@ -3661,7 +3674,7 @@ export function createFleet(scene, opts = {}) {
   function nearModel(i, t) {
     const s = slots[i];
     if (!s.model) {
-      s.model = createCarModel(kinds.get(s.key).spec, { detail: 'low', colour: s.colour });
+      s.model = createCarModel(specOf(t), { detail: 'low', colour: s.colour });
       group.add(s.model.group);
     }
     return s.model;

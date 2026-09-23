@@ -13,7 +13,11 @@
 //      and main.js built every one at the player's detail: the budget passed
 //      against a code path the game never ran. This checks the game's own call
 //      site, then drives the fleet against a real traffic pool and counts.
-//   3. THE ROAD PULL. roads.js pulls the road toward the eye in depth; every
+//   3. THE WORKING VEHICLES. The lorry, bus and tractor keep createCarModel's
+//      exact interface and a traffic budget; the pool carries them; each
+//      drives only the roads it should, at the speed it can; buses call at
+//      their stops.
+//   4. THE ROAD PULL. roads.js pulls the road toward the eye in depth; every
 //      ground decal that must stay visible over it has to be pulled by the
 //      same numbers, or it vanishes. Nothing else can see that headless.
 //
@@ -27,8 +31,9 @@ import { createGround } from '../src/world/ground.js';
 import { createVehicle } from '../src/physics/vehicle.js';
 import { createCollision } from '../src/physics/collision.js';
 import { CARS, specFor } from '../src/vehicles/catalog.js';
-import { createCarModel, createFleet, ROAD_PULL } from '../src/render/carModel.js';
-import { createTraffic } from '../src/ai/traffic.js';
+import { createCarModel, createFleet, ROAD_PULL, HEAVY_BODIES } from '../src/render/carModel.js';
+import { createTraffic, busStops, STAGGER } from '../src/ai/traffic.js';
+import { TRAFFIC, TRAFFIC_BY_ID } from '../src/vehicles/catalog.js';
 import { drawnSize, SOLID_FRACTION } from '../src/render/city.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -246,7 +251,112 @@ function overlapDepth(a, b) {
 }
 
 // ---------------------------------------------------------------------------
-// 3. The road pull
+// 3. The working vehicles
+// ---------------------------------------------------------------------------
+{
+  const API = Object.keys(createCarModel({ body: 'sedan' }, { detail: 'low' })).sort().join(',');
+  const DIMS = ['length', 'width', 'height', 'wheelbase', 'track', 'wheelRadius', 'front', 'rear', 'seat'];
+  const rows = [];
+  let apiOk = true, finite = true, budget = true, wheelsOk = true;
+  for (const t of TRAFFIC) {
+    const spec = specFor(t.id);
+    const m = createCarModel(spec, { detail: 'low' });
+    if (Object.keys(m).sort().join(',') !== API) apiOk = false;
+    if (!DIMS.every((k) => k in m.dims)) apiOk = false;
+    // Cars at 'low' carry one 'wheel' mesh; the heavy bodies a 'tyre' first,
+    // as a car at player detail does.
+    const first = HEAVY_BODIES.includes(spec.body) ? 'tyre' : 'wheel';
+    if (m.wheels.map((w) => w.name).join() !== 'FL,FR,RL,RR' || m.wheels.some((w) => w.children[0].name !== first)) wheelsOk = false;
+    let calls = 0;
+    m.group.traverse((o) => {
+      if (!o.isMesh) return;
+      calls++;
+      const p = o.geometry.attributes.position.array;
+      for (let i = 0; i < p.length; i++) if (!Number.isFinite(p[i])) { finite = false; break; }
+    });
+    // Every setter, and the bumper-to-bumper length the traffic driver uses.
+    m.setSteer(0.2); m.setWheelSpin(3); m.setBrakeLights(1); m.setHeadlights(true);
+    m.setReverseLights(true); m.setIndicator(-1); m.setSuspension([0.02, 0, 0, 0]); m.setPaint(0x336699);
+    const heavy = HEAVY_BODIES.includes(spec.body);
+    if (heavy && (calls > 18 || m.triangles > 8000)) budget = false;
+    rows.push(`${t.id} ${calls} calls ${Math.round(m.triangles)} tris ${m.dims.length.toFixed(1)} m (driver: ${t.length} m)`);
+    if (Math.abs(m.dims.length - t.length) > 0.6) budget = false;
+    m.dispose();
+  }
+  console.log('  ' + rows.join('\n  '));
+  check('the lorry, bus and tractor have exactly a car model\'s interface', apiOk && wheelsOk && finite,
+    `${HEAVY_BODIES.join(', ')}: same keys, FL/FR/RL/RR with the tyre first, finite`);
+  check('each working vehicle is within a traffic budget and its drawn length', budget,
+    'at most 18 calls and 8k triangles near; model length within 0.6 m of the length traffic drives by');
+
+  const stops = busStops(world, ground);
+  const traffic = createTraffic(world, ground, { density: 44 });
+  const roles = {};
+  for (const c of traffic.cars) roles[c.role] = (roles[c.role] || 0) + 1;
+  check('the pool carries vans, pickups, lorries, buses and tractors',
+    ['van', 'pickup', 'lorry', 'bus', 'tractor'].every((r) => roles[r] >= 2),
+    Object.entries(roles).map(([k, v]) => `${v} ${k}`).join(', '));
+
+  let wrongRoad = 0, samples = 0, standing = 0, called = new Set(), overTop = 0;
+  const topSeen = { lorry: 0, tractor: 0, bus: 0, car: 0 };
+  const road = {};
+  for (let step = 0; step < 60 * 240; step++) {
+    const a = step * 0.001;
+    const px = Math.cos(a) * 1400, pz = Math.sin(a) * 1400;
+    traffic.update(1 / 60, px, pz, 22);
+    if (step % 20) continue;
+    for (const c of traffic.cars) {
+      if (!c.active) continue;
+      samples++;
+      if (c.roads && c.edge && !c.roads.has(c.edge.kind)) wrongRoad++;
+      if (c.speed > c.top + 0.05) overTop++;
+      if (topSeen[c.role] !== undefined) topSeen[c.role] = Math.max(topSeen[c.role], c.speed);
+      if (c.role === 'bus' && c.stopFor > 0) {
+        standing++;
+        called.add(c.stopDone);
+        // Standing at the stop, pulled in: right of its lane, still on the road.
+        ground.roadAt(c.x, c.z, road);
+      }
+    }
+  }
+  check('each vehicle keeps to its roads and under its top speed', wrongRoad === 0 && overTop === 0,
+    `${wrongRoad} on a road it should not take, ${overTop} over its governed speed in ${samples} samples; fastest lorry ${(topSeen.lorry * 3.6).toFixed(0)} km/h, tractor ${(topSeen.tractor * 3.6).toFixed(0)}`);
+  // And one bus, followed from 160 m out on a stop's road, calls at it:
+  // indicates, pulls in right of its lane, stands, indicates out and goes.
+  const st = stops.find((q) => world.edges[q.edge].length > 260) || stops[0];
+  const busIdx = traffic.cars.findIndex((c) => c.role === 'bus');
+  const e = world.edges[st.edge];
+  const startAt = Math.max(0, st.s + STAGGER - 160);
+  traffic.spawnAt(busIdx, st.edge, 1, startAt, 16);
+  const bus = traffic.cars[busIdx];
+  let stood = 0, signalledIn = false, signalledOut = false, maxPull = 0, left = false, where = null;
+  for (let i = 0; i < 60 * 40 && !left; i++) {
+    traffic.update(1 / 60, bus.x + 30, bus.z + 30, 0);
+    if (!bus.active) break;
+    if (bus.stopFor > 0) {
+      stood += 1 / 60;
+      if (!where) where = { x: bus.x, z: bus.z, yaw: bus.yaw };
+      if (bus.indicator === -1) signalledOut = true;
+    } else if (stood > 0 && bus.speed > 3) left = true;
+    if (bus.indicator === 1 && bus.stopFor === 0 && stood === 0) signalledIn = true;
+    maxPull = Math.max(maxPull, bus.pull);
+  }
+  let offset = NaN;
+  if (where) {
+    const r = ground.nearestRoad(where.x, where.z, 30);
+    const fx = -Math.sin(where.yaw), fz = -Math.cos(where.yaw);
+    const along = fx * r.tx + fz * r.tz;
+    offset = ((where.x - r.x) * -r.tz + (where.z - r.z) * r.tx) * Math.sign(along);
+  }
+  check('there are bus stops, and a bus calls at one', stops.length >= 10 && stood > 4 && signalledIn && signalledOut && left,
+    `${stops.length} stops (a shelter each way, ${STAGGER} m staggered); stood ${stood.toFixed(1)} s, signalled in ${signalledIn}, out ${signalledOut}, drove off ${left}`);
+  check('it stands pulled in to the kerb, still on the road', where && offset > e.width * 0.25 + 0.6 && offset < e.width * 0.5 + 0.4,
+    `${offset.toFixed(2)} m right of the centreline (lane centre ${(e.width * 0.25).toFixed(2)}, edge ${(e.width * 0.5).toFixed(2)})`);
+  console.log(`  in 4 min of the pool driving round the ring, buses called at ${called.size} stops (${standing} standing samples)`);
+}
+
+// ---------------------------------------------------------------------------
+// 4. The road pull
 // ---------------------------------------------------------------------------
 {
   const roads = read('src/render/roads.js');

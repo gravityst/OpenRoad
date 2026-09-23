@@ -191,12 +191,8 @@ export function createModesUi(opts) {
   function onEvent(e) {
     const my = (id) => id === myId();
     switch (e.k) {
-      case 'invite':
-        toast(`${modes.nameOf(e.id)} started ${e.kind === 'race' ? 'a race' : e.kind === 'tag' ? 'a game of Tag' : 'a Coin Rush'}${touch ? '' : ' — J to join'}`, modes.cssOf(e.id));
-        break;
-      case 'started':
-        toast(`Invite sent. ${e.kind === 'race' ? 'Line up on the grid' : 'Waiting for friends to join'}`, view.css);
-        break;
+      // 'invite' and 'started' say nothing here: the card at the top says it,
+      // and a toast as well was the same news twice.
       case 'watching':
         toast("The race has started. You're watching, and in the next one", view.css);
         break;

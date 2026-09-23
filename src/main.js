@@ -710,6 +710,9 @@ async function boot() {
   menus.on('drive', (p) => {
     if (net && p && p.id) net.setCar(p.id, wireColourOf(p.colour, p.paint));
     if (!party || !p || !p.fresh) return;
+    // A friend's game is inviting (the title said "Press Play to join in"):
+    // Play joins it, and the game puts you where it wants you.
+    if (modes && modes.view.invite && modes.join()) return;
     const s = party.onPlay(car);
     if (s && roster) roster.toast(`You're right behind ${s.name}!`, colourOf(net.room.car(s.id) || { id: s.id }).css);
   });

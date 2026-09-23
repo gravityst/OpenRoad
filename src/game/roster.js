@@ -352,8 +352,11 @@ export function createRoster(opts) {
     }
     for (let k = i; k < pickEls.length; k++) if (pickEls[k].b.parentNode) pickEls[k].b.remove();
     const picked = list.find((r) => r.id === party.picked);
-    const note = picked ? `Play starts you right next to ${picked.name}.`
-      : 'Play starts you next to the nearest one. Pick a name to choose.';
+    // A game inviting right now beats everything: Play joins it (main.js).
+    const v = modes ? modes.view : null;
+    const note = v && v.invite ? `${v.hostName} ${v.kind === 'race' ? `wants to race: ${v.name}` : v.kind === 'tag' ? 'wants to play Tag' : 'started a Coin Rush'}. Press Play to join in!`
+      : picked ? `Play starts you right next to ${picked.name}.`
+        : 'Play starts you next to the nearest one. Pick a name to choose.';
     if (badgeNote.textContent !== note) badgeNote.textContent = note;
   }
 
@@ -520,7 +523,7 @@ export function createRoster(opts) {
       toast(`${e.name} left`, col);
     } else if (e.type === 'welcome' && net && net.people.size) {
       const n = net.people.size;
-      toast(`${n} friend${n === 1 ? '' : 's'} online${touch ? '' : ' — press Tab'}`, '#5ce07a');
+      toast(`${n} friend${n === 1 ? '' : 's'} online${touch ? '. Tap Party to play together' : ' — Tab to play together'}`, '#5ce07a');
     }
   }
 

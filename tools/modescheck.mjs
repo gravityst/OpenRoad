@@ -247,6 +247,43 @@ const goalsStub = { list: gen.list, byId: gen.byId, nav: null };
   core.message(S[e1], JSON.stringify({ t: 'mode', a: 'chat', text: 'hi' }));
   check(got.length === before, 'a game can only be started with a real race id or real coin spots: junk is ignored', `${got.length - before} messages out`);
 
+  // Two is enough for tag: one IT, one running, and a tag passes.
+  {
+    let t2 = 1.7e12;
+    const c2 = CORE.createRoomCore({ proto: 2, now: () => t2, rng: () => 0 });
+    const x = { send() {}, close() {} }, y = { send() {}, close() {} };
+    c2.open(x); c2.open(y);
+    c2.message(x, JSON.stringify({ t: 'join', proto: 2, name: 'Sis' }));
+    c2.message(y, JSON.stringify({ t: 'join', proto: 2, name: 'Bro' }));
+    c2.message(x, JSON.stringify({ t: 'mode', a: 'tag' }));
+    c2.message(y, JSON.stringify({ t: 'mode', a: 'join' }));
+    const g2 = c2.modes.game;
+    let px = 0;
+    for (let n = 0; n < 400 && g2.it !== c2.peerOf(y).id; n++) {
+      t2 += 50;
+      if (g2.phase === 'run' && t2 - 1.7e12 > 7000) px += 0.4;          // IT (Sis) drives at Bro after the count
+      c2.message(x, PROTO.encodeState({ x: px, z: 0, vx: g2.phase === 'run' ? 8 : 0 }, n * 50));
+      c2.message(y, PROTO.encodeState({ x: 30, z: 0 }, n * 50));
+      c2.tick();
+    }
+    // A leave straight after the join (inside 0.7 s of it) is ignored.
+    const c3 = CORE.createRoomCore({ proto: 2, now: () => t2 });
+    const u = { send() {}, close() {} }, w = { send() {}, close() {} };
+    c3.open(u); c3.open(w);
+    c3.message(u, JSON.stringify({ t: 'join', proto: 2, name: 'Uno' }));
+    c3.message(w, JSON.stringify({ t: 'join', proto: 2, name: 'Dos' }));
+    c3.message(u, JSON.stringify({ t: 'mode', a: 'tag' }));
+    c3.message(w, JSON.stringify({ t: 'mode', a: 'join' }));
+    c3.message(w, JSON.stringify({ t: 'mode', a: 'leave' }));
+    const stayed = c3.modes.game.ps.size === 2;
+    t2 += 800;
+    c3.message(w, JSON.stringify({ t: 'mode', a: 'leave' }));
+    const left = c3.modes.game.ps.size === 1;
+    check(g2.kind === 'tag' && g2.it === c2.peerOf(y).id && stayed && left,
+      'two players are enough for tag; a leave straight after a join is ignored, a later one is not',
+      `IT passed Sis -> Bro at x=${px.toFixed(1)}; leave at 0 s ignored: ${stayed}, at 0.8 s taken: ${left}`);
+  }
+
   // A protocol-1 room has no games at all.
   const v1 = CORE.createRoomCore({ proto: 1, now: () => t });
   const o1 = []; const s1 = { send(d) { o1.push(d); }, close() {} };

@@ -6,7 +6,8 @@
 //          number on the banner. The finish is chequered.
 //   TAG    the car that is IT is marked: a crisp red ring on the ground round
 //          it, a ripple going out from it, and a red pointer spinning over its
-//          roof. Yours too, when it is you. (Its column of light, for finding
+//          roof. Yours gets the rings but not the pointer, which from the chase
+//          camera sat in the middle of the road ahead. (Its column of light, for finding
 //          it from far away, is beacons.js's, made thick and red.) Deliberately
 //          NOT a glow round the body: the first version was a soft red-orange
 //          halo, and on screen a car wrapped in red-orange light is a car on
@@ -202,22 +203,24 @@ export function createModeFx(scene, opts = {}) {
   // four-sided pointer over the roof, point down, turning.
   const ringGeo = keep(new THREE.RingGeometry(0.9, 1, 64));
   ringGeo.rotateX(-Math.PI / 2);
+  // Only a little over 1: ACES tone mapping bends a bright saturated red
+  // towards orange, and at 2.6x the ring came out salmon.
   const itRingMat = keep(new THREE.MeshBasicMaterial({
-    color: new THREE.Color(TAG.r * 2.6, TAG.g * 2.6, TAG.b * 2.6), transparent: true, opacity: 0.9,
+    color: new THREE.Color(TAG.r * 1.25, TAG.g * 1.25, TAG.b * 1.25), transparent: true, opacity: 0.9,
     depthWrite: false, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -10,
   }));
   const rippleMat = keep(new THREE.MeshBasicMaterial({
-    color: new THREE.Color(TAG.r * 2, TAG.g * 2, TAG.b * 2), transparent: true, opacity: 0.6,
+    color: new THREE.Color(TAG.r * 1.1, TAG.g * 1.1, TAG.b * 1.1), transparent: true, opacity: 0.6,
     depthWrite: false, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -10,
   }));
   const itRing = new THREE.Mesh(ringGeo, itRingMat);
   itRing.renderOrder = 4;
   const itRipple = new THREE.Mesh(ringGeo, rippleMat);
   itRipple.renderOrder = 4;
-  const pointerGeo = keep(new THREE.ConeGeometry(0.55, 1.1, 4, 1));
+  const pointerGeo = keep(new THREE.ConeGeometry(0.42, 0.85, 4, 1));
   pointerGeo.rotateX(Math.PI);                        // point down, at the car
   const pointerMat = keep(new THREE.MeshStandardMaterial({
-    color: 0xff4d3a, emissive: 0xff2a14, emissiveIntensity: 1.6, roughness: 0.35, metalness: 0.1, flatShading: true,
+    color: 0xe8261a, emissive: 0xc8150c, emissiveIntensity: 0.9, roughness: 0.35, metalness: 0.1, flatShading: true,
   }));
   const pointer = new THREE.Mesh(pointerGeo, pointerMat);
   const itGroup = new THREE.Group();
@@ -297,7 +300,8 @@ export function createModeFx(scene, opts = {}) {
       const r2 = 3.3 + k * 6;
       itRipple.scale.set(r2, 1, r2); itRipple.position.y = 0.1;
       rippleMat.opacity = 0.6 * (1 - k) * (1 - k);
-      pointer.position.set(0, 3.2 + 0.25 * Math.sin(time * 3), 0);
+      pointer.visible = !v.iAmIt;
+      pointer.position.set(0, 2.9 + 0.2 * Math.sin(time * 3), 0);
       pointer.rotation.set(0, time * 2.2, 0);
     }
 

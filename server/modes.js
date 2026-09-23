@@ -67,6 +67,10 @@ const STALE_POS = 1000;     // ms without a state: that car's position is not tr
 const EXTRAP_MAX = 250;     // ms a position may be carried forward to "now"
 const START_GAP = 10000;    // ms between one player's game starts (invites are loud)
 const EMOTE_GAP = 1200;     // ms between one player's emotes
+// ms between one player's joins and leaves. Each is broadcast to the room, and
+// a script flipping between them would otherwise send everyone a game update
+// for every message the flood guard lets through (45 a second).
+const JOIN_GAP = 700;
 const COINS_MIN = 3, COINS_MAX = 16;
 const WORLD_LIMIT = 20000;  // m: a coin spot outside this is not on any map
 
@@ -85,6 +89,7 @@ export function createModes(opts) {
   const rng = opts.rng || Math.random;
   const lastStart = new Map();          // id -> ms
   const lastEmote = new Map();
+  const lastJoin = new Map();
   const seqOf = new Map();              // id -> respawnSeq last seen
   const cutAt = new Map();              // id -> ms of their last respawn/teleport
   let v = 0;                            // bumps on every change the clients see
@@ -281,9 +286,12 @@ export function createModes(opts) {
     if (m.t !== 'mode') return;
     const a = m.a;
     if (KINDS[a]) start(p, m, t);
-    else if (a === 'join') join(p, t);
-    else if (a === 'leave') drop(p.id, 'left');
     else if (a === 'gate') gate(p, m, t);
+    else if (a === 'join' || a === 'leave') {
+      if (t - (lastJoin.get(p.id) ?? -Infinity) < JOIN_GAP) return;
+      lastJoin.set(p.id, t);
+      if (a === 'join') join(p, t); else drop(p.id, 'left');
+    }
   }
 
   /**

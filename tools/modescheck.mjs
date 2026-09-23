@@ -343,6 +343,59 @@ const goalsStub = { list: gen.list, byId: gen.byId, nav: null };
       `IT passed Sis -> Bro at x=${px.toFixed(1)}; leave at 0 s ignored: ${stayed}, at 0.8 s taken: ${left}`);
   }
 
+  // Race gates: the one thing a client reports. Believed only from a car the
+  // room has seen near the gate, and never dated before that car's own last
+  // position report — so a modified client can neither send every gate from
+  // the grid nor shave seconds off each split.
+  {
+    let t3 = 1.7e12;
+    const c4 = CORE.createRoomCore({ proto: 2, now: () => t3, rng: () => 0 });
+    const P = { send() {}, close() {} }, Q = { send() {}, close() {} };
+    c4.open(P); c4.open(Q);
+    c4.message(P, JSON.stringify({ t: 'join', proto: 2, name: 'Pat' }));
+    c4.message(Q, JSON.stringify({ t: 'join', proto: 2, name: 'Quin' }));
+    const gates = [[0, -300], [0, -600], [0, -900]];
+    c4.message(P, JSON.stringify({ t: 'mode', a: 'race', race: 'stage-0', n: 3 }));
+    const needsGates = !c4.modes.game.kind;
+    c4.message(P, JSON.stringify({ t: 'mode', a: 'race', race: 'stage-0', n: 3, gates }));
+    c4.message(Q, JSON.stringify({ t: 'mode', a: 'join' }));
+    const g4 = c4.modes.game;
+    let pz = 0;
+    const roomMs = () => t3 - 1.7e12;             // the room's clock (ms since it opened)
+    const tick4 = () => {
+      t3 += 50;
+      const ms = (t3 - 1.7e12) | 0;
+      c4.message(P, PROTO.encodeState({ x: 0, z: pz, vx: 0, vz: 0 }, ms));
+      c4.message(Q, PROTO.encodeState({ x: 3, z: 0 }, ms));
+      c4.tick();
+    };
+    while (g4.phase !== 'run' && t3 - 1.7e12 < 20000) tick4();
+    const pat = g4.ps.get(c4.peerOf(P).id);
+    const gate = (k, ms) => c4.message(P, JSON.stringify({ t: 'mode', a: 'gate', g: k, ms }));
+    // From the grid, every gate at once.
+    for (let k = 0; k < 3; k++) gate(k, 1000 + k);
+    const fromGrid = pat.g;
+    // Drive to gate 0 at 30 m/s and report it 2.5 s early (the old rule let
+    // anything down to 3 s early through).
+    while (pz > -300) { pz -= 1.5; tick4(); }
+    const el0 = roomMs() - g4.go;
+    gate(0, el0 - 2500);
+    const shaved = el0 - pat.ms;
+    // Gate 1, reported honestly, on the dot.
+    while (pz > -600) { pz -= 1.5; tick4(); }
+    const el1 = roomMs() - g4.go;
+    gate(1, el1);
+    const honest = pat.ms - el1;
+    // Gate 2: the report goes missing and is re-sent 200 m later — believed,
+    // because the room saw the car go through.
+    while (pz > -1100) { pz -= 1.5; tick4(); }
+    gate(2, roomMs() - g4.go - 6700);
+    check(needsGates && fromGrid === 0 && shaved <= 300 && shaved >= 0 && honest === 0 && pat.fin > 0,
+      'the room believes a race gate only from a car it has seen there, at a time that car\'s own positions allow',
+      `no gate list, no race: ${needsGates}; every gate sent from the grid: ${fromGrid} believed; ` +
+      `a split sent 2500 ms early: taken as ${shaved} ms early; an honest one: ${honest} ms off; a re-sent one from 200 m on: ${pat.fin ? 'believed' : 'refused'}`);
+  }
+
   // A protocol-1 room has no games at all.
   const v1 = CORE.createRoomCore({ proto: 1, now: () => t });
   const o1 = []; const s1 = { send(d) { o1.push(d); }, close() {} };

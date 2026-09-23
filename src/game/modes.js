@@ -43,6 +43,13 @@ const GRID_LINE = 5;           // m from a stage's line to pole position
 const JUMP_START = 3.0;        // m off the grid spot before GO puts you back on it
 const OFF_COURSE = 45;         // m from the race line after a jump: back to the last gate
 const FAR_FROM_HOST = 450;     // m: joining tag or coins from further takes you to them
+// s before a gate the room has not confirmed is reported again. The room only
+// believes a gate from a car it has seen near it (server/modes.js GATE_NEAR);
+// should a report ever land before the room has seen that, the re-send is
+// believed, where silence would leave a race that can never be finished.
+// Longer than any round trip outside a WiFi stall, and a repeat is harmless:
+// the room ignores a gate that is not the one it expects next.
+const GATE_RESEND = 1.5;
 const COIN_COUNT = 12;
 
 // ---------------------------------------------------------------------------
@@ -160,6 +167,7 @@ export function createModes(opts) {
     gid: -1, placed: false, onSpot: false, spot: { x: 0, z: 0, yaw: 0, d: 0 },
     next: 0, hint: -1, d: 0, prevX: 0, prevZ: 0, prevValid: false, prevD: 0,
     lastGate: -1, sentFor: -1, lost: 0,
+    times: new Float64Array(32), sentAt: 0,   // my crossing times (room ms) and when I last reported one
   };
   const proj = { i: 0, d: 0, dist: 0 };
   const hints = new Map();            // remote id -> route hint
@@ -218,7 +226,7 @@ export function createModes(opts) {
     const id = me();
     if (m && m.gid !== my.gid) {
       my.gid = m.gid; my.placed = false; my.next = 0; my.hint = -1; my.prevValid = false;
-      my.lastGate = -1; my.sentFor = -1; my.lost = 0;
+      my.lastGate = -1; my.sentFor = -1; my.lost = 0; my.sentAt = 0;
       hints.clear();
     }
     if (!ev) return;
@@ -274,7 +282,8 @@ export function createModes(opts) {
   function startRace(raceId, again) {
     const c = raceOf(raceId);
     if (!c || !canPlay()) return false;
-    return net.sendMode('race', { race: c.id, n: c.gates.length, again });
+    const gates = c.gates.map((q) => [q.x, q.z]);
+    return net.sendMode('race', { race: c.id, n: c.gates.length, gates, again });
   }
   function startTag(again) { return canPlay() && net.sendMode('tag', { again }); }
   function startCoins(self, again) {
@@ -412,6 +421,10 @@ export function createModes(opts) {
     }
     // Running: my own gates.
     if (my.next < e.g) my.next = e.g;
+    if (my.next > e.g && e.g < my.times.length && clock - my.sentAt > GATE_RESEND) {
+      net.sendMode('gate', { g: e.g, ms: my.times[e.g] });
+      my.sentAt = clock;
+    }
     const prevD = my.d;
     const pr = c.route.project(self.x, self.z, my.hint, 30, proj);
     if (pr.dist > 25) c.route.project(self.x, self.z, -1, 0, proj);
@@ -444,6 +457,8 @@ export function createModes(opts) {
         // The crossing, in the room's race time, back-dated within the frame.
         const rt = Math.max(0, t - m.go - f * (1000 / 60));
         net.sendMode('gate', { g: my.next, ms: rt });
+        if (my.next < my.times.length) my.times[my.next] = rt;
+        my.sentAt = clock;
         my.lastGate = my.next;
         my.next++;
         events.push({ k: 'gate', g: my.next, n: m.n });

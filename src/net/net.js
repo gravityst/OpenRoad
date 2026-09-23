@@ -324,7 +324,13 @@ export function createNet(opts = {}) {
     sendMode(a, args = {}) {
       if (serverProto !== PROTO_V2 || !welcomed) return false;
       const m = { t: 'mode', a };
-      if (a === 'race') { m.race = String(args.race || ''); m.n = args.n | 0; if (args.again) m.again = true; }
+      if (a === 'race') {
+        m.race = String(args.race || ''); m.n = args.n | 0;
+        // Where the gates are, to the metre: the room checks each gate report
+        // against the positions it relays. 8 gates is ~180 bytes on the wire.
+        m.gates = (args.gates || []).slice(0, 32).map((q) => [Math.round(q[0]), Math.round(q[1])]);
+        if (args.again) m.again = true;
+      }
       else if (a === 'coins') {
         m.pts = (args.pts || []).slice(0, 16).map((q) => [Math.round(q[0] * 10) / 10, Math.round(q[1] * 10) / 10]);
         if (args.again) m.again = true;

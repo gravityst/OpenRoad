@@ -73,6 +73,20 @@ const EMOTE_GAP = 1200;     // ms between one player's emotes
 const JOIN_GAP = 700;
 const COINS_MIN = 3, COINS_MAX = 16;
 const WORLD_LIMIT = 20000;  // m: a coin spot outside this is not on any map
+// A race gate is only believed from a car that has been near it. The client
+// says it crossed; the room checks the positions it is already relaying. The
+// farthest an honest car can be from the gate's centre when its report lands
+// is its lateral room (the client accepts a crossing up to 30 m off the
+// line) plus one state period of travel (10 Hz in a busy room, ~9 m at
+// 90 m/s): ~32 m. 60 m leaves that margin nearly twice over and is still a
+// third of the 181 m between the closest two gates in the world, so
+// "report every gate from the grid" and "report the next one early" both fail.
+const GATE_NEAR = 60;
+// ...and a crossing may not be dated earlier than the car's own last position
+// report, less this much. That report was sampled before the crossing or in
+// the same frame; the slack covers the frame, the fastest one-way trip that
+// the room's sample clock carries, and the ping clock's error.
+const GATE_EARLY = 300;
 
 const KINDS = { race: 1, tag: 1, coins: 1 };
 
@@ -100,6 +114,7 @@ export function createModes(opts) {
   const g = {
     kind: '', phase: '', host: -1, at: 0, go: 0,
     race: '', n: 0, finishers: 0,
+    gates: null,                        // race: [[x, z], ...] from the starter, never sent back
     it: -1, noBack: -1, noBackUntil: 0, graceUntil: 0,
     pts: null, taken: null,
     ps: new Map(),                      // id -> entrant
@@ -107,7 +122,9 @@ export function createModes(opts) {
   };
 
   function entrant(id, slot) {
-    return { id, slot, g: 0, ms: 0, fin: 0, place: 0, free: 0, n: 0 };
+    // `near`: a bit per gate this car's relayed position has been within
+    // GATE_NEAR of (n <= 32). Room-side only: wire() does not send it.
+    return { id, slot, g: 0, ms: 0, fin: 0, place: 0, free: 0, n: 0, near: 0 };
   }
 
   function playerById(id) {
@@ -144,7 +161,7 @@ export function createModes(opts) {
 
   function clear(ev) {
     g.kind = ''; g.phase = ''; g.host = -1; g.ps.clear(); g.spect.clear();
-    g.pts = null; g.taken = null; g.it = -1; g.finishers = 0;
+    g.pts = null; g.taken = null; g.it = -1; g.finishers = 0; g.gates = null;
     tell(ev);
   }
 
@@ -157,11 +174,15 @@ export function createModes(opts) {
     // start over it, and "again" carries the same players into a rematch.
     if (g.kind && g.phase !== 'done') return;
     if (t - (lastStart.get(p.id) ?? -Infinity) < START_GAP) return;
-    let race = '', n = 0, pts = null;
+    let race = '', n = 0, pts = null, gates = null;
     if (kind === 'race') {
       if (typeof m.race !== 'string' || !RACE_ID_RE.test(m.race)) return;
       n = Number(m.n);
       if (!Number.isInteger(n) || n < 1 || n > 32) return;
+      // Where its gates are, from the starter's copy of the world (every
+      // client builds the same one): n points on the map, or no race.
+      gates = cleanXZ(m.gates, n, n);
+      if (!gates) return;
       race = m.race;
     } else if (kind === 'coins') {
       pts = cleanPts(m.pts);
@@ -172,7 +193,7 @@ export function createModes(opts) {
     lastStart.set(p.id, t);
     gid++;
     g.kind = kind; g.phase = 'lobby'; g.host = p.id; g.go = 0;
-    g.race = race; g.n = n; g.finishers = 0;
+    g.race = race; g.n = n; g.finishers = 0; g.gates = gates;
     g.it = -1; g.noBack = -1; g.noBackUntil = 0; g.graceUntil = 0;
     g.pts = pts; g.taken = pts ? pts.map(() => 0) : null;
     g.ps.clear(); g.spect.clear();
@@ -296,20 +317,29 @@ export function createModes(opts) {
 
   /**
    * A racer drove through their next gate. The one thing a client reports,
-   * because only it knows exactly when its car crossed the line; the room
-   * still checks it is the NEXT gate and a plausible time.
+   * because only it knows exactly when its car crossed the line. The room
+   * believes it only if it is the NEXT gate, the car it has been relaying is
+   * (or has been) near that gate, and the time is no earlier than that car's
+   * own last position report allows.
    */
   function gate(p, m, t) {
-    if (g.kind !== 'race' || g.phase !== 'run') return;
+    if (g.kind !== 'race' || g.phase !== 'run' || !g.gates) return;
     const e = g.ps.get(p.id);
     if (!e || e.fin) return;
     const k = Number(m.g);
     if (!Number.isInteger(k) || k !== e.g) return;
+    const r = p.rec;
+    if (!r) return;
+    const q = g.gates[k];
+    if (Math.hypot(r.x - q[0], r.z - q[1]) > GATE_NEAR && !(e.near & (1 << k))) return;
     const elapsed = t - g.go;
     let rt = Number(m.ms);
     // Measured by the client off the synced clock, so normally within a few
     // ms of the room's own figure; never ahead of it, never wildly behind.
     if (!(rt >= 0) || rt > elapsed + 250 || rt < elapsed - 3000) rt = elapsed;
+    // Never before the last position this car reported (see GATE_EARLY): a
+    // modified client can no longer take three seconds off every split.
+    if (r.sampleMs != null) rt = Math.max(rt, r.sampleMs - g.go - GATE_EARLY);
     rt = Math.max(rt, e.ms);
     e.g = k + 1;
     e.ms = Math.round(rt);
@@ -380,6 +410,26 @@ export function createModes(opts) {
     if (t >= g.at) return finish(t, { k: 'time' });
     if (g.kind === 'tag') tagStep(t, dt);
     else if (g.kind === 'coins') coinStep(t);
+    else if (g.kind === 'race') raceStep();
+  }
+
+  /** Which gates each racer's relayed position has been near. At 20 Hz a car
+   *  is inside a 60 m circle for well over a second at any speed it can do,
+   *  so no pass goes unseen; this is what lets a report that arrived a tick
+   *  early, or a client's re-send, still be believed. */
+  function raceStep() {
+    if (!g.gates) return;
+    for (const e of g.ps.values()) {
+      if (e.fin) continue;
+      const p = playerById(e.id);
+      const r = p && p.rec;
+      if (!r) continue;
+      for (let k = e.g; k < g.gates.length; k++) {
+        if (e.near & (1 << k)) continue;
+        const q = g.gates[k];
+        if (Math.abs(r.x - q[0]) < GATE_NEAR && Math.abs(r.z - q[1]) < GATE_NEAR && Math.hypot(r.x - q[0], r.z - q[1]) <= GATE_NEAR) e.near |= 1 << k;
+      }
+    }
   }
 
   function tagStep(t, dt) {
@@ -442,7 +492,12 @@ export function createModes(opts) {
 
 /** Coin spots: 3-16 pairs of finite numbers inside the world, to 0.1 m. */
 function cleanPts(pts) {
-  if (!Array.isArray(pts) || pts.length < COINS_MIN || pts.length > COINS_MAX) return null;
+  return cleanXZ(pts, COINS_MIN, COINS_MAX);
+}
+
+/** min-max pairs of finite numbers inside the world, to 0.1 m; else null. */
+function cleanXZ(pts, min, max) {
+  if (!Array.isArray(pts) || pts.length < min || pts.length > max) return null;
   const out = [];
   for (const q of pts) {
     if (!Array.isArray(q) || q.length !== 2) return null;

@@ -31,6 +31,9 @@ const FORBIDDEN = [
   'scania', 'iveco', 'kenworth', 'peterbilt', 'freightliner', 'john deere', 'deere',
   'kubota', 'fendt', 'massey ferguson', 'new holland', 'claas', 'isuzu', 'setra',
   'neoplan', 'irizar', 'daf trucks', 'mack trucks',
+  // traffic model names that turned out to be real: a pickup trim and a
+  // workbench, and a state coach-and-rail network
+  'workmate', 'countrylink',
   // agencies and broadcasters whose initials read like a number plate
   'tsa', 'mdr', 'fbi', 'nasa', 'bbc', 'cnn',
   // real places

@@ -88,6 +88,7 @@ function createSim(seed) {
   }
   return {
     rng,
+    stalls: new Map(),
     get t() { return now; },
     at(t, fn) { const e = { t: Math.max(t, now), s: seq++, fn, dead: false }; push(e); return e; },
     async run(until) {
@@ -121,6 +122,11 @@ const PROFILES = {
   rough: { base: 45, jitter: 14, spikeP: 0.03, spike: 90,  stall: { every: 2600, min: 140, max: 320 } },
   fuzz:  { base: 25, jitter: 8,  spikeP: 0.02, spike: 60,  stall: null,
            drop: 0.08, dup: 0.05, reorder: 0.10 },
+  // A kid's WiFi dropping out for a second or three: nothing at all arrives,
+  // then everything that was held up lands at once. 'rough' tops out at
+  // 320 ms; these are the stalls the flood-guard commit describes.
+  stall1: { base: 22, jitter: 7, spikeP: 0.03, spike: 70, stall: { every: 9000, min: 900, max: 1400 } },
+  stall3: { base: 22, jitter: 7, spikeP: 0.03, spike: 70, stall: { every: 9000, min: 2300, max: 2800 } },
 };
 
 function expo(rng, mean) { return -Math.log(1 - rng() * 0.999999) * mean; }
@@ -135,6 +141,9 @@ function createLink(sim, prof, salt) {
       stalls.push([t, t + prof.stall.min + rng() * (prof.stall.max - prof.stall.min)]);
     }
   }
+  // Every link's outages, by salt, so a check can hold the drawn car to what
+  // the links actually did.
+  if (sim.stalls) sim.stalls.set(salt, stalls);
   function latency() {
     let d = prof.base + expo(rng, prof.jitter);
     if (rng() < prof.spikeP) d += prof.spike * (0.5 + rng());
@@ -602,11 +611,11 @@ const V2STACK = {
 
 if (process.argv.includes('--compare')) {
   note('                    BEFORE: protocol-1 client + server (live today)   /   AFTER: this branch');
-  for (const p of ['lan', 'wifi', 'rough', 'fuzz']) {
+  for (const p of ['lan', 'wifi', 'rough', 'fuzz', 'stall1', 'stall3']) {
     note(row(p + ' before', measure(await session(V1STACK, p))));
     const r = await session(V2STACK, p);
     const m = measure(r);
-    note(row(p + ' after', m) + `   delay ${r.watcher.room.interp.toFixed(0)} ms, extrap ${(100 * r.watcher.room.stats.extrap / Math.max(1, r.watcher.room.stats.frames)).toFixed(1)}%`);
+    note(row(p + ' after', m) + `   delay ${r.watcher.room.interp.toFixed(0)} ms, extrap ${(100 * r.watcher.room.stats.extrap / Math.max(1, r.watcher.room.stats.frames)).toFixed(1)}%, cuts ${r.watcher.room.stats.cuts}`);
   }
   process.exit(0);
 }
@@ -800,6 +809,44 @@ for (const prof of ['lan', 'wifi', 'rough', 'fuzz']) {
   const m = measure(r);
   check(m.pops === 0 && m.back === 0, 'a car creeping at walking pace never shuffles or steps back',
     `worst ${(m.maxDev * 100).toFixed(1)} cm, ${m.back} backwards`);
+}
+
+// ---- 4b. WiFi dropouts of one to three seconds --------------------------------------
+//
+// Nothing can be drawn smoothly through a hole in the feed. What must happen
+// is: the car carries on briefly, eases to a stop, and when the feed comes
+// back it makes ONE clean cut to where it really is and drives on smoothly —
+// no slide across the gap, no second lurch, never a step backwards. The
+// driver's uplink (salt 11) and the watcher's downlink (salt 23) are the two
+// links whose outages the watcher can see; each may cost one cut.
+for (const prof of ['stall1', 'stall3']) {
+  const dur = 40000;
+  const r = await session(V2STACK, prof, { duration: dur });
+  const m = measure(r);
+  const outs = [...(r.sim.stalls.get(11 * 7 + 1) || []), ...(r.sim.stalls.get(23 * 7 + 2) || [])]
+    .filter(([a]) => a < dur - 500);
+  const inOutage = (t) => outs.some(([a, b]) => t >= a && t <= b + 1500);
+  const fr = r.frames;
+  let cutsSeen = 0, stray = 0, straySize = 0, farOff = 0, settled = 0;
+  for (let i = 2; i < fr.length; i++) {
+    const f = fr[i], p = fr[i - 1], q = fr[i - 2];
+    if (f.t < 3000) continue;
+    const dt = f.t - p.t, pdt = p.t - q.t;
+    const dev = Math.hypot(f.x - p.x - (p.x - q.x) / pdt * dt, f.z - p.z - (p.z - q.z) / pdt * dt);
+    const jumpBefore = Math.hypot(p.x - q.x, p.z - q.z) > 2;
+    if (dev > 0.10 && !jumpBefore) {
+      // A clean cut: a jump in one frame, from a car that was not already
+      // sliding (the frame after a jump reads as a pop only because its
+      // velocity estimate spans the jump).
+      if (Math.hypot(f.x - p.x, f.z - p.z) > 2 && inOutage(f.t)) cutsSeen++;
+      else { stray++; straySize = Math.max(straySize, dev); }
+    }
+    if (!inOutage(f.t)) { settled++; if (f.err > 1) farOff++; }
+  }
+  check(m.back === 0 && stray === 0 && cutsSeen <= outs.length && farOff === 0,
+    `${prof}: a ${prof === 'stall1' ? '1' : '2.5'} s dropout is one clean cut, never a slide, a lurch or a step back`,
+    `${outs.length} outages, ${cutsSeen} cuts, ${stray} other pops${stray ? ` (max ${straySize.toFixed(2)} m)` : ''}, ` +
+    `${m.back} backwards, ${farOff}/${settled} frames between outages more than 1 m off the truth, drawn ${m.lag.toFixed(0)} ms late`);
 }
 
 // ---- 5. cuts, and things that must not be cuts -------------------------------------

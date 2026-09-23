@@ -173,6 +173,10 @@ export function createRoster(opts) {
   // ---- toasts and the guide banner ---------------------------------------
   const toasts = el('div', 'ormp-toasts');
   toasts.setAttribute('aria-live', 'polite');
+  // Hidden from birth. update() shows it once the game is on the road, but the
+  // welcome arrives while boot is still loading layers — created visible, the
+  // "1 friend online" toast sat across the OPEN ROAD wordmark for a moment.
+  toasts.hidden = true;
   root.appendChild(toasts);
   const live = [];
 

@@ -31,6 +31,12 @@ const BURST = 300, RATE = 45;
 // How fast the per-player clock estimate may creep upwards between the
 // packets that pin it: 1 ms per second, ten times any real crystal's drift.
 const CREEP = 0.001;
+// ... and over how much silence. Creep is there for drift, which is about
+// 0.1 ms a second; over a 2.8 s WiFi dropout it added 2.8 ms, which the first
+// fresh packet then took back — a 7% speed blip in one segment of the car's
+// curve, a 10 cm lurch on screen. A quarter of a second of creep covers the
+// normal 50 ms spacing five times over.
+const CREEP_SPAN = 250;
 
 /**
  * opts: { proto, now: () => wall ms, maxPlayers }
@@ -159,8 +165,15 @@ export function createRoomCore(opts = {}) {
   function stamp(p, st, t) {
     const recv = t - epoch;
     const off = recv - st.clientMs;
-    if (p.minOff === null || recv - p.lastRecv > 2000) p.minOff = off;
-    else p.minOff = Math.min(p.minOff + (recv - p.lastRecv) * CREEP, off);
+    // Never re-anchored after a quiet spell. The client's clock is its own
+    // performance.now() from this connection's open, so the true offset only
+    // ever drifts, and CREEP already allows for that across any gap. The
+    // version this replaces reset minOff after 2 s of silence — and silence
+    // is exactly what a WiFi stall is: the first packet of the backlog set
+    // the offset 2.7 s too late, every fresh sample after it was then forced
+    // onto lastSample + 1 ms, and the car jumped 64 m and crept backwards.
+    if (p.minOff === null) p.minOff = off;
+    else p.minOff = Math.min(p.minOff + Math.min(recv - p.lastRecv, CREEP_SPAN) * CREEP, off);
     p.lastRecv = recv;
     let at = Math.round(st.clientMs + p.minOff);
     if (at <= p.lastSample) at = p.lastSample + 1;

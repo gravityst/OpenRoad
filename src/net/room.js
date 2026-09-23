@@ -39,6 +39,7 @@ import {
 
 const RING = 24;                // samples kept per car: over a second at 20 Hz
 const SNAP_DIST = 5.0;          // m of error past what the velocities allow: cut, don't slide
+const GAP_CUT = 400;            // ms between two samples: a dropout, not a curve to follow
 const REBASE = 0.25;            // m past what they allow: move the history, spring the rest
 const EXTRAP_LIN = 150;         // ms extrapolated at full speed ...
 const EXTRAP_SOFT = 150;        // ... then eased to a stop over about this long
@@ -295,10 +296,19 @@ export function createRoom(opts = {}) {
       }
       // One observation per car per arrival, against the newest sample the
       // car had before this snapshot landed.
+      //
+      // Not a dropout, though. When a stalled link lets go, a second of
+      // snapshots lands at once and each one reads as a need of up to that
+      // second: two dozen of the 96 slots, which pinned the delay at D_MAX —
+      // every friend drawn 450 ms late — for the five seconds it took them to
+      // age out. No buffer bridges a WiFi dropout (that is what the cut in
+      // isCut() is for), so a need past D_MAX says nothing about the jitter
+      // the buffer is there to absorb.
       const arrival = recv + offset;
       for (const c of cars) {
         if (!c.active || c._mark !== seq || !(c._prevTop === c._prevTop) || !c._n) continue;
         if (c._s[c._n - 1].t <= c._prevTop) continue;
+        if (arrival - c._prevTop > D_MAX) continue;
         needs[needHead] = arrival - c._prevTop;
         needHead = (needHead + 1) % NEEDS;
         if (needN < NEEDS) needN++;
@@ -309,9 +319,19 @@ export function createRoom(opts = {}) {
 
   // ---- sampling a car's timeline ----------------------------------------
 
-  /** A cut between two samples: a respawn, a teleport, or a jump no velocity explains. */
+  /**
+   * A cut between two samples: a respawn, a teleport, a jump no velocity
+   * explains — or a hole in the feed. Two samples 2.7 s apart after a WiFi
+   * dropout are not two ends of one curve: a Hermite through them invents
+   * 2.7 s of driving the car never did, and since the car is drawn frozen at
+   * the end of its extrapolation while it waits, the drawn car then jumps onto
+   * that invented curve. Across a gap the car holds where the extrapolation
+   * left it and makes ONE clean cut to the fresh samples. At 20 Hz a gap is
+   * normally 50 ms; 400 ms is eight lost sends in a row.
+   */
   function isCut(a, b) {
     if ((b.flags & F_TELEPORT) || b.respawnSeq !== a.respawnSeq) return true;
+    if (b.t - a.t > GAP_CUT) return true;
     const h = (b.t - a.t) / 1000;
     const px = a.x + (a.vx + b.vx) * 0.5 * h, pz = a.z + (a.vz + b.vz) * 0.5 * h;
     return Math.hypot(b.x - px, b.z - pz) > SNAP_DIST;

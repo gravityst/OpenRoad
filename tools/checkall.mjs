@@ -26,6 +26,7 @@ const CHECKS = [
   ['atmosphere', 'roads are sharp and seamless, and the air hides the edge of the world'],
   ['brand', 'every name in the game is invented'],
   ['nature', 'trees, rocks and grass grow where they should and cost what they say'],
+  ['net', 'remote cars move smoothly, and old and new pages can both still play'],
 ];
 
 const results = [];

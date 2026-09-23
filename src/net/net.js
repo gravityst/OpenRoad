@@ -136,7 +136,11 @@ export function createNet(opts = {}) {
       roster();
       emit('welcome', { id: selfId, name, car: carId, colour });
     } else if (m.t === 'joined') {
-      learn(m, true);
+      // The server announces a join to every open socket, including ones
+      // whose own welcome has not arrived yet — and that welcome then lists
+      // the same player. Announced before it, everyone already in the room
+      // would pop up as "just joined" the moment you connect.
+      learn(m, welcomed);
       roster();
     } else if (m.t === 'left') {
       const p = people.get(m.id);

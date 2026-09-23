@@ -83,6 +83,13 @@ const again = createGoals({ world: w2, ground: createGround(w2), car: createVehi
 const same = again.list.length === list.length && again.list.every((c, i) => c.id === list[i].id && Math.abs(c.x - list[i].x) < 1e-6);
 check('same seed, same challenges (saves stay valid)', same, `${again.list.length} vs ${list.length}, ids and positions ${same ? 'identical' : 'DIFFER'}`);
 again.dispose();
+// With the drift scorer's layer missing, a drift zone could never pay out,
+// so there must not be any rather than four that cannot be won.
+const noDrift = createGoals({ world: w2, ground: createGround(w2), car: createVehicle({ ground, spec: specFor('kaida2') }), cars: CARS, storage: memoryStorage(), sfx: false, drift: null });
+const zonesLeft = noDrift.list.filter((c) => c.kind === 'drift').length;
+check('no drift scorer, no drift zones', zonesLeft === 0 && noDrift.list.length === list.length - (kinds.drift || 0),
+  `${zonesLeft} drift zones offered, ${noDrift.list.length} other challenges kept`);
+noDrift.dispose();
 
 // ---------------------------------------------------------------------------
 console.log('\n-- everything is on a road --');

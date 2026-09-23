@@ -487,6 +487,13 @@ const area = new Array(BIOME_COUNT).fill(0);
   }
   check('snow poles line the pass, off the carriageway', badPole === 0,
     `${badPole} of ${poles.length} on the road, too far from it, or off the pass`);
+
+  // Named on the maps, so they are somewhere to drive to and to meet.
+  const named = w.districts.filter((d) => d.kind === 'landmark');
+  const unique = new Set(named.map((d) => d.name)).size === named.length;
+  const onIt = named.every((d) => L.some((l) => l.x === d.cx && l.z === d.cz));
+  check('the landmarks are named on the maps', named.length >= arches.length + lights.length + 1 && unique && onIt,
+    named.map((d) => d.name).join(', '));
 }
 
 // ---- Budget ------------------------------------------------------------------------------

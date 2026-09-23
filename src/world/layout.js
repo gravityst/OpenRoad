@@ -1861,7 +1861,7 @@ function buildProps(world, rnd, ground) {
  *
  *   arch        Red Canyon: natural stone arches spanning its roads, where a
  *               road runs straight across open canyon floor away from any
- *               junction, up to three, at least 700 m apart.
+ *               junction or circuit infield, up to three, at least 550 m apart.
  *   hoodoo      Red Canyon: stands of four to nine rock chimneys on the flat
  *               canyon floor, 45 to 260 m off a road — close enough to see,
  *               never in the way.
@@ -1892,11 +1892,13 @@ function buildLandmarks(world, ground, clearance, inLot) {
       // so the straightness test reaches only as far as the edge does.
       for (let s = 15; s < e.length - 15; s += 18) {
         const p = pointOnEdge(e, s);
-        if (!p || !inMap(p.x, p.z) || bio.weightsAt(p.x, p.z, w)[1] < 0.9) continue;
+        // 300 m in from the edge of the map, where its name fits on the map
+        // screen (a label centred 200 m from the edge was cut in half).
+        if (!p || Math.abs(p.x) > half - 300 || Math.abs(p.z) > half - 300 || bio.weightsAt(p.x, p.z, w)[1] < 0.9) continue;
         // Straight: the heading up to 30 m either way within 0.2 rad.
         const a = pointOnEdge(e, s - 30), b = pointOnEdge(e, s + 30);
         const turn = Math.abs(Math.atan2(a.tx * b.tz - a.tz * b.tx, a.tx * b.tx + a.tz * b.tz));
-        if (turn > 0.2 || nearJunction(p.x, p.z, 160)) continue;
+        if (turn > 0.2 || nearJunction(p.x, p.z, 160) || inInfield(p.x, p.z)) continue;
         const S = e.width * 0.5 + 12;
         // Both feet on open, even ground within a few metres of the road's
         // height, clear of any OTHER road and of buildings.
@@ -1915,7 +1917,7 @@ function buildLandmarks(world, ground, clearance, inLot) {
     cand.sort((a, b) => b.score - a.score);
     for (const c of cand) {
       if (L.length >= 3) break;
-      if (L.some((q) => (q.x - c.p.x) ** 2 + (q.z - c.p.z) ** 2 < 700 * 700)) continue;
+      if (L.some((q) => (q.x - c.p.x) ** 2 + (q.z - c.p.z) ** 2 < 550 * 550)) continue;
       L.push({
         type: 'arch', x: c.p.x, z: c.p.z, y: ground.heightAt(c.p.x, c.p.z),
         // Local X, the span, lies across the road: along its normal.
@@ -1985,6 +1987,32 @@ function buildLandmarks(world, ground, clearance, inLot) {
       }
       L.push({ type: 'lighthouse', x: best.x, z: best.z, y: best.y, rot: Math.atan2(az, -ax), scale: 1, variant: 0 });
     }
+  }
+
+  // ---- Names -------------------------------------------------------------------------
+  // The arches, the tallest stand of hoodoos and the lighthouse go on the
+  // maps as places, so the minimap labels them as a kid comes near and the
+  // big map shows them as somewhere to drive to — and to meet: "see you at
+  // Keyhole Arch" works when both players can find it by name. Invented
+  // names (tools/brandcheck.mjs).
+  const ARCH_NAMES = ['Keyhole Arch', 'Sundial Arch', 'Hawkeye Arch'];
+  let ai = 0;
+  for (const l of L) {
+    let name = null, r0 = 60;
+    if (l.type === 'arch') name = ARCH_NAMES[ai++ % ARCH_NAMES.length];
+    else if (l.type === 'lighthouse') { name = 'Sunspray Light'; r0 = 70; }
+    if (!name) continue;
+    world.districts.push({
+      id: 'l_' + l.type + ai, name, cx: l.x, cz: l.z, rot: 0,
+      cols: 0, rows: 0, cell: 0, kind: 'landmark', landmark: l.type, r: r0,
+    });
+  }
+  const firstHoodoo = L.find((l) => l.type === 'hoodoo');
+  if (firstHoodoo) {
+    world.districts.push({
+      id: 'l_hoodoos', name: 'The Chimneys', cx: firstHoodoo.x, cz: firstHoodoo.z, rot: 0,
+      cols: 0, rows: 0, cell: 0, kind: 'landmark', landmark: 'hoodoo', r: 60,
+    });
   }
 
   // ---- Snow poles ------------------------------------------------------------------

@@ -40,6 +40,7 @@ const MODULES = [
   { file: 'src/render/particles.js',  exports: ['createParticles'], optional: true },
   { file: 'src/ai/traffic.js',        exports: ['createTraffic'], optional: true },
   { file: 'src/game/hud.js',          exports: ['createHUD'], optional: true },
+  { file: 'src/game/photo.js',        exports: ['createPhotoMode'], optional: true },
   { file: 'src/game/menus.js',        exports: ['createMenus'], optional: true },
   { file: 'src/game/audio.js',        exports: ['createAudio'], optional: true },
 ];

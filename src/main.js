@@ -169,7 +169,7 @@ async function boot() {
   // wrong variable — the kind of bug that looks like six unrelated bugs.
   const [mTerrain, mRoads, mCity, mProps, mCar, mSky, mFx, mParticles, mTraffic, mHud, mMenus, mAudio, mTouch,
          mCarDamage, mDebris, mDamageFx, mDrift, mModels, mNet, mTags, mBoom, mWreck,
-         mGoals, mGates, mObjectives] =
+         mGoals, mGates, mObjectives, mPhoto] =
     await stage(0.50, 'loading modules', () => Promise.all([
       layer('./render/terrain.js', 'terrain'),
       layer('./render/roads.js', 'roads'),
@@ -206,6 +206,7 @@ async function boot() {
       layer('./game/goals.js', 'goals'),
       layer('./render/gates.js', 'goal markers'),
       layer('./game/objectives.js', 'objectives'),
+      layer('./game/photo.js', 'photo mode'),
     ])) || [];
 
   const sky = await stage(0.56, 'raising the sky', () =>
@@ -887,6 +888,29 @@ async function boot() {
   // and the HUD keep reading `car`. See src/core/interp.js.
   const carPose = createPoseBuffer();
   let pose = carPose.view;
+
+  // Photo mode (P). Freezes the world by skipping the simulation step in
+  // frame() while it is active; see src/game/photo.js.
+  const photo = mPhoto ? mPhoto.createPhotoMode({
+    canvas: renderer.domElement,
+    camera,
+    getPose: () => pose,
+    render: () => effects.render(0),
+    isAllowed: () => mode === 'driving' || mode === 'inspect',
+    onToggle: (on) => {
+      // Held keys are cleared both ways, so nothing pressed while framing a
+      // shot is still "down" when driving resumes.
+      controls.reset();
+      // A photo is of the car and the world, not the game's signposts: the
+      // guide arrow, gates, challenge beams and friends' beacons step out of
+      // the shot and come back exactly as they were. Friends' cars stay in.
+      for (const g of [scene.getObjectByName('goals'), beacons && beacons.group]) {
+        if (!g) continue;
+        if (on) { g.userData.photoWas = g.visible; g.visible = false; }
+        else if (g.userData.photoWas !== undefined) { g.visible = g.userData.photoWas; delete g.userData.photoWas; }
+      }
+    },
+  }) : null;
   // Inspection orbit. Kept out of the camera-mode list because it is a game
   // STATE, not a view: the car is parked and the physics is idle while it runs.
   const orbit = { yaw: 0.7, pitch: 0.28, dist: 7.5, dragging: false, px: 0, py: 0 };
@@ -932,6 +956,13 @@ async function boot() {
     // A tab that was in the background hands back a dt of several seconds.
     // Clamping is what stops the car teleporting across the city on return.
     dt = Math.min(dt, 0.1);
+    if (photo && photo.active) {
+      photo.update(dt);
+      photo.aim(camera, ground);
+      effects.render(0);
+      scriptMs = performance.now() - t0;
+      return;
+    }
     // Judged on the real interval between frames, and only while driving: the
     // menus draw over the world and cost differently, and a harness calling
     // frame() directly is not a frame rate at all. BEFORE the frame is drawn:
@@ -2086,6 +2117,7 @@ async function boot() {
     // Exposed so multiplayer can be inspected without a second machine: check
     // net.status, net.players and net.rtt from the console.
     get net() { return net; },
+    get photo() { return photo; },
     get tags() { return tags; },
     get boom() { return boom; },
     get goals() { return goals; },

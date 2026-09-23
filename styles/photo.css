@@ -1,0 +1,172 @@
+/* ---------------------------------------------------------------------------
+   Photo mode. The world is frozen and every other piece of UI is hidden; what
+   is left is the picture, a thin frame, and one panel that gets out of the way
+   (H hides it, a tap brings it back). Built on the UI design system's tokens,
+   with fallbacks so it stands on its own if ui.css ever fails to load.
+   ------------------------------------------------------------------------ */
+
+/* Everything but the canvas and this panel goes while a photo is framed. */
+body.is-photo > :not(canvas):not(.photo):not(script):not(style) { visibility: hidden !important; }
+
+.photo {
+  --bar: 0px;
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: none;
+  pointer-events: none;
+  font-family: var(--or-f-body, "Avenir Next", "Segoe UI", system-ui, sans-serif);
+  color: var(--or-text, #eef2f8);
+}
+.photo.is-on { display: block; }
+
+/* 2.39:1 bars, sized from the real screen by photo.js. */
+.photo__bars i {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: var(--bar);
+  background: #000;
+  transform: scaleY(0);
+  transition: transform 0.35s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.photo__bars i:first-child { top: 0; transform-origin: top; }
+.photo__bars i:last-child { bottom: 0; transform-origin: bottom; }
+.photo.has-bars .photo__bars i { transform: scaleY(1); }
+
+/* Four corner brackets: a viewfinder, not a border. */
+.photo__frame i {
+  position: absolute;
+  width: 34px;
+  height: 34px;
+  border: 2px solid rgb(255 255 255 / 0.55);
+  opacity: 1;
+  transition: opacity 0.3s ease;
+}
+.photo__frame i:nth-child(1) { left: 22px; top: calc(22px + var(--bar) * var(--barred, 0)); border-right: 0; border-bottom: 0; }
+.photo__frame i:nth-child(2) { right: 22px; top: calc(22px + var(--bar) * var(--barred, 0)); border-left: 0; border-bottom: 0; }
+.photo__frame i:nth-child(3) { left: 22px; bottom: calc(22px + var(--bar) * var(--barred, 0)); border-right: 0; border-top: 0; }
+.photo__frame i:nth-child(4) { right: 22px; bottom: calc(22px + var(--bar) * var(--barred, 0)); border-left: 0; border-top: 0; }
+.photo.has-bars { --barred: 1; }
+.photo.is-bare .photo__frame i { opacity: 0; }
+
+.photo__flash {
+  position: absolute;
+  inset: 0;
+  background: #fff;
+  opacity: 0;
+}
+.photo.is-flash .photo__flash { animation: photo-flash 0.5s ease-out; }
+@keyframes photo-flash { 0% { opacity: 0.85; } 100% { opacity: 0; } }
+
+/* ---- the panel -------------------------------------------------------------- */
+
+.photo__panel {
+  position: absolute;
+  left: 50%;
+  bottom: max(28px, env(safe-area-inset-bottom));
+  width: min(760px, calc(100vw - 32px));
+  transform: translateX(-50%);
+  padding: 14px 16px 12px;
+  background: var(--or-slab, rgb(7 11 22 / 0.9));
+  border-top: 2px solid var(--or-signal, #ffc21f);
+  clip-path: polygon(0 0, calc(100% - 14px) 0, 100% 14px, 100% 100%, 14px 100%, 0 calc(100% - 14px));
+  pointer-events: auto;
+  transition: opacity 0.25s ease, transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.photo.is-bare .photo__panel { opacity: 0; transform: translate(-50%, 16px); pointer-events: none; }
+.photo.is-bare { pointer-events: auto; }             /* a tap anywhere brings the panel back */
+
+.photo__title { display: flex; align-items: baseline; gap: 12px; margin-bottom: 10px; }
+.photo__tag {
+  padding: 3px 10px 3px 8px;
+  background: var(--or-signal, #ffc21f);
+  color: var(--or-signal-ink, #0b1222);
+  font: 800 var(--or-t-xs, 0.6875rem)/1.4 var(--or-f-display, "Avenir Next Condensed", "Bahnschrift", sans-serif);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  clip-path: polygon(0 0, 100% 0, calc(100% - 7px) 100%, 0 100%);
+}
+.photo__time {
+  font: 600 var(--or-t-xs, 0.6875rem)/1 var(--or-f-body, sans-serif);
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--or-text-3, #6d7c94);
+}
+
+.photo__looks { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.photo__look,
+.photo__btn {
+  appearance: none;
+  border: 1px solid var(--or-rule-hi, rgb(196 212 236 / 0.34));
+  background: transparent;
+  color: var(--or-text-2, #a9b6c9);
+  padding: 7px 12px;
+  font: 700 var(--or-t-s, 0.8125rem)/1 var(--or-f-display, "Avenir Next Condensed", sans-serif);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  clip-path: polygon(0 0, 100% 0, calc(100% - 6px) 100%, 0 100%);
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.photo__look:hover, .photo__btn:hover { color: var(--or-text, #fff); border-color: var(--or-volt-hi, #7db2ff); }
+.photo__look[aria-checked="true"] {
+  background: var(--or-volt, #3c8cff);
+  border-color: var(--or-volt, #3c8cff);
+  color: #fff;
+}
+.photo__btn[aria-pressed="true"] { color: #fff; border-color: var(--or-volt-hi, #7db2ff); }
+.photo__look:focus-visible, .photo__btn:focus-visible { outline: 2px solid var(--or-volt-hi, #7db2ff); outline-offset: 2px; }
+
+.photo__row { display: flex; flex-wrap: wrap; gap: 6px; }
+.photo__btn--save {
+  margin-left: auto;
+  background: var(--or-signal, #ffc21f);
+  border-color: var(--or-signal, #ffc21f);
+  color: var(--or-signal-ink, #0b1222);
+  padding-inline: 18px;
+}
+.photo__btn--save:hover { background: var(--or-signal-hi, #ffd452); color: var(--or-signal-ink, #0b1222); }
+
+.photo__keys {
+  margin: 10px 0 0;
+  font: 500 var(--or-t-xs, 0.6875rem)/1.9 var(--or-f-body, sans-serif);
+  color: var(--or-text-3, #6d7c94);
+}
+.photo__keys kbd {
+  display: inline-block;
+  min-width: 1.6em;
+  padding: 0 0.4em;
+  margin: 0 0.1em;
+  border: 1px solid var(--or-rule-hi, rgb(196 212 236 / 0.34));
+  border-bottom-width: 2px;
+  border-radius: 3px;
+  font: 700 0.95em/1.5 var(--or-f-num, "DIN Alternate", sans-serif);
+  color: var(--or-text-2, #a9b6c9);
+  text-align: center;
+}
+
+.photo__toast {
+  position: absolute;
+  left: 50%;
+  top: max(26px, calc(var(--bar) * var(--barred, 0) + 22px));
+  margin: 0;
+  padding: 8px 16px;
+  transform: translate(-50%, -8px);
+  background: var(--or-slab, rgb(7 11 22 / 0.9));
+  border-left: 3px solid var(--or-good, #3ddc84);
+  font: 600 var(--or-t-s, 0.8125rem)/1.3 var(--or-f-body, sans-serif);
+  opacity: 0;
+  transition: opacity 0.2s ease, transform 0.25s ease;
+}
+.photo.has-toast .photo__toast { opacity: 1; transform: translate(-50%, 0); }
+
+@media (max-width: 560px) {
+  .photo__panel { bottom: max(16px, env(safe-area-inset-bottom)); padding: 12px; }
+  .photo__btn--save { margin-left: 0; order: -1; flex-basis: 100%; padding-block: 11px; }
+  .photo__frame i { width: 22px; height: 22px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .photo.is-flash .photo__flash { animation: none; }
+  .photo__bars i, .photo__panel { transition: none; }
+}

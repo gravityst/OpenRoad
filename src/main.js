@@ -744,6 +744,15 @@ async function boot() {
     // A focused text field owns the keyboard. Zeroing here rather than skipping
     // the physics keeps the car settling naturally instead of freezing mid-slide.
     if (typing) { input.throttle = 0; input.brake = 0; input.steer = 0; input.handbrake = 0; }
+    // Mid-race, R goes back to the last gate, not the nearest road — which may
+    // be one the race never uses, facing the wrong way. Taken here, ahead of
+    // the plain reset below, so nothing in that block (placing, turning, its
+    // toast) ever runs on top of a race respawn. The repairs match it.
+    if (input.reset && mode === 'driving' && goals && goals.respawn()) {
+      if (car.damage) car.damage.reset();
+      drift.reset();
+      input.reset = false;
+    }
 
     if (input.pause && mode !== 'inspect') {
       if (mode === 'driving') { mode = 'paused'; menus.show('pause'); hud.setVisible(false); controls.reset(); }
@@ -774,8 +783,7 @@ async function boot() {
     if (input.pause && mode === 'inspect') startDriving();
     if (input.camera) cameraMode = (cameraMode + 1) % MODES.length;
     if (input.reset && mode === 'driving') {
-      // Mid-race, R puts the car back at the last gate instead.
-      if (!(goals && goals.respawn())) spawnOnRoad(car.x, car.z);
+      spawnOnRoad(car.x, car.z);
       // Respawning repairs. Leaving a wreck wrecked after a reset strands the
       // player with no route back to a working car.
       if (car.damage) car.damage.reset();

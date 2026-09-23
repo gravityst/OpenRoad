@@ -276,6 +276,51 @@ check('every medal table is strictly ordered', tableBad === 0, `${tableBad} tabl
   g6.dispose();
 }
 
+// Lost mid-race: the hint says R, and R (goals.respawn) puts the car back at
+// the last gate, on the race line and facing along it. Outside a race R is not
+// the goals' to take — respawn() declines, and the goals claim no hint for a
+// car in a field, because main.js has its own "back to the road" one.
+{
+  const fake = { x: 0, z: 0, y: 0, yaw: 0, speed: 20, vx: 0, vz: 0, airborne: false, airTime: 0, spec: { rideHeight: 0.3 },
+    reset(x, z, yaw) { this.x = x; this.z = z; this.yaw = yaw; } };
+  const g7 = createGoals({ world, ground, car: fake, cars: CARS, storage: memoryStorage(), sfx: false, drift: { state: {} } });
+  const race = g7.list.find((c) => c.kind === 'race' && !c.lap);
+  const step = (x, z) => { fake.x = x; fake.z = z; g7.update(1 / 60, { driving: true }); };
+  const declinedFree = g7.respawn() === false;
+  // Free roam, 120 m off the road for 12 s with a real target.
+  g7.setTarget(race.id);
+  const far = ground.nearestRoad(race.start.x, race.start.z, 60);
+  const ox = race.start.x - (far ? far.tz : 0) * 120, oz = race.start.z + (far ? far.tx : 1) * 120;
+  let freeHint = '';
+  for (let i = 0; i < 60 * 12; i++) { step(ox, oz); if (g7.ui.hint) freeHint = g7.ui.hint; }
+  // Into the ring, through the countdown, through gate 1, then off the line.
+  step(race.start.x, race.start.z);
+  for (let i = 0; i < 200 && g7._race.phase === 'countdown'; i++) g7.update(1 / 60, { driving: true });
+  const g0 = race.gates[0];
+  step(g0.x - g0.tx * 2, g0.z - g0.tz * 2); step(g0.x + g0.tx * 2, g0.z + g0.tz * 2);
+  const passed = g7._race.next === 1;
+  const lx = g0.x - g0.tz * 120, lz = g0.z + g0.tx * 120;
+  for (let i = 0; i < 60 * 4; i++) step(lx, lz);
+  const lostHint = g7.ui.hint;
+  const tBefore = g7._race.t;
+  const took = g7.respawn();
+  const fwdX = -Math.sin(fake.yaw), fwdZ = -Math.cos(fake.yaw);
+  const onLine = race.route.project(fake.x, fake.z, -1, 0, {});
+  const along = race.route.at(onLine.d, {});
+  const facing = fwdX * along.tx + fwdZ * along.tz;
+  const fromGate = onLine.d - g0.d;
+  step(fake.x, fake.z);
+  const clockOn = g7._race.phase === 'running' && g7._race.t >= tBefore && !g7.ui.hint;
+  check('lost in a race, the hint says R', passed && /press r/i.test(lostHint),
+    `through gate 1 ${passed}, 120 m off the line for 4 s: "${lostHint}"`);
+  check('R in a race goes back to the last gate, facing on', took && onLine.dist < 3 && facing > 0.98 && fromGate >= 0 && fromGate < 12 && clockOn,
+    `respawn() ${took}, ${onLine.dist.toFixed(1)} m off the line, ${fromGate.toFixed(1)} m past gate 1, heading ${(Math.acos(Math.min(1, facing)) * 57.3).toFixed(0)} deg off it, clock still running ${clockOn}`);
+  check('outside a race R and the off-road hint are main.js\'s', declinedFree && freeHint === '',
+    `respawn() declined in free roam ${declinedFree}; 12 s parked 120 m off the road, goals hint "${freeHint}"`);
+  g7.abandon();
+  g7.dispose();
+}
+
 // ---------------------------------------------------------------------------
 console.log('\n-- saves --');
 {

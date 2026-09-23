@@ -791,9 +791,11 @@ export function createGoals(opts) {
     ui.wallet.cash = progress.cash;
     const lv = levelFor(progress.xp);
     ui.wallet.level = lv.level; ui.wallet.frac = lv.frac;
+    // The "how do I get back" hint is this layer's only while a race runs,
+    // where R means the last gate. Outside one, being off the road is the
+    // reset hint's business in main.js, and the arrow already points back.
     ui.hint = race.c && race.lost > 3 ? 'Lost? Press R to jump back to the last checkpoint'
-      : ringHint ? ringHint
-      : nav.off > 4 && !race.c ? 'Wrong way — the arrow knows the road' : '';
+      : ringHint ? ringHint : '';
     if (ui.race.deltaAge < 99) ui.race.deltaAge += dt;
 
     vs.target = target; vs.race = race.c; vs.nextGate = race.next; vs.zone = zone.c;

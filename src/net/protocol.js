@@ -220,9 +220,56 @@ export function validName(s) {
   return typeof s === 'string' && NAME_RE.test(s) && !/\s{2,}/.test(s) && s.trim() === s;
 }
 
-/** Never trusted from the wire — the server re-runs this and its answer wins. */
+/**
+ * Never trusted from the wire — the server re-runs this and its answer wins.
+ *
+ * This is the generation-1 rule, kept exactly as the live Worker runs it (a
+ * protocol-1 room must send what it always sent): control characters and
+ * non-ASCII are stripped, and anything past 16 characters is cut off rather
+ * than refused. A generation-2 room uses safeName() below.
+ */
 export function cleanName(s, fallback) {
   if (typeof s !== 'string') return fallback;
   const t = s.normalize('NFKC').replace(/[^\x20-\x7E]/g, '').replace(/\s+/g, ' ').trim().slice(0, 16);
   return validName(t) ? t : fallback;
+}
+
+// Words no name may contain. ROT13, so the source of a kids' game does not
+// read as a list of swearwords; rot13() below turns them back at load.
+// SUB matches anywhere in the name once it is lower-cased, its digits read as
+// the letters they imitate (0=o 1=i 3=e 4=a 5=s 7=t 8=b 9=g) and its spaces,
+// hyphens and underscores removed — so 'F U-C_K' and 'sh1t' are caught.
+// WORD matches only a whole word, for the ones that sit inside real names.
+const SUB_R13 = 'shpx fuvg ovgpu phag chffl juber fyhg avttre avttn snttbg ergneq cravf intvan cbea ' +
+  'onfgneq jnaxre gjng qvyqb wvmm zbyrfg nffubyr qhzonff wnpxnff frkl ahqr anxrq fhvpvqr';
+// Inside real words: 'Thorny', 'Torpedo', 'Therapist', 'Sexton', 'Nazir'.
+const WORD_R13 = 'anmv uvgyre gvgf cvff frk crqb ubeal encvfg';
+function rot13(w) {
+  return w.replace(/[a-z]/g, (c) => String.fromCharCode(((c.charCodeAt(0) - 97 + 13) % 26) + 97));
+}
+const BLOCK_SUB = SUB_R13.split(' ').map(rot13);
+const BLOCK_WORD = new Set(WORD_R13.split(' ').map(rot13));
+const LEET = { 0: 'o', 1: 'i', 3: 'e', 4: 'a', 5: 's', 7: 't', 8: 'b', 9: 'g' };
+
+/** True when a name reads as one of the blocked words. */
+export function blockedName(s) {
+  const low = String(s).toLowerCase().replace(/[0-9]/g, (d) => LEET[d] || d);
+  const joined = low.replace(/[^a-z]/g, '');
+  for (const w of BLOCK_SUB) if (joined.includes(w)) return true;
+  for (const w of low.split(/[^a-z]+/)) if (BLOCK_WORD.has(w)) return true;
+  return false;
+}
+
+/**
+ * The generation-2 name rule. The same normalising as cleanName, but a name
+ * over 16 characters is REFUSED, as the name rules above always said (a
+ * 40-character name used to arrive as its first 16), and so is a name that
+ * reads as a blocked word. Refused means `fallback`: the player still drives,
+ * as "Driver-7".
+ */
+export function safeName(s, fallback) {
+  if (typeof s !== 'string') return fallback;
+  const t = s.normalize('NFKC').replace(/[^\x20-\x7E]/g, '').replace(/\s+/g, ' ').trim();
+  if (t.length > 16 || !validName(t) || blockedName(t)) return fallback;
+  return t;
 }

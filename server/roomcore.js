@@ -14,7 +14,7 @@
  */
 
 import {
-  encodeSnapshot, decodeState, cleanName, cleanCarId, cleanColour,
+  encodeSnapshot, decodeState, cleanName, safeName, cleanCarId, cleanColour,
   PROTO_V2, AGE_STALE, MAX_BURST,
 } from '../src/net/protocol.js';
 
@@ -37,6 +37,13 @@ const CREEP = 0.001;
 // curve, a 10 cm lurch on screen. A quarter of a second of creep covers the
 // normal 50 ms spacing five times over.
 const CREEP_SPAN = 250;
+// A name is shown to everyone in a public room of kids, so it must not work as
+// a chat line. The client already waits until typing stops; the server then
+// takes at most one new name per player every RENAME_MS. A name that arrives
+// sooner waits, and the newest waiting one is put up when the time comes —
+// a kid fixing a typo still ends up with the right name, while 'meet me',
+// 'at the', 'barn' would take a minute to spell out. Generation 2 only.
+const RENAME_MS = 20000;
 
 /**
  * opts: { proto, now: () => wall ms, maxPlayers }
@@ -85,8 +92,11 @@ export function createRoomCore(opts = {}) {
     return {
       id, name, car: '', colour: 0, rec: null, queue: [], last: now(),
       minOff: null, lastRecv: 0, lastSample: -Infinity, tokens: BURST, tokT: now(),
+      joined: false, nameAt: -Infinity, wantName: null,
     };
   }
+  /** The name rule for this room's generation (see protocol.js). */
+  const nameRule = v2 ? safeName : cleanName;
 
   /** A socket was accepted. Returns its id, or -1 if the room is full. */
   function open(sock) {
@@ -107,7 +117,8 @@ export function createRoomCore(opts = {}) {
    */
   function restore(sock, att) {
     if (peers.has(sock) || !att || typeof att.id !== 'number') return false;
-    const p = newPeer(att.id & 0xff, cleanName(att.name, 'Driver-' + att.id));
+    const p = newPeer(att.id & 0xff, nameRule(att.name, 'Driver-' + att.id));
+    p.joined = true;
     p.car = cleanCarId(att.car);
     p.colour = cleanColour(att.colour);
     peers.set(sock, p);
@@ -189,7 +200,12 @@ export function createRoomCore(opts = {}) {
     if (!m || typeof m !== 'object') return;
 
     if (m.t === 'join') {
-      p.name = unique(cleanName(m.name, 'Driver-' + p.id), p.id);
+      // A second join on one socket is only ever a way round the rename
+      // limit (net.js joins once per connection): treat it as a rename.
+      if (v2 && p.joined) { rename(sock, p, m.name); return; }
+      p.name = unique(nameRule(m.name, 'Driver-' + p.id), p.id);
+      p.joined = true;
+      p.nameAt = now();
       if (v2) { p.car = cleanCarId(m.carId); p.colour = cleanColour(m.colour); }
       save(sock, p);
       const players = [];
@@ -199,6 +215,7 @@ export function createRoomCore(opts = {}) {
       send(sock, welcome);
       broadcast({ t: 'joined', ...info(p) }, sock);
     } else if (m.t === 'name') {
+      if (v2) { rename(sock, p, m.name); return; }
       p.name = unique(cleanName(m.name, p.name), p.id);
       save(sock, p);
       broadcast({ t: 'joined', ...info(p) });
@@ -212,11 +229,35 @@ export function createRoomCore(opts = {}) {
     }
   }
 
+  /** A new name, generation 2: refused names keep the old one, and at most
+   *  one change goes out every RENAME_MS (see above). */
+  function rename(sock, p, raw) {
+    const n = safeName(raw, '');
+    if (!n) return;
+    p.wantName = n;
+    flushName(sock, p, now());
+  }
+  function flushName(sock, p, t) {
+    if (p.wantName === null || t - p.nameAt < RENAME_MS) return;
+    const n = unique(p.wantName, p.id);
+    p.wantName = null;
+    if (n === p.name) return;
+    p.name = n;
+    p.nameAt = t;
+    save(sock, p);
+    broadcast({ t: 'joined', ...info(p) });
+  }
+
   /** Two players called "Ace" is confusing at 200 km/h; disambiguate server-side. */
   function unique(name, id) {
     let taken = false;
     for (const q of peers.values()) if (q.id !== id && q.name === name) taken = true;
-    return taken ? (name.slice(0, 13) + '-' + id) : name;
+    if (!taken) return name;
+    // Generation 2 keeps the result inside the 16-character rule: the old cut
+    // at 13 made 'ABCDEFGHIJKLM-123' once ids passed 99. Generation 1 keeps
+    // the old cut, byte for byte.
+    if (!v2) return name.slice(0, 13) + '-' + id;
+    return name.slice(0, 15 - String(id).length).trimEnd() + '-' + id;
   }
 
   /** Throttle as the room fills, so a busy room degrades smoothly instead of
@@ -251,6 +292,7 @@ export function createRoomCore(opts = {}) {
       if (!p && attachmentOf) { restore(sock, attachmentOf(sock)); p = peers.get(sock); }
       if (!p) continue;
       if (t - p.last > STALE_MS) { try { sock.close(1000, 'idle'); } catch { /* gone */ } continue; }
+      if (p.wantName !== null) flushName(sock, p, t);
       if (!v2) { if (p.rec) out.push(p.rec); continue; }
       if (p.queue.length) {
         for (const r of p.queue) { r.age = Math.min(AGE_STALE, Math.max(0, snapMs - r.sampleMs)); out.push(r); }

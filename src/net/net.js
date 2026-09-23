@@ -14,7 +14,7 @@
  * generation-1 behaviour: no ages, no car bodies, nothing it would misread.
  */
 
-import { encodeState, MSG_SNAPSHOT, cleanName, cleanCarId, cleanColour, PROTO_V2 } from './protocol.js';
+import { encodeState, MSG_SNAPSHOT, safeName, cleanCarId, cleanColour, PROTO_V2 } from './protocol.js';
 import { createRoom } from './room.js';
 
 const BACKOFF = [500, 1000, 2000, 4000, 8000, 15000];
@@ -24,8 +24,15 @@ const PING_FAST = 250, PING_FAST_N = 6, PING_SLOW = 2000;
 // While the game loop is not running (a background tab: no rAF) the server
 // would drop us after 8 s of silence, and everyone else would see a "left"
 // and a "joined" every time someone looked at another tab. A timer keeps the
-// socket known to be alive; browsers throttle it to 1 Hz, which is plenty.
+// socket known to be alive; browsers throttle it to 1 Hz, which is plenty —
+// until the tab has been hidden five minutes, when Chrome's intensive
+// throttling runs chained timers once a MINUTE. So the snapshots that keep
+// arriving 20 times a second carry a keepalive too (see onmessage).
 const KEEPALIVE_MS = 2500;
+// The settings field reports every keystroke. A name goes on the wire only
+// once it has stopped changing for this long, so a half-typed name never
+// reaches anybody (and the server allows one change per 20 s on top).
+const NAME_SETTLE_MS = 1500;
 
 /** The URL with this client's generation on it, unless it already has one. */
 export function withProto(url) {
@@ -52,9 +59,11 @@ export function createNet(opts = {}) {
   let welcomed = false;
   let pingsSent = 0, nextPing = 0;
   let lastUpdate = 0;
+  let lastKeep = 0;
   let carId = cleanCarId(opts.carId);
   let colour = cleanColour(opts.colour);
-  let name = cleanName(opts.name, 'Driver');
+  let name = safeName(opts.name, 'Driver');
+  let nameDirty = false, nameAt = 0;
   // id -> { id, name, car, colour }. Everyone else in the room, as the server
   // described them. The car's live pose is in room.cars; this is who they are.
   const people = new Map();
@@ -80,6 +89,7 @@ export function createNet(opts = {}) {
       tries = 0;
       epoch = now();
       welcomed = false;
+      nameDirty = false;           // the join carries the current name
       send(JSON.stringify({
         t: 'join', proto: PROTO_V2, seed: opts.seed ?? 0,
         name, carId, colour,
@@ -87,6 +97,7 @@ export function createNet(opts = {}) {
     };
     s.onmessage = ev => {
       if (ws !== s) return;
+      keepalive(now());
       const d = ev.data;
       if (typeof d === 'string') return control(d);
       const buf = d instanceof ArrayBuffer ? d : (d && d.buffer) || null;
@@ -192,6 +203,13 @@ export function createNet(opts = {}) {
     send(JSON.stringify({ t: 'ping', c: (now() - epoch) | 0 }));
   }
 
+  /** A ping when the game loop has gone quiet, at most once a KEEPALIVE_MS. */
+  function keepalive(t) {
+    if (state !== 'live' || t - lastUpdate <= KEEPALIVE_MS * 0.8 || t - lastKeep < KEEPALIVE_MS) return;
+    lastKeep = t;
+    ping();
+  }
+
   function pumpPings(t) {
     if (!welcomed || t < nextPing) return;
     ping();
@@ -212,6 +230,10 @@ export function createNet(opts = {}) {
 
     if (state !== 'live') return;
     pumpPings(t);
+    if (nameDirty && welcomed && t - nameAt >= NAME_SETTLE_MS) {
+      nameDirty = false;
+      send(JSON.stringify({ t: 'name', name }));
+    }
     if (!car) return;
     // Fixed cadence off a real clock, NOT off the physics accumulator — the
     // substep count varies with frame time, so driving the send rate from it
@@ -223,12 +245,10 @@ export function createNet(opts = {}) {
     send(encodeState(car, (t - epoch) | 0));
   }
 
-  let keepalive = null;
+  let keepTimer = null;
   const si = opts.setInterval || (typeof setInterval === 'function' ? setInterval : null);
   if (si && opts.keepalive !== false) {
-    keepalive = si(() => {
-      if (state === 'live' && now() - lastUpdate > KEEPALIVE_MS * 0.8) ping();
-    }, KEEPALIVE_MS);
+    keepTimer = si(() => keepalive(now()), KEEPALIVE_MS);
   }
 
   return {
@@ -251,9 +271,14 @@ export function createNet(opts = {}) {
      *  on every screen (a race start). null until the first sync. */
     serverNow() { return room.serverNow(now()); },
     update,
+    /** A new name. Sent once it has settled (NAME_SETTLE_MS), and carried
+     *  by the next join if the socket is down. */
     rename(n) {
-      name = cleanName(n, 'Driver');
-      send(JSON.stringify({ t: 'name', name }));
+      const next = safeName(n, name);
+      if (next === name && !nameDirty) return;
+      name = next;
+      nameDirty = true;
+      nameAt = now();
     },
     /** The car and paint everyone else should see. Sent now and on every rejoin. */
     setCar(id, col) {
@@ -274,8 +299,8 @@ export function createNet(opts = {}) {
     },
     dispose() {
       this.disable();
-      if (keepalive && typeof clearInterval === 'function') { try { clearInterval(keepalive); } catch { /* fine */ } }
-      keepalive = null;
+      if (keepTimer && typeof clearInterval === 'function') { try { clearInterval(keepTimer); } catch { /* fine */ } }
+      keepTimer = null;
     },
   };
 }

@@ -20,6 +20,37 @@
 
 import { createRoadGraph } from './routes.js';
 import { CAR_BY_ID, STARTER } from '../vehicles/catalog.js';
+import { PAINTS, PAINT_BY_ID } from './career.js';
+
+/**
+ * Paint on the wire. A player's paint travels as the colour index the server
+ * already accepts and re-checks (0-31, protocol.js cleanColour): a factory
+ * colour is its index (every car has five), and a special paint from the shop
+ * is PAINT_WIRE + its place in career.js PAINTS. So a kid who saved up for
+ * Trophy Gold is Trophy Gold on every friend's screen, and nothing new — let
+ * alone anything a player typed — goes on the wire to carry it.
+ */
+export const PAINT_WIRE = 16;
+
+/** The number to send for a car in factory colour `index`, or wearing shop paint `paintId`. */
+export function wireColour(index, paintId) {
+  const k = paintId ? PAINTS.indexOf(PAINT_BY_ID[paintId]) : -1;
+  return k >= 0 ? PAINT_WIRE + k : (index | 0) % PAINT_WIRE;
+}
+
+/** The shop paint's hex a wire colour stands for, or null for a factory colour. */
+export function specialPaint(wire) {
+  const k = (wire | 0) - PAINT_WIRE;
+  return k >= 0 && k < PAINTS.length ? PAINTS[k].hex : null;
+}
+
+/** The body colour a car shows for a wire colour. */
+export function paintHexOf(carId, wire) {
+  const sp = specialPaint(wire);
+  if (sp != null) return sp;
+  const car = CAR_BY_ID[carId];
+  return car ? car.colours[(wire | 0) % car.colours.length] : null;
+}
 
 // Bright, far apart on the wheel, and none of them the GPS cyan (0x4fd8f0),
 // so a friend's beacon can never be mistaken for a challenge's.
@@ -62,8 +93,7 @@ function fromHsl(h, s, l) {
  * colour of their own from the palette, picked by id so it is stable.
  */
 export function playerColour(carId, colourIndex, id) {
-  const car = CAR_BY_ID[carId];
-  const paint = car ? car.colours[(colourIndex | 0) % car.colours.length] : null;
+  const paint = CAR_BY_ID[carId] ? paintHexOf(carId, colourIndex) : null;
   if (paint != null) {
     let [h, s, l] = hsl(paint);
     if (s > 0.28 && l > 0.08 && l < 0.92) {

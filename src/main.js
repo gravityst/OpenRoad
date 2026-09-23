@@ -468,6 +468,10 @@ async function boot() {
           console.error('[open road] remote car model failed:', err);
           m = null;
         }
+        // A paint from the shop rides on the colour index (party.js,
+        // wireColour): the model is built in the factory colour and painted.
+        const sp = m && mParty ? mParty.specialPaint(c.colour) : null;
+        if (sp != null) m.setPaint(sp);
         r = remoteModels[i] = { m, rev: c.infoRev, spec, spin: 0 };
       }
       const m = r.m;
@@ -673,8 +677,11 @@ async function boot() {
   // while friends are online starts you on the road right behind one of them
   // — whoever you picked on the title screen, or else the nearest. Registered
   // after goals.onDrive, so the challenge GPS is set up either way.
+  // The paint goes too: a special paint from the shop as well as a factory one.
+  const wireColourOf = (index, paintId) => (mParty ? mParty.wireColour(index, paintId) : index | 0);
+  if (net && goals) net.setCar(chosenCar, wireColourOf(chosenColour, goals.progress.livery(chosenCar)));
   menus.on('drive', (p) => {
-    if (net && p && p.id) net.setCar(p.id, p.colour | 0);
+    if (net && p && p.id) net.setCar(p.id, wireColourOf(p.colour, p.paint));
     if (!party || !p || !p.fresh) return;
     const s = party.onPlay(car);
     if (s && roster) roster.toast(`You're right behind ${s.name}!`, colourOf(net.room.car(s.id) || { id: s.id }).css);
@@ -1234,8 +1241,12 @@ async function boot() {
       teleported = false;
       net.update(dt, wire);
       syncRemoteModels(night, dt);
+      // Everything here that is fastened to YOUR car on screen — the guide's
+      // chevrons start 10 m ahead of it, the list measures from it — reads
+      // `pose`, where the car is drawn, not `car`, which runs up to a physics
+      // step ahead: the chevrons snapped back 0.28 m every sixth frame.
       if (party) {
-        const ev = party.update(dt, car, goals ? goals.nav : null);
+        const ev = party.update(dt, pose, goals ? goals.nav : null);
         if (ev) announceGuide(ev);
         // While guiding, the minimap's GPS line leads to the friend instead.
         if (party.nav && driving) hudState.nav = party.nav;
@@ -1244,7 +1255,7 @@ async function boot() {
         beacons.setVisible(settings.nameTags !== false);
         beacons.update(dt, camera, net.room.cars, colourOf, party ? party.guide : null, driving);
       }
-      if (roster) roster.update(dt, car, mode);
+      if (roster) roster.update(dt, pose, mode);
     }
     debris.update(dt, camera.position);
     fxCars[0] = car;
@@ -1259,7 +1270,7 @@ async function boot() {
       // Only on the road: over a menu they are clutter on top of its text.
       tags.setVisible(mode === 'driving');
       camera.updateMatrixWorld();
-      tags.update(camera, net.room.cars, car, colourOf, party ? party.guide.id : -1);
+      tags.update(camera, net.room.cars, pose, colourOf, party ? party.guide.id : -1);
     }
 
     // ---- streaming ----

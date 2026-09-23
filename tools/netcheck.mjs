@@ -477,6 +477,9 @@ async function session(stack, profName, opts = {}) {
         url: BASE_URL, name: 'Third', seed: 1, carId: 'haulier', colour: 3,
         now: thirdNow, socketFactory: makeSocketFactory(sim, stack.worker, env, prof, 37),
         onEvent: (e) => thirdEvents.push(e),
+        // Chrome's intensive throttling: a tab hidden for five minutes runs
+        // its chained timers once a minute.
+        ...(o.minuteTimers ? { setInterval: (fn) => globalThis.setInterval(fn, 60000) } : {}),
       });
       let last = sim.t;
       const park = { ...rec, x: 40, z: -40, vx: 0, vz: 0, flags: 0 };
@@ -653,6 +656,7 @@ if (process.argv.includes('--dump')) {
 
 const P2 = await imp('src/net/protocol.js');
 const CORE = await imp('server/roomcore.js');
+const createRoomCoreFor = (proto) => CORE.createRoomCore({ proto, now: () => Date.now(), maxPlayers: 200 });
 
 /** Largest per-frame deviation from constant velocity, and how many >10 cm, in [t0, t1). */
 function popsIn(frames, t0, t1) {
@@ -890,6 +894,17 @@ for (const prof of ['stall1', 'stall3']) {
     `left at ${leftAt ? (leftAt / 1000).toFixed(1) + ' s' : 'never'}`);
   const thirdCar = w.room.cars.find((k) => k.active && k.name === 'Third');
   check(!thirdCar, 'and a player who leaves fades out and frees their slot');
+
+  // The same, with the keepalive timer throttled to once a minute and the tab
+  // hidden for 40 s: the snapshots it still receives have to keep it alive.
+  const r2 = await session(V2STACK, 'wifi', {
+    duration: 52000,
+    third: { joinAt: 3000, pauseFrom: 6000, pauseTo: 46000, leaveAt: 49000, minuteTimers: true },
+  });
+  const left2 = r2.events.filter((e) => e.type === 'leave').map((e) => e.t);
+  check(left2.length === 1 && left2[0] > 49000,
+    'a tab hidden long enough for its timers to run once a minute still stays in the room',
+    `left at ${left2.map((t) => (t / 1000).toFixed(1) + ' s').join(', ') || 'never'} (hidden 6-46 s, closed at 49 s)`);
 }
 
 // ---- 7. the server stands up to its clients ------------------------------------------
@@ -911,6 +926,44 @@ for (const prof of ['stall1', 'stall3']) {
     check(j && /^Driver-\d+$/.test(j.name) && j.car === '' && j.colour === 0,
       'names and cars are re-validated by the server; bad ones fall back, never pass through',
       j ? `${j.name}, car "${j.car}", paint ${j.colour}` : 'no joined');
+    // Names in a generation-2 room: refused past 16 characters or when they
+    // read as a blocked word, and one change per 20 s, the newest winning.
+    const joinedName = () => { const k = got.filter((m) => m.t === 'joined' && m.id === room.core.peerOf(A).id); return k.length ? k[k.length - 1].name : null; };
+    got.length = 0;
+    const t0 = Date.now();
+    // Both keep talking while the clock runs, or the room drops them as idle.
+    const wait = async (ms) => {
+      for (let k = 0; k < ms; k += 2000) {
+        room.webSocketMessage(A, JSON.stringify({ t: 'ping', c: 1 }));
+        room.webSocketMessage(B, JSON.stringify({ t: 'ping', c: 1 }));
+        await sim.run(sim.t + Math.min(2000, ms - k));
+      }
+    };
+    room.webSocketMessage(A, JSON.stringify({ t: 'name', name: 'Meet' }));
+    const early = joinedName();
+    room.webSocketMessage(A, JSON.stringify({ t: 'join', proto: 2, name: 'Me At' }));
+    room.webSocketMessage(A, JSON.stringify({ t: 'name', name: 'Speedy Otter' }));
+    await wait(19000);
+    const stillEarly = joinedName();
+    await wait(1500);
+    const later = joinedName();
+    room.webSocketMessage(A, JSON.stringify({ t: 'name', name: 'A'.repeat(40) }));
+    room.webSocketMessage(A, JSON.stringify({ t: 'name', name: 'sh1t head' }));
+    await wait(21000);
+    const after = joinedName();
+    check(early === null && stillEarly === null && later === 'Speedy Otter' && after === 'Speedy Otter' && Date.now() - t0 > 40000,
+      'a name is not a chat line: one change per 20 s (the newest wins), long or rude names refused',
+      `at once: ${early}, at 19 s: ${stillEarly}, at 20.5 s: ${later}, after a 40-char and a rude one: ${after}`);
+    const room2 = createRoomCoreFor(2);
+    const pad = [];
+    for (let k = 0; k < 120; k++) { const sk = { send() {}, close() {} }; room2.open(sk); pad.push(sk); }
+    const X = { send() {}, close() {} }, Y = { send() {}, close() {} };
+    room2.open(X); room2.open(Y);
+    room2.message(pad[0], JSON.stringify({ t: 'join', name: 'ABCDEFGHIJKLMNOP' }));
+    room2.message(X, JSON.stringify({ t: 'join', name: 'ABCDEFGHIJKLMNOP' }));
+    const dup = room2.peerOf(X).name;
+    check(dup.length <= 16 && /-\d{3}$/.test(dup) && P2.validName(dup),
+      'two drivers with one long name are told apart inside the 16-character rule', dup);
     // Wake after hibernation: a fresh object, the same sockets.
     const ctx = { acceptWebSocket() {}, getWebSockets: () => [A, B] };
     const woken = new V2STACK.worker.Room(ctx, {});
@@ -1049,6 +1102,24 @@ for (const prof of ['stall1', 'stall3']) {
     }
   }
   check(dull.length === 0, "every car's every paint makes a bright player colour, and none is the GPS cyan", dull.join(', '));
+
+  // Special paints from the shop reach friends on the colour index alone.
+  const { PAINTS } = await imp('src/game/career.js');
+  const round = PAINTS.every((pt, k) => {
+    const w = PARTY.wireColour(2, pt.id);
+    return P2.cleanColour(w) === w && PARTY.specialPaint(w) === pt.hex && PARTY.paintHexOf('kaida', w) === pt.hex;
+  });
+  const factory = [0, 1, 2, 3, 4].every((i) => PARTY.wireColour(i, null) === i && PARTY.specialPaint(i) === null &&
+    PARTY.paintHexOf('kaida', i) === CARS.find((c) => c.id === 'kaida').colours[i]);
+  const shopDull = PAINTS.filter((pt) => {
+    const hex = PARTY.playerColour('kaida', PARTY.wireColour(0, pt.id), 5);
+    const r = (hex >> 16) & 255, g = (hex >> 8) & 255, b = hex & 255;
+    return Math.max(r, g, b) < 150 || Math.max(r, g, b) - Math.min(r, g, b) < 70;
+  }).map((pt) => pt.name);
+  const gold = PARTY.playerColour('kaida', PARTY.wireColour(0, 'trophy'), 5);
+  check(round && factory && !shopDull.length,
+    'a special paint from the shop reaches friends as a colour index the server already allows, and colours their beacon',
+    `${PAINTS.length} paints round-trip through 16-${15 + PAINTS.length}; Trophy Gold's beacon ${PARTY.cssOf(gold)}${shopDull.length ? '; dull: ' + shopDull.join(', ') : ''}`);
 }
 
 if (failures) {

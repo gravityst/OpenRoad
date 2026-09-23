@@ -464,5 +464,88 @@ function launch(id) {
     `${cases} coasting runs, worst single-step rise ${(worst * 100).toExponential(1)}%${worst > 1e-6 ? ` (${where})` : ''}`);
 }
 
+// ---------------------------------------------------------------------------
+// 8. A KID ON THE REAL ROADS
+// ---------------------------------------------------------------------------
+// The whole point, measured the way it was complained about: binary keys on
+// the real map. The driver holds W, looks down the road, and presses D or A
+// whenever the road ahead is more than 4 degrees off the nose — which is all
+// a keyboard lets anyone do. The careful version also lifts, and brakes, when
+// the road ahead bends hard. Thirty starts, forty seconds each.
+//
+// Against the physics and controls this makeover replaced, the same two
+// drivers measured: flat out, on the road 24.7% of the time, sideways past
+// 12 deg for 55.7% of it, averaging 179 km/h across the fields; careful, on
+// the road 44.0%, spinning in 10 runs of 30. The thresholds below leave room
+// for the map to change underneath them.
+{
+  const { buildWorld, pointOnEdge } = await import('../src/world/layout.js');
+  const { createGround } = await import('../src/world/ground.js');
+  const world = buildWorld();
+  const ground = createGround(world);
+  const edges = world.edges.filter((e) => e.kind !== 'track' && e.length > 100);
+  const road = {};
+  const drive = (careful) => {
+    let onRoad = 0, total = 0, sideways = 0, spins = 0, trips = 0;
+    for (let k = 0; k < 30; k++) {
+      const e = edges[(k * 41) % edges.length];
+      const car = createVehicle({ ground, spec: specFor(STARTER), isPlayer: true });
+      car.setAssists({});
+      const p0 = pointOnEdge(e, 3);
+      car.reset(p0.x, p0.z, Math.atan2(-p0.tx, -p0.tz));
+      const kb = keyboard();
+      const held = new Set();
+      const key = (code, on) => {
+        if (on && !held.has(code)) { kb.down(code); held.add(code); }
+        if (!on && held.has(code)) { kb.up(code); held.delete(code); }
+      };
+      let wasOn = true, spun = false;
+      for (let f = 0; f < 60 * 40; f++) {
+        const here = ground.roadAt(car.x, car.z, road);
+        const fx = -Math.sin(car.yaw), fz = -Math.cos(car.yaw);
+        const rx = Math.cos(car.yaw), rz = -Math.sin(car.yaw);
+        let err = 0, sharp = 0;
+        if (here.edge) {
+          const dir = (fx * here.tx + fz * here.tz) >= 0 ? 1 : -1;
+          const look = Math.max(10, Math.min(40, car.speed * 0.9 + 6));
+          const cl = (v) => Math.max(0.1, Math.min(here.edge.length - 0.1, v));
+          const a = pointOnEdge(here.edge, cl(here.s + dir * look));
+          const b = pointOnEdge(here.edge, cl(here.s + dir * (look + 25)));
+          err = Math.atan2((a.x - car.x) * rx + (a.z - car.z) * rz, (a.x - car.x) * fx + (a.z - car.z) * fz);
+          sharp = Math.abs(Math.atan2(b.x - a.x, b.z - a.z) - Math.atan2(a.x - car.x, a.z - car.z));
+          if (sharp > Math.PI) sharp = 2 * Math.PI - sharp;
+        }
+        key('KeyD', err > 4 / DEG);
+        key('KeyA', err < -4 / DEG);
+        if (careful) {
+          const fast = car.speed > 12 + 40 / (1 + sharp * 6);
+          key('KeyW', !fast);
+          key('KeyS', fast && car.speed > 20 && sharp > 0.5);
+        } else {
+          key('KeyW', true);
+        }
+        kb.frame(car);
+        const on = here.onRoad || here.dist < here.width * 0.5 + 1.5;
+        total++;
+        if (on) onRoad++;
+        if (wasOn && !on) trips++;
+        wasOn = on;
+        const slip = Math.abs(car.bodySlip) * DEG;
+        if (car.speed > 3 && slip > 12) sideways++;
+        if (!spun && car.speed > 3 && slip > 60) { spun = true; spins++; }
+      }
+      for (const code of [...held]) key(code, false);
+    }
+    return { on: onRoad / total, sideways: sideways / total, spins, trips };
+  };
+  const flat = drive(false), careful = drive(true);
+  check('a kid holding W on real roads mostly stays on them', flat.on >= 0.55 && flat.sideways < 0.05 && flat.spins === 0,
+    `on the road ${(flat.on * 100).toFixed(1)}% (was 24.7), sideways ${(flat.sideways * 100).toFixed(1)}% ` +
+    `(was 55.7), ${flat.trips} trips off (was 242), ${flat.spins} spins`);
+  check('a kid who lifts for corners stays on them and never spins', careful.on >= 0.7 && careful.spins === 0,
+    `on the road ${(careful.on * 100).toFixed(1)}% (was 44.0), ${careful.trips} trips off (was 127), ` +
+    `${careful.spins} spins (was 10 runs in 30)`);
+}
+
 console.log(fail === 0 ? '\nAll handling checks passed.' : `\n${fail} CHECK(S) FAILED`);
 process.exit(fail ? 1 : 0);

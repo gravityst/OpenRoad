@@ -345,6 +345,8 @@ export function createMenus(root, opts = {}) {
   let bars = [];               // normalised 0..1 per car, parallel to `cars`
   let index = 0;
   const colourByCar = new Map();
+  // The paint it was last taken out in, which main.js boots the car in too.
+  if (settings.colour != null) colourByCar.set(drivingId, settings.colour | 0);
   let persistTimer = 0;
   let disposed = false;
 
@@ -682,6 +684,10 @@ export function createMenus(root, opts = {}) {
     normalise();
     rebuildList();
     let want = wasId ? cars.findIndex((c) => c.id === wasId) : -1;
+    // First fill: the car being driven, which main.js booted in. Starting on
+    // the top of the list made Play swap a returning player's saved car for
+    // the starter every visit.
+    if (want < 0) want = cars.findIndex((c) => c.id === drivingId);
     if (want < 0) want = cars.findIndex((c) => c.id === STARTER);
     select(want < 0 ? 0 : want, true);
   }
@@ -1300,10 +1306,24 @@ export function createMenus(root, opts = {}) {
     }
   }
 
+  /** Into the starter, on disk too: a saved car the player no longer owns
+   *  would otherwise be the one the next visit boots in. */
+  function backToStarter() {
+    drivingId = STARTER;
+    const i = cars.findIndex((c) => c.id === STARTER);
+    if (i >= 0) select(i);
+    settings.car = STARTER;
+    settings.colour = i >= 0 ? colourIndexFor(cars[i]) : 0;
+    persist(settings);
+  }
+
   function setGoals(g) {
     goals = g || null;
     if (goals && goals.progress.onChange) goals.progress.onChange(() => refreshGoals());
     // A player who already drives a car keeps it; the goals layer granted it.
+    // One whose saved car is not theirs (a save from before "Start over", or
+    // edited by hand) is put back in the starter rather than given it.
+    if (goals && !owns(drivingId)) backToStarter();
     refreshGoals();
   }
   function refreshGoals() {
@@ -1407,7 +1427,10 @@ export function createMenus(root, opts = {}) {
     if (sel) sel.fresh = current === 'title' || (current === 'garage' && backTo === 'title');
     if (sel) {
       drivingId = sel.id;
-      if (settings.car !== sel.id) { settings.car = sel.id; persist(settings); }
+      if (settings.car !== sel.id || settings.colour !== sel.colour) {
+        settings.car = sel.id; settings.colour = sel.colour;
+        persist(settings);
+      }
     }
     hide();
     emit('drive', sel);
@@ -1433,9 +1456,7 @@ export function createMenus(root, opts = {}) {
       if (!ok) return;
       goals.progress.reset();
       if (goals.resync) goals.resync();
-      const i = cars.findIndex((c) => c.id === STARTER);
-      drivingId = STARTER;
-      if (i >= 0) select(i);
+      backToStarter();
       refreshGoals();
     },
     'goal-restart': () => { hide(); emit('goal-restart'); },

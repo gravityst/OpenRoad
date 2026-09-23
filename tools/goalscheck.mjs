@@ -393,8 +393,15 @@ console.log('\n-- saves --');
   const noStore = createProgress({ storage: null, cars: CARS });
   noStore.takeToken(1);
   check('no storage at all (private mode) still plays', noStore.tokenCount === 1, 'progress kept for the session');
-  const grant = createProgress({ storage: memoryStorage(), cars: CARS, grant: ['corsara'] });
+  const gs = memoryStorage();
+  const grant = createProgress({ storage: gs, cars: CARS, grant: ['corsara'] });
   check('a returning player keeps the car they already drive', grant.owns('corsara'), 'corsara granted, not locked behind $' + CAR_PRICES.corsara);
+  const kept = createProgress({ storage: gs, cars: CARS }).owns('corsara');
+  grant.reset();
+  const afterReset = grant.owns('corsara');
+  const again = createProgress({ storage: gs, cars: CARS, grant: ['corsara'] }).owns('corsara');
+  check('a grant is kept, and never survives Start over', kept && !afterReset && !again,
+    `granted car saved ${kept}; after Start over owned ${afterReset}, and on the next visit with the old car still in settings ${again}`);
 }
 
 // ---------------------------------------------------------------------------

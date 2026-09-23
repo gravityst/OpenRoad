@@ -103,16 +103,21 @@ function browserStorage() {
  *                simply lasts the session)
  * opts.cars      the catalogue, for class-based prices
  * opts.grant     car ids to own from the start, e.g. the car a returning
- *                player already drives — nobody loses a car to this update
+ *                player already drives — nobody loses a car to this update.
+ *                A MIGRATION, applied once: only when there is no readable
+ *                save yet, and written straight away. Once a save exists
+ *                every car in it was free or bought, so a grant must never
+ *                add one — above all after "Start over", when the car still
+ *                named in the settings is the one the player just gave up.
  */
 export function createProgress(opts = {}) {
   const storage = opts.storage !== undefined ? opts.storage : browserStorage();
   const cars = opts.cars || [];
   const classOf = Object.fromEntries(cars.map((c) => [c.id, c.class]));
   const listeners = new Set();
-  let data = load();
+  let data = load(opts.grant || []);
 
-  function load() {
+  function load(grant) {
     let raw = null;
     try { raw = storage ? storage.getItem(PROGRESS_KEY) : null; } catch { raw = null; }
     let parsed = null;
@@ -120,7 +125,13 @@ export function createProgress(opts = {}) {
     const d = sanitize(parsed);
     for (const id of Object.keys(CAR_PRICES)) if (CAR_PRICES[id] === 0 && !d.owned.includes(id)) d.owned.push(id);
     for (const c of cars) if (priceOf(c.id) === 0 && !d.owned.includes(c.id)) d.owned.push(c.id);
-    for (const id of opts.grant || []) if (id && !d.owned.includes(id)) d.owned.push(id);
+    if (!parsed && grant) {
+      let granted = false;
+      for (const id of grant) if (id && !d.owned.includes(id)) { d.owned.push(id); granted = true; }
+      // Kept at once: unsaved, it would be granted again next visit from
+      // whatever car the settings name by then, and this one lost.
+      if (granted) { try { if (storage) storage.setItem(PROGRESS_KEY, JSON.stringify(d)); } catch { /* private mode */ } }
+    }
     return d;
   }
 

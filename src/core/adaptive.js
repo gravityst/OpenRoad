@@ -372,6 +372,7 @@ export function createAdaptiveQuality(opts = {}) {
           // never changed.
           if (level > descentFrom && p50 > 0.9 * baselineP50 && sameWork(cpu50, baselineCpu)) {
             hold();
+            idleStreak = 0;
             const back = descentFrom;
             learnNotPixels();
             return setLevel(back, 'slow, but not the pixels');

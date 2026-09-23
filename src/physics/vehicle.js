@@ -335,7 +335,7 @@ export function createVehicle(opts = {}) {
   const wheelG = [{}, {}, {}, {}];
   const wheelSurf = ['asphalt', 'asphalt', 'asphalt', 'asphalt'];
   const offs = [[0, 0], [0, 0], [0, 0], [0, 0]];
-  const axleOut = { x: 0, y: 0 };
+  const axleOut = { x: 0, y: 0, spin: 0 };
   let hbHold = 0;            // s the stability aid stays stood down after the handbrake
 
   function forwardX() { return -Math.sin(car.yaw); }
@@ -443,6 +443,12 @@ export function createVehicle(opts = {}) {
    */
   function frictionCircle(fx, fy, cap) {
     const need = Math.hypot(fx, fy);
+    // `spin` is the wheels genuinely spinning or locked: demand past the limit.
+    // The blend below starts a little earlier, at 85%, which is where the force
+    // starts to bend toward a sliding tyre's — but traction control holds an
+    // axle at 95% all the way through a hard launch, and calling that a spin
+    // put smoke under every car that was simply accelerating.
+    axleOut.spin = cap > 0 ? smoothstep(1.0, 1.35, Math.abs(fx) / cap) : 0;
     if (need <= cap || cap <= 0) { axleOut.x = fx; axleOut.y = fy; return 0; }
     // Proportional share while the wheels are still rolling...
     const k = cap / need;
@@ -773,10 +779,10 @@ export function createVehicle(opts = {}) {
     const fxF = driveF - dir * (brakeF + escBrake);
     const fxR = driveR - dir * (brakeR + handForce);
 
-    const slideF = frictionCircle(fxF, fyF, capF);
-    const FxF = axleOut.x, FyF = axleOut.y;
-    const slideR = frictionCircle(fxR, fyR, capR);
-    const FxR = axleOut.x, FyR = axleOut.y;
+    frictionCircle(fxF, fyF, capF);
+    const FxF = axleOut.x, FyF = axleOut.y, slideF = axleOut.spin;
+    frictionCircle(fxR, fyR, capR);
+    const FxR = axleOut.x, FyR = axleOut.y, slideR = axleOut.spin;
     const ax0 = car.axles;
     ax0.capF = capF; ax0.capR = capR; ax0.fxF = FxF; ax0.fyF = FyF; ax0.fxR = FxR; ax0.fyR = FyR;
 

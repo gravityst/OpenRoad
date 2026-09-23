@@ -41,7 +41,13 @@
   -webkit-user-select: none;
   transition: opacity 220ms ease;
 }
-.goal.is-hidden { opacity: 0; }
+/* Hidden means GONE, not just transparent: visibility follows the fade, so
+ * nothing in a hidden overlay — the medal card's buttons above all — can be
+ * seen or clicked over a menu. The medal card sets its own visibility when it
+ * is on, which would otherwise win over the parent's, hence the second rule. */
+.goal.is-hidden { opacity: 0; visibility: hidden; transition: opacity 220ms ease, visibility 0s linear 220ms; }
+.goal.is-hidden .goal__result,
+.goal.is-hidden .goal__result.is-on { visibility: hidden; }
 .goal.is-hidden * { animation-play-state: paused !important; }
 .goal svg { display: block; width: 100%; height: 100%; }
 
@@ -421,9 +427,356 @@
 .goal__controls p { margin: 0; font-size: calc(var(--g-u) * 1); font-weight: 700; }
 .goal__controls em { font-style: normal; color: var(--g-gps); }
 
+/* ---- the next reward, under the wallet ---------------------------------------- */
+
+.goal__next {
+  position: relative;
+  display: none;
+  align-items: center;
+  justify-content: flex-end;
+  gap: calc(var(--g-u) * 0.4);
+  padding: calc(var(--g-u) * 0.3) calc(var(--g-u) * 0.7);
+  border-radius: 999px;
+  border: 1px solid var(--g-edge);
+  background: var(--g-panel);
+  font-size: calc(var(--g-u) * 0.95);
+  font-weight: 800;
+  color: var(--g-dim);
+  text-shadow: 0 1px calc(var(--g-u) * 0.4) rgba(0, 0, 0, 0.8);
+  overflow: hidden;
+}
+.goal__next.is-on { display: flex; }
+/* The pill fills toward the reward it names: the XP bar and the promise are
+   one thing to look at, not two. */
+.goal__nextBar { position: absolute; inset: 0; z-index: -1; display: block; }
+.goal__nextBar i {
+  display: block;
+  height: 100%;
+  transform-origin: left;
+  transform: scaleX(0);
+  background: linear-gradient(90deg, rgba(79, 216, 240, 0.12), rgba(79, 216, 240, 0.34));
+  transition: transform 400ms ease;
+}
+.goal__next { isolation: isolate; }
+.goal__nextLv { color: var(--g-gps); letter-spacing: 0.06em; }
+.goal__nextLv::after { content: " \25B8"; color: var(--g-dim); }
+.goal__nextIcon { width: calc(var(--g-u) * 1.2); height: calc(var(--g-u) * 1.2); color: var(--g-token); }
+.goal__next[data-type="car"] .goal__nextIcon { color: #7ef29a; }
+.goal__next[data-type="paint"] .goal__nextIcon { color: #ff7ac4; }
+.goal__nextText { color: var(--g-ink); }
+
+/* ---- today's dailies ------------------------------------------------------------ */
+
+.goal__daily {
+  display: none;
+  flex-direction: column;
+  gap: calc(var(--g-u) * 0.3);
+  padding: calc(var(--g-u) * 0.5) calc(var(--g-u) * 0.8) calc(var(--g-u) * 0.6);
+  border: 1px solid var(--g-edge);
+  border-radius: calc(var(--g-u) * 0.85);
+  background: var(--g-panel);
+  box-shadow: var(--g-shadow);
+}
+.goal__daily.is-on { display: flex; }
+.goal__dHead {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--g-u) * 0.4);
+  font-size: calc(var(--g-u) * 0.85);
+  letter-spacing: 0.16em;
+  color: var(--g-dim);
+}
+.goal__dIcon { width: calc(var(--g-u) * 1.1); height: calc(var(--g-u) * 1.1); color: #9be7ff; }
+.goal__streak {
+  display: none;
+  align-items: center;
+  gap: calc(var(--g-u) * 0.2);
+  margin-left: auto;
+  padding: calc(var(--g-u) * 0.08) calc(var(--g-u) * 0.45);
+  border-radius: 999px;
+  background: rgba(255, 207, 58, 0.16);
+  color: #ffe08a;
+  font-size: calc(var(--g-u) * 0.8);
+  font-weight: 900;
+  letter-spacing: 0.06em;
+}
+.goal__streak.is-on { display: inline-flex; }
+.goal__streak i { width: calc(var(--g-u) * 0.9); height: calc(var(--g-u) * 0.9); }
+.goal__streak.is-due { animation: goal-blink 1.4s ease-in-out infinite; }
+.goal__daily.is-all { border-color: rgba(92, 242, 154, 0.45); }
+.goal__dRow {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  grid-template-rows: auto auto;
+  align-items: center;
+  column-gap: calc(var(--g-u) * 0.45);
+  row-gap: calc(var(--g-u) * 0.18);
+  font-size: calc(var(--g-u) * 0.98);
+  font-weight: 700;
+}
+.goal__dTick {
+  grid-row: 1 / 3;
+  width: calc(var(--g-u) * 1.1);
+  height: calc(var(--g-u) * 1.1);
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.28);
+}
+.goal__dRow[data-tier="1"] .goal__dTick { border-color: rgba(79, 216, 240, 0.55); }
+.goal__dRow[data-tier="2"] .goal__dTick { border-color: rgba(228, 92, 255, 0.6); }
+.goal__dText { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.goal__dNum { font-style: normal; font-family: var(--g-mono); font-size: 0.9em; color: var(--g-dim); }
+.goal__dBar {
+  grid-column: 2 / 4;
+  display: block;
+  height: calc(var(--g-u) * 0.22);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+}
+.goal__dBar i { display: block; height: 100%; background: #9be7ff; transform: scaleX(0); transform-origin: left; transition: transform 400ms ease; }
+.goal__dRow.is-done .goal__dTick { border-color: #5cf29a; background: #5cf29a radial-gradient(circle, #0b0e13 0 28%, transparent 30%); }
+.goal__dRow.is-done .goal__dText { color: var(--g-dim); text-decoration: line-through rgba(255, 255, 255, 0.35); }
+.goal__dRow.is-done .goal__dNum { color: #5cf29a; }
+.goal__dRow.is-done .goal__dBar i { background: #5cf29a; }
+
+/* ---- the skill chain ------------------------------------------------------------ */
+
+.goal__chain {
+  --tier: #dfe9f2;
+  position: absolute;
+  left: 50%;
+  top: calc(var(--g-gap) + env(safe-area-inset-top, 0px) + var(--g-u) * 5.9);
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: calc(var(--g-u) * 0.3);
+  min-width: calc(var(--g-u) * 15);
+}
+.goal__chain[data-tier="1"] { --tier: #4fd8f0; }
+.goal__chain[data-tier="2"] { --tier: #ffb43c; }
+.goal__chain[data-tier="3"] { --tier: #ff5fd2; }
+.goal__chainRow {
+  display: flex;
+  align-items: baseline;
+  gap: calc(var(--g-u) * 0.7);
+  padding: calc(var(--g-u) * 0.25) calc(var(--g-u) * 1.1) calc(var(--g-u) * 0.3);
+  border-radius: 999px;
+  border: 1px solid var(--g-edge);
+  background: var(--g-panel);
+  box-shadow: var(--g-shadow), 0 0 calc(var(--g-u) * 1.4) color-mix(in srgb, var(--tier) 30%, transparent);
+  opacity: 0;
+  transform: translateY(calc(var(--g-u) * -0.8)) scale(0.9);
+  transition: opacity 160ms ease, transform 220ms cubic-bezier(0.2, 1.5, 0.4, 1);
+}
+.goal__chainBar {
+  width: 100%;
+  height: calc(var(--g-u) * 0.3);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+  opacity: 0;
+  transition: opacity 160ms ease;
+}
+.goal__chainBar i { display: block; height: 100%; background: var(--tier); transform-origin: left; transform: scaleX(0); }
+.goal__chain.is-live .goal__chainRow { opacity: 1; transform: none; }
+.goal__chain.is-live .goal__chainBar { opacity: 1; }
+.goal__chainBest {
+  display: none;
+  font-family: var(--g-mono);
+  font-size: calc(var(--g-u) * 0.8);
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: var(--g-dim);
+  text-shadow: 0 1px calc(var(--g-u) * 0.4) rgba(0, 0, 0, 0.9);
+}
+.goal__chainBest:empty { display: none !important; }
+.goal__chain.is-live .goal__chainBest { display: block; }
+.goal__chain.is-record .goal__chainBest { color: #ffe08a; animation: goal-blink 0.9s ease-in-out infinite; }
+.goal__chain.is-record .goal__chainRow { box-shadow: var(--g-shadow), 0 0 calc(var(--g-u) * 2) rgba(255, 210, 63, 0.55); }
+/* A skill in progress pauses the bank timer; the bar says so by breathing. */
+.goal__chain.is-hold .goal__chainBar i { animation: goal-hold 0.8s ease-in-out infinite; }
+@keyframes goal-hold { 50% { filter: brightness(1.8); } }
+.goal__mult {
+  font-size: calc(var(--g-u) * 2.3);
+  font-weight: 900;
+  color: var(--tier);
+  text-shadow: 0 0 calc(var(--g-u) * 0.9) color-mix(in srgb, var(--tier) 60%, transparent);
+}
+.goal__mult.is-up { animation: goal-multup 0.42s cubic-bezier(0.2, 1.8, 0.4, 1); }
+@keyframes goal-multup { 0% { transform: scale(1.6); } 100% { transform: none; } }
+.goal__chainVal { font-family: var(--g-mono); font-size: calc(var(--g-u) * 1.9); font-weight: 800; }
+
+.goal__chainEnd {
+  position: absolute;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  opacity: 0;
+  pointer-events: none;
+  white-space: nowrap;
+  text-shadow: 0 calc(var(--g-u) * 0.15) calc(var(--g-u) * 0.8) rgba(0, 0, 0, 0.8);
+}
+.goal__chainEnd b { font-size: calc(var(--g-u) * 2.4); font-weight: 900; letter-spacing: 0.03em; }
+.goal__chainEnd span { font-size: calc(var(--g-u) * 1.05); font-weight: 800; }
+.goal__chainEnd.is-on { animation: goal-end 2.6s ease-out forwards; }
+.goal__chainEnd.is-bank b { color: #ffe08a; }
+.goal__chainEnd.is-bank span { color: #fff3c4; }
+.goal__chainEnd.is-best b { color: #fff; text-shadow: 0 0 calc(var(--g-u) * 1.5) #ffd23f, 0 calc(var(--g-u) * 0.15) calc(var(--g-u) * 0.8) rgba(0, 0, 0, 0.8); }
+.goal__chainEnd.is-lost b { color: #ff8a7a; }
+.goal__chainEnd.is-lost span { color: var(--g-dim); }
+.goal__chainEnd.is-lost { animation: goal-lost 2s ease-out forwards; }
+@keyframes goal-end {
+  0% { opacity: 0; transform: scale(1.5); }
+  12% { opacity: 1; transform: scale(1); }
+  80% { opacity: 1; }
+  100% { opacity: 0; transform: translateY(calc(var(--g-u) * -1)); }
+}
+@keyframes goal-lost {
+  0% { opacity: 0; transform: translateX(0); }
+  8% { opacity: 1; transform: translateX(calc(var(--g-u) * -0.8)); }
+  16% { transform: translateX(calc(var(--g-u) * 0.6)); }
+  24% { transform: translateX(calc(var(--g-u) * -0.3)); }
+  32% { transform: none; }
+  80% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+.goal__feed { display: flex; flex-direction: column; align-items: center; gap: calc(var(--g-u) * 0.2); }
+.goal__feedItem {
+  --k: #dfe9f2;
+  display: flex;
+  align-items: baseline;
+  gap: calc(var(--g-u) * 0.5);
+  font-weight: 900;
+  text-shadow: 0 1px calc(var(--g-u) * 0.5) rgba(0, 0, 0, 0.9);
+  animation: goal-feed 0.3s cubic-bezier(0.2, 1.7, 0.4, 1);
+  transition: opacity 380ms ease, transform 380ms ease;
+}
+.goal__feedItem b { font-size: calc(var(--g-u) * 1.3); letter-spacing: 0.05em; color: var(--k); }
+.goal__feedItem span { font-family: var(--g-mono); font-size: calc(var(--g-u) * 1.15); color: #fff; }
+.goal__feedItem.is-out { opacity: 0; transform: translateY(calc(var(--g-u) * 0.6)); }
+.goal__feedItem[data-kind="near"] { --k: #7ef29a; }
+.goal__feedItem[data-kind="oncoming"] { --k: #ff9d5c; }
+.goal__feedItem[data-kind="tow"], .goal__feedItem[data-kind="sling"] { --k: #9be7ff; }
+.goal__feedItem[data-kind="air"] { --k: var(--g-jump); }
+.goal__feedItem[data-kind="speed"] { --k: var(--g-trap); }
+.goal__feedItem[data-kind="drift"] { --k: #f6a8ff; }
+.goal__feedItem[data-kind="clean"] { --k: #c9f7ff; }
+@keyframes goal-feed { 0% { opacity: 0; transform: scale(1.7); } 100% { opacity: 1; transform: none; } }
+
+/* ---- celebrations: the banner ------------------------------------------------------- */
+
+.goal__banner {
+  --k: #4fd8f0;
+  position: absolute;
+  left: 50%;
+  top: 30%;
+  transform: translate(-50%, -50%) scale(0.8);
+  width: min(calc(var(--g-u) * 36), 90vw);
+  padding: calc(var(--g-u) * 1) calc(var(--g-u) * 1.6) calc(var(--g-u) * 1.1);
+  border-radius: calc(var(--g-u) * 1.2);
+  border: 1px solid color-mix(in srgb, var(--k) 55%, transparent);
+  background: linear-gradient(180deg, rgba(12, 16, 23, 0.86), rgba(9, 12, 17, 0.78));
+  box-shadow: var(--g-shadow), 0 0 calc(var(--g-u) * 4) color-mix(in srgb, var(--k) 35%, transparent);
+  text-align: center;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 260ms ease, transform 260ms ease, visibility 0s linear 260ms;
+}
+.goal__banner.is-on {
+  opacity: 1;
+  visibility: visible;
+  transform: translate(-50%, -50%);
+  transition: opacity 200ms ease, transform 420ms cubic-bezier(0.2, 1.6, 0.4, 1), visibility 0s;
+}
+.goal__banner[data-kind="level"] { --k: #ffd23f; }
+.goal__banner[data-kind="sweep"] { --k: #5cf29a; }
+.goal__banner[data-kind="welcome"] { --k: #ffb43c; }
+.goal__bTitle {
+  font-size: calc(var(--g-u) * 3.6);
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  line-height: 1.05;
+  color: #fff;
+  text-shadow: 0 0 calc(var(--g-u) * 1.6) var(--k);
+}
+.goal__banner.is-on .goal__bTitle { animation: goal-title 0.9s ease-out; }
+@keyframes goal-title { 0% { letter-spacing: 0.4em; opacity: 0; } 60% { letter-spacing: 0.02em; opacity: 1; } }
+.goal__bSub { margin-top: calc(var(--g-u) * 0.4); font-size: calc(var(--g-u) * 1.45); font-weight: 800; color: var(--k); }
+.goal__bDetail {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: calc(var(--g-u) * 0.5);
+  margin-top: calc(var(--g-u) * 0.45);
+  font-size: calc(var(--g-u) * 1);
+  font-weight: 700;
+  color: var(--g-dim);
+}
+.goal__bDetail:empty { display: none; }
+.goal__swatch {
+  width: calc(var(--g-u) * 1.5);
+  height: calc(var(--g-u) * 1.5);
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.6), 0 0 calc(var(--g-u) * 0.8) rgba(255, 255, 255, 0.3);
+}
+
+/* ---- notes: trophies, dailies, the streak ------------------------------------------- */
+
+.goal__notes {
+  position: absolute;
+  left: calc(var(--g-gap) + env(safe-area-inset-left, 0px));
+  top: 40%;
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--g-u) * 0.5);
+  width: min(calc(var(--g-u) * 24), 60vw);
+}
+.goal__note {
+  --k: #ffd23f;
+  display: flex;
+  align-items: center;
+  gap: calc(var(--g-u) * 0.7);
+  padding: calc(var(--g-u) * 0.6) calc(var(--g-u) * 0.9);
+  border-radius: calc(var(--g-u) * 0.8);
+  border: 1px solid var(--g-edge);
+  border-left: calc(var(--g-u) * 0.3) solid var(--k);
+  background: var(--g-panel);
+  box-shadow: var(--g-shadow), 0 0 calc(var(--g-u) * 1.4) color-mix(in srgb, var(--k) 25%, transparent);
+  animation: goal-note-in 0.45s cubic-bezier(0.2, 1.4, 0.4, 1);
+  transition: opacity 400ms ease, transform 400ms ease;
+}
+.goal__note.is-out { opacity: 0; transform: translateX(calc(var(--g-u) * -3)); }
+.goal__note--daily { --k: #5cf29a; }
+.goal__note--streak { --k: #ffcf3a; }
+@keyframes goal-note-in { 0% { opacity: 0; transform: translateX(calc(var(--g-u) * -4)); } 100% { opacity: 1; transform: none; } }
+.goal__noteIcon { flex: none; width: calc(var(--g-u) * 2.2); height: calc(var(--g-u) * 2.2); color: var(--k); }
+.goal__note b { display: block; font-size: calc(var(--g-u) * 0.8); letter-spacing: 0.18em; color: var(--k); }
+.goal__noteText { display: block; font-size: calc(var(--g-u) * 1.25); font-weight: 900; }
+.goal__note em { display: block; font-style: normal; font-size: calc(var(--g-u) * 0.9); font-weight: 700; color: var(--g-dim); }
+
+/* ---- the flash ----------------------------------------------------------------------- */
+
+.goal__flash {
+  --k: 0.3;
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(ellipse at 50% 42%, rgba(255, 244, 214, 1), rgba(255, 214, 120, 0.35) 45%, transparent 75%);
+  opacity: 0;
+}
+.goal__flash.is-on { animation: goal-flash 0.6s ease-out; }
+@keyframes goal-flash { 0% { opacity: var(--k); } 100% { opacity: 0; } }
+
+.goal__resNext.is-level { color: #ffd23f; font-size: calc(var(--g-u) * 1.1); font-weight: 900; }
+
 @media (max-width: 640px) {
   .goal__col { width: min(calc(var(--g-u) * 25), 58vw); }
   .goal__controls { width: 88vw; }
+  .goal__notes { top: 46%; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -551,3 +904,215 @@
 .or-btn.is-bought { animation: or-bought 0.6s ease; }
 @keyframes or-bought { 40% { transform: scale(1.08); box-shadow: 0 0 24px rgba(255, 207, 58, 0.6); } }
 .or-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+
+/* ===========================================================================
+ * The long game, in the menus: the title's career card, today's dailies (on
+ * the title and the pause card), the trophies screen and the paint shop.
+ * ======================================================================== */
+
+/* ---- the career card, bottom right of the title ------------------------------- */
+
+.or-career {
+  position: absolute;
+  right: var(--or-pad, 24px);
+  bottom: var(--or-pad, 24px);
+  width: min(340px, 34vw);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 18px;
+  border: 1px solid var(--or-line, rgba(255, 255, 255, 0.1));
+  border-radius: var(--or-r, 14px);
+  background: var(--or-glass, rgba(11, 15, 21, 0.58));
+  backdrop-filter: blur(18px) saturate(1.1);
+  box-shadow: var(--or-shadow, 0 18px 50px rgba(0, 0, 0, 0.45));
+  color: var(--or-text, #eef2f6);
+}
+.or-career[hidden] { display: none; }
+.or-career-level { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 4px 12px; }
+.or-career-lv { font: 800 1.35rem/1 var(--or-display, system-ui, sans-serif); letter-spacing: 0.02em; }
+.or-career-xp { display: block; height: 8px; border-radius: 999px; background: rgba(255, 255, 255, 0.12); overflow: hidden; }
+.or-career-xp i { display: block; height: 100%; background: linear-gradient(90deg, #4fd8f0, #9be7ff); }
+.or-career-xpnum { grid-column: 2; justify-self: end; font: 600 0.7rem/1 var(--or-mono, ui-monospace, monospace); color: var(--or-text-3, rgba(238, 242, 246, 0.4)); }
+.or-career-next {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(255, 207, 58, 0.1);
+  border: 1px solid rgba(255, 207, 58, 0.25);
+  font: 600 0.8rem/1.3 var(--or-body, system-ui, sans-serif);
+  color: var(--or-text-2, rgba(238, 242, 246, 0.66));
+}
+.or-career-next b { color: #ffe08a; }
+.or-career-next[data-type="car"] { background: rgba(126, 242, 154, 0.1); border-color: rgba(126, 242, 154, 0.3); }
+.or-career-next[data-type="car"] b { color: #7ef29a; }
+.or-career-chip { width: 14px; height: 14px; border-radius: 50%; box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.5); }
+.or-career-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.or-career-trophies { padding: 8px 12px; font-size: 0.74rem; }
+.or-career-best { font: 700 0.74rem/1 var(--or-mono, ui-monospace, monospace); color: #ffe08a; }
+
+/* ---- today's dailies: a list the title and the pause card share --------------- */
+
+.or-daily { display: flex; flex-direction: column; gap: 8px; text-align: left; }
+.or-daily-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0;
+  font: 700 0.68rem/1 var(--or-body, system-ui, sans-serif);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: #9be7ff;
+}
+.or-streak {
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: rgba(255, 207, 58, 0.16);
+  color: #ffe08a;
+  letter-spacing: 0.06em;
+}
+.or-streak::before { content: "\26A1\FE0E  "; }
+.or-streak.is-due { animation: or-due 1.4s ease-in-out infinite; }
+@keyframes or-due { 50% { opacity: 0.55; } }
+.or-daily-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.or-daily-item {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 4px 9px;
+  font: 600 0.84rem/1.25 var(--or-body, system-ui, sans-serif);
+}
+.or-daily-tick { grid-row: 1 / 3; width: 16px; height: 16px; border-radius: 50%; border: 2px solid rgba(255, 255, 255, 0.3); }
+.or-daily-item[data-tier="1"] .or-daily-tick { border-color: rgba(79, 216, 240, 0.6); }
+.or-daily-item[data-tier="2"] .or-daily-tick { border-color: rgba(228, 92, 255, 0.65); }
+.or-daily-num { font: 600 0.72rem/1 var(--or-mono, ui-monospace, monospace); font-style: normal; color: var(--or-text-3, rgba(238, 242, 246, 0.4)); }
+.or-daily-bar { grid-column: 2 / 4; display: block; height: 4px; border-radius: 999px; background: rgba(255, 255, 255, 0.1); overflow: hidden; }
+.or-daily-bar i { display: block; height: 100%; background: #9be7ff; }
+.or-daily-item.is-done .or-daily-tick { border-color: #5cf29a; background: #5cf29a radial-gradient(circle, #0b0e13 0 26%, transparent 30%); }
+.or-daily-item.is-done .or-daily-text { color: var(--or-text-3, rgba(238, 242, 246, 0.4)); text-decoration: line-through; }
+.or-daily-item.is-done .or-daily-num { color: #5cf29a; }
+.or-daily-item.is-done .or-daily-bar i { background: #5cf29a; }
+.or-daily-foot { margin: 0; font: 600 0.72rem/1.3 var(--or-body, system-ui, sans-serif); color: var(--or-text-3, rgba(238, 242, 246, 0.4)); }
+
+.or-pause-daily { margin: 0 0 16px; padding: 12px 14px; border-radius: 12px; background: rgba(255, 255, 255, 0.04); border: 1px solid var(--or-line, rgba(255, 255, 255, 0.1)); }
+.or-pause-daily[hidden] { display: none; }
+.or-pause-daily .or-daily-item { font-size: 0.78rem; }
+
+/* ---- the trophies screen ---------------------------------------------------------- */
+
+.or-trophies { align-items: center; }
+.or-trophies .or-topbar { width: min(1000px, 100%); }
+.or-trophy-count { margin: 0 0 0 auto; font: 700 0.9rem/1 var(--or-mono, ui-monospace, monospace); color: #ffe08a; }
+.or-trophy-grid {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: min(1000px, 100%);
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  align-content: start;
+  gap: 10px;
+  padding: 2px;
+}
+.or-trophy {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid var(--or-line, rgba(255, 255, 255, 0.1));
+  background: var(--or-glass, rgba(11, 15, 21, 0.58));
+  color: var(--or-text-2, rgba(238, 242, 246, 0.66));
+}
+.or-trophy.is-got { border-color: rgba(255, 210, 63, 0.45); background: linear-gradient(135deg, rgba(255, 210, 63, 0.14), rgba(11, 15, 21, 0.6)); color: var(--or-text, #eef2f6); }
+.or-trophy-cup {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.14);
+}
+.or-trophy.is-got .or-trophy-cup { background: radial-gradient(circle at 35% 30%, #fff3a8, #ffcd2e 45%, #c98a06); box-shadow: 0 0 12px rgba(255, 205, 46, 0.5); }
+.or-trophy-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.or-trophy-text b { font: 700 0.9rem/1.2 var(--or-body, system-ui, sans-serif); }
+.or-trophy-text span { font: 500 0.76rem/1.35 var(--or-body, system-ui, sans-serif); }
+.or-trophy-bar { display: block; height: 4px; margin-top: 4px; border-radius: 999px; background: rgba(255, 255, 255, 0.1); overflow: hidden; }
+.or-trophy-bar i { display: block; height: 100%; background: #9be7ff; }
+.or-trophy em { flex: none; font: 700 0.7rem/1 var(--or-mono, ui-monospace, monospace); font-style: normal; color: #ffe08a; }
+.or-trophy-foot { flex: 0 0 auto; display: flex; justify-content: flex-end; width: min(1000px, 100%); margin-top: 14px; }
+
+/* ---- the paint shop ---------------------------------------------------------------- */
+
+.or-paintshop {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  padding-top: 12px;
+  margin-top: 10px;
+  border-top: 1px solid var(--or-line, rgba(255, 255, 255, 0.1));
+}
+.or-paintshop[hidden] { display: none; }
+.or-swatches--shop { flex-wrap: wrap; gap: 6px; }
+.or-swatch--shop { width: 24px; height: 24px; }
+.or-swatch--shop.is-locked { position: relative; opacity: 0.8; }
+.or-swatch--shop.is-locked::after {
+  content: "";
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: #0b0e13 radial-gradient(circle, #ffe08a 0 30%, transparent 34%);
+  box-shadow: 0 0 0 1px rgba(255, 224, 138, 0.6);
+}
+.or-paint-name { flex-basis: 100%; margin: 0; font: 600 0.76rem/1.3 var(--or-body, system-ui, sans-serif); color: var(--or-text-2, rgba(238, 242, 246, 0.66)); }
+
+/* The career card is a right-hand column on a laptop and folds under the
+   buttons on anything narrower, where it would sit on top of them. */
+@media (max-width: 980px) {
+  .or-career { position: static; width: min(640px, 92%); margin-top: 14px; }
+  .or-career .or-daily-foot { display: none; }
+}
+@media (max-width: 640px), (max-height: 560px) {
+  .or-career { display: none; }
+}
+
+/* With the next-reward pill showing the XP, the wallet's own little bar is a
+   second copy of the same number. */
+.goal__col:has(.goal__next.is-on) .goal__xp { display: none; }
+
+/* ---- the pause card, with today's dailies in it -----------------------------------
+ * The dailies made the card taller than a 768-pixel laptop screen once the
+ * Trophies button joined the list (measured at 800x500: title and "Quit to
+ * title" both off screen). On anything wide enough the dailies sit beside the
+ * buttons instead of above them; on a short screen the buttons get tighter,
+ * and on a very short one the dailies go — the HUD shows them while driving. */
+@media (min-width: 700px) {
+  .or-pause .or-card:has(.or-pause-daily:not([hidden])) {
+    width: min(700px, 100%);
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    column-gap: 22px;
+    align-items: start;
+  }
+  .or-pause .or-card:has(.or-pause-daily:not([hidden])) > .or-eyebrow,
+  .or-pause .or-card:has(.or-pause-daily:not([hidden])) > .or-card-title,
+  .or-pause .or-card:has(.or-pause-daily:not([hidden])) > .or-pause-progress { grid-column: 1 / -1; }
+  .or-pause .or-pause-daily { margin: 0; }
+}
+@media (max-height: 640px) {
+  .or-pause .or-card-title { margin: 0.1em 0 0.5em; font-size: 1.6rem; }
+  .or-pause .or-menu-list { gap: 6px; }
+  .or-pause .or-menu-list .or-btn { min-height: 36px; }
+}
+@media (max-height: 460px) {
+  .or-pause-daily { display: none !important; }
+}

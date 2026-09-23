@@ -529,9 +529,14 @@ async function boot() {
     teleported = true;
     if (wreck) wreck.reset();
   }
+  // The drift scorer counts only if it really built: when createDrift()
+  // throws, `drift` is the stub, whose bank never moves, and every drift zone
+  // would be on the map and impossible to score. The stub is the one whose
+  // update is NOOP.
+  const driftLive = drift.update !== NOOP;
   const goals = mGoals ? safe(() => mGoals.createGoals({
     world, ground, car, settings, place: placeCar,
-    drift: mDrift ? drift : null, particles, cars: CARS,
+    drift: driftLive ? drift : null, particles, cars: CARS, audio,
     grant: settings.car ? [settings.car] : [],
     toast: (m, secs) => hud.toast(m, secs),
     scene, root: document.getElementById('hud'),

@@ -61,6 +61,8 @@ const TOKEN_R = 5.5;            // m pickup radius, generous: a token is a gift
  *   place(x, z, yaw)      put the car somewhere as a cut (main.js marks the
  *                         teleport for multiplayer); defaults to car.reset
  *   settings              live settings object (volume)
+ *   audio                 the engine audio layer, or its stub: the chimes
+ *                         stay quiet while its `muted` is true (N)
  *   drift                 the drift scorer's handle, or null
  *   particles             for pickup sparkles, optional
  *   toast(msg, secs)      the HUD toast, optional
@@ -123,7 +125,13 @@ export function createGoals(opts) {
   }
 
   const progress = createProgress({ storage: opts.storage, cars: opts.cars || [], grant: opts.grant || [] });
-  const sfx = opts.sfx === false ? null : createSfx({ volume: () => (settings.volume != null ? settings.volume : 0.8) });
+  // The chimes run on their own context, so the engine audio's mute (N) does
+  // not reach them by wiring; they ask it before every sound instead.
+  const audio = opts.audio || null;
+  const sfx = opts.sfx === false ? null : createSfx({
+    volume: () => (settings.volume != null ? settings.volume : 0.8),
+    muted: () => !!(audio && audio.muted),
+  });
   const play = (n) => { if (sfx) sfx.play(n); };
 
   const rookie = list.find((c) => c.rookie) || list.find((c) => c.kind === 'race') || null;

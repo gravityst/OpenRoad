@@ -12,8 +12,9 @@
 //   * each sound is a few hundred milliseconds of enveloped oscillator, with
 //     no sustain phase that could ever be left running.
 //
-// If the audio layer comes back, connect() routes these into its master bus
-// instead, so the one volume slider still governs everything.
+// They read the same volume setting as the engine audio, and goals.js hands
+// in its `muted` flag, so the N key silences these as well. connect() can
+// route them onto another module's context and bus instead of their own.
 
 const CEILING = 0.22;
 
@@ -39,9 +40,12 @@ const SOUNDS = {
 /**
  * opts.volume   () => 0..1, read at every sound, so the settings slider
  *               applies immediately
+ * opts.muted    () => boolean, read at every sound: the engine audio's mute
+ *               key (N) silences these too, though they are not on its bus
  */
 export function createSfx(opts = {}) {
   const volume = typeof opts.volume === 'function' ? opts.volume : () => 0.8;
+  const muted = typeof opts.muted === 'function' ? opts.muted : () => false;
   let ctx = null, master = null, limiter = null, external = null;
   let broken = typeof window === 'undefined' ||
     (typeof window.AudioContext === 'undefined' && typeof window.webkitAudioContext === 'undefined');
@@ -72,8 +76,9 @@ export function createSfx(opts = {}) {
 
   function play(name) {
     const notes = SOUNDS[name];
+    if (!notes || muted()) return;
     const v = Math.max(0, Math.min(1, Number(volume()) || 0));
-    if (!notes || v <= 0.001 || !ensure()) return;
+    if (v <= 0.001 || !ensure()) return;
     if (ctx.state === 'suspended' && ctx.resume) ctx.resume().catch(() => {});
     const now = ctx.currentTime + 0.01;
     master.gain.setValueAtTime(CEILING * v, now);

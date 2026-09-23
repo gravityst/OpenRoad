@@ -321,6 +321,39 @@ check('every medal table is strictly ordered', tableBad === 0, `${tableBad} tabl
   g7.dispose();
 }
 
+// The chimes run on their own AudioContext, so the engine audio's mute key
+// (N) cannot reach them by wiring. They ask its \`muted\` flag before every
+// sound. Counted on a stand-in context: oscillators made while muted, and after.
+{
+  let oscs = 0;
+  const node = () => ({ connect() {}, gain: { value: 0, setValueAtTime() {}, linearRampToValueAtTime() {}, exponentialRampToValueAtTime() {} } });
+  class FakeContext {
+    constructor() { this.currentTime = 0; this.state = 'running'; this.destination = {}; }
+    createGain() { return node(); }
+    createDynamicsCompressor() { return { connect() {}, threshold: {}, knee: {}, ratio: {}, attack: {}, release: {} }; }
+    createOscillator() { oscs++; return { type: '', frequency: { setValueAtTime() {} }, connect() {}, start() {}, stop() {} }; }
+    close() {}
+  }
+  const hadWindow = 'window' in globalThis;
+  globalThis.window = { AudioContext: FakeContext, addEventListener() {}, removeEventListener() {} };
+  try {
+    const audio = { muted: true };
+    const fake = { x: 0, z: 0, y: 0, yaw: 0, speed: 0, vx: 0, vz: 0, airborne: false, airTime: 0, spec: { rideHeight: 0.3 },
+      reset(x, z, yaw) { this.x = x; this.z = z; this.yaw = yaw; } };
+    const g8 = createGoals({ world, ground, car: fake, cars: CARS, storage: memoryStorage(), audio, settings: { volume: 0.5 }, drift: { state: {} } });
+    g8.sfx.play('gate'); g8.sfx.play('gold');
+    const whileMuted = oscs;
+    audio.muted = false;
+    g8.sfx.play('gate');
+    const afterUnmute = oscs;
+    g8.dispose();
+    check('the chimes keep quiet while the sound is muted', whileMuted === 0 && afterUnmute > 0,
+      `${whileMuted} oscillators started while muted, ${afterUnmute} once unmuted`);
+  } finally {
+    if (hadWindow) { /* leave it */ } else delete globalThis.window;
+  }
+}
+
 // ---------------------------------------------------------------------------
 console.log('\n-- saves --');
 {

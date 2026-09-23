@@ -646,17 +646,25 @@ try {
   check(far.every((d) => d < 60), 'joining tag from far away takes you to the host', far.map((d) => d.toFixed(0) + ' m').join(', '));
   await until(() => A.net.mode && A.net.mode.phase === 'run', 6000);
   await sim.run(sim.t + 50);
-  const it0 = A.net.mode.it;
+  const it0 = A.net.mode ? A.net.mode.it : -1;
   const itP = [A, B, D].find((p) => p.net.id === it0);
+  if (!itP) {
+    check(false, 'someone is IT, and every screen knows who',
+      `IT ${it0} is none of ${[A, B, D].map((p) => p.name + '#' + p.net.id).join(', ')}; game ${JSON.stringify(A.net.mode && { phase: A.net.mode.phase, ps: A.net.mode.ps.map((q) => q.id) })}`);
+    throw new Error('tag did not start as expected');
+  }
   const badges = [A, B, D].map((p) => p.modes.badge(it0));
   check(it0 > 0 && badges.every((b) => b === 'IT') && itP.modes.view.iAmIt,
     'someone is IT, and every screen knows who', `${itP.name} is IT; badges ${badges.join(',')}`);
   // IT counts to three while everyone else scatters; nobody can be tagged yet.
+  // Opposite ways: joiners brought to the host land on the same spot, and two
+  // who flee the same way end up side by side, where IT tags whichever is a
+  // centimetre nearer — not necessarily the one this check then chases.
   const flee = [A, B, D].filter((p) => p !== itP);
-  for (const p of flee) {
-    const ang = Math.atan2(p.x - itP.x, p.z - itP.z) || (p === flee[0] ? 0 : Math.PI);
-    p.drive = towards(p, () => itP.x + Math.sin(ang) * 40, () => itP.z + Math.cos(ang) * 40, 14);
-  }
+  flee.forEach((p, i) => {
+    const ang = i * Math.PI + 0.4;
+    p.drive = towards(p, () => itP.x + Math.sin(ang) * (40 + 40 * i), () => itP.z + Math.cos(ang) * (40 + 40 * i), 14);
+  });
   await sim.run(sim.t + 2800);
   check(A.net.mode.it === it0, 'IT counts to three at the start: nobody can be tagged while they scatter',
     `still ${itP.name} after 2.8 s`);
@@ -762,6 +770,10 @@ try {
   check(oldHeard.length === 0 && seen && O1.net.players === 1 && O2.net.players === 1,
     'meanwhile two protocol-1 pages drove on in their own room, seeing each other and hearing nothing of any game',
     `${oldHeard.length} game messages heard; Old One sees Old Two at ${seen ? seen.x.toFixed(0) + ', ' + seen.z.toFixed(0) : 'nowhere'}`);
+} catch (err) {
+  // A check that has already failed may stop the script (there is no game to
+  // go on testing); anything else is a bug in this harness and is thrown.
+  if (!failures) throw err;
 } finally {
   for (const p of players) { try { p.alive = false; p.net.dispose(); } catch { /* fine */ } }
   if (!LIVE) {

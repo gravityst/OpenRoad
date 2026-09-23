@@ -370,13 +370,20 @@
 
 /* The whole title is one grid, so anything another module inserts into it
    (the friends-online badge from roster.js, which goes in before the menu)
-   can be placed by name instead of landing wherever it was appended. */
+   can be placed by name instead of landing wherever it was appended.
+
+   NOTHING ON IT CAN OVERLAP OR FALL OFF. The menu's row never shrinks below
+   its content (min-content, not 0: a zero minimum let PLAY and four rows,
+   262 px, be squeezed into 190 and run under the key strip), and the grid
+   scrolls if a window is shorter than everything on it. The short-window
+   rule below makes that rare; this makes it harmless. uicheck holds every
+   layout of this grid to the same rule. */
 .or-title-inner {
   position: absolute;
   inset: 0;
   display: grid;
   grid-template-columns: minmax(300px, 440px) minmax(0, 1fr) minmax(290px, 360px);
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto minmax(min-content, 1fr) auto;
   grid-template-areas:
     "brand  .  friends"
     "next   .  career"
@@ -384,6 +391,13 @@
     "foot   foot foot";
   column-gap: var(--or-s6);
   padding: var(--or-pad-t) var(--or-pad-r) var(--or-pad-b) var(--or-pad-l);
+  overflow: hidden auto;
+  overscroll-behavior: contain;
+  /* The page is touch-action: none so a thumb never scrolls the game; a
+     list that does scroll has to say so, or on a tablet it cannot. */
+  touch-action: pan-y;
+  scrollbar-width: thin;
+  scrollbar-color: var(--or-rule-hi) transparent;
   pointer-events: none;
 }
 .or-title-inner > * { pointer-events: auto; }
@@ -399,7 +413,13 @@
 .or-logo { display: block; overflow: visible; }
 .or-logo__open { fill: var(--or-text); }
 .or-logo__road { fill: var(--or-signal); }
-.or-brand .or-logo { width: clamp(190px, 26vw, 330px); height: auto; }
+/* The stacked logotype is sized by the window's height as well as its width.
+   Everything else on the title's left column needs 607 px at 1440 wide
+   (measured: 811 px in all at 801 tall, 204 of it logotype), so the logotype
+   gets what is left, less 13 px, as a width at its 1.62:1 aspect: 330 wide
+   from 824 px tall down, 274 on a MacBook Air's 789. Under 775 px it would
+   be smaller than the one-line cut, and that takes over (below). */
+.or-brand .or-logo { width: clamp(190px, min(26vw, calc((100vh - 620px) * 1.62)), 330px); height: auto; }
 /* Two cuts of the logotype are on the page; a phone on its side, with no
    height to spare, gets the one-line one. */
 .or-brand .or-logo--line { display: none; }
@@ -1553,6 +1573,61 @@
   .or-pause-side { padding-left: 0; padding-top: 14px; border-left: 0; border-top: 1px solid var(--or-rule); }
 }
 
+/* A laptop's browser tab. Chrome leaves a 1366x768 screen 657 px of page, a
+   1280x800 one 712 and a 1536x864 one 730; an iPad on its side in Safari has
+   about 750. Under 775 px the logotype takes its one-line cut (66 px tall at
+   420 wide, against 204 stacked) and the frame's top and bottom follow the
+   height instead of the width. Measured with it: 1366x657 ends the last row
+   at 549 and the key strip starts at 603; 1024x640, 537 and 586. A phone on
+   its side (500 and under) has a layout of its own further down. */
+@media (max-height: 775px) and (min-height: 501px) and (min-width: 621px) {
+  .or-title-inner {
+    --or-pad-t: calc(clamp(16px, 3.6vh, 32px) + env(safe-area-inset-top, 0px));
+    --or-pad-b: calc(clamp(16px, 3.6vh, 32px) + env(safe-area-inset-bottom, 0px));
+  }
+  .or-brand { gap: 8px; margin-bottom: clamp(14px, 3vh, 24px); }
+  .or-brand .or-logo--stacked { display: none; }
+  .or-brand .or-logo--line { display: block; width: clamp(300px, 34vw, 420px); }
+}
+
+/* A narrow window that is short as well — half of a laptop's screen, or an
+   iPad in split view. Stacking the level under the menu, as the tablet layout
+   does, puts 370 px of slab under 298 px of menu; beside it, as on a wide
+   screen, the two share the height instead. */
+@media (max-height: 775px) and (min-height: 501px) and (min-width: 621px) and (max-width: 1000px) {
+  .or-title-inner {
+    grid-template-rows: auto auto minmax(min-content, 1fr) auto;
+    grid-template-areas:
+      "brand  friends"
+      "next   career"
+      "menu   career"
+      "foot   foot";
+    column-gap: var(--or-s5);
+  }
+  .or-career { align-self: start; }
+}
+
+/* Shorter still (a laptop with a docked taskbar, a bookmarks bar and the
+   downloads shelf open): the rows and PLAY give up a little height each —
+   52 to 44 px and 74 to 60 — rather than anything being dropped. */
+@media (max-height: 640px) and (min-height: 501px) and (min-width: 621px) {
+  .or-nextup { margin-bottom: 10px; padding: 10px 16px 10px 14px; }
+  .or-play { min-height: 60px; margin-bottom: 6px; }
+  .or-play-label { font-size: 2.05rem; }
+  .or-navrow { min-height: 44px; }
+  .or-career { gap: var(--or-s3); padding: 12px 16px 14px; }
+}
+/* Under 580 the level slab is the tallest thing on the page (350 px), so its
+   last line goes (the pause card's copy of the list still says it), and the
+   rows give up two more pixels each. 1280x560 then fits; a window shorter
+   than about 540 scrolls the few pixels it is short by. */
+@media (max-height: 580px) and (min-height: 501px) and (min-width: 621px) {
+  .or-career .or-daily-foot { display: none; }
+  .or-brand { margin-bottom: 8px; }
+  .or-navrow { min-height: 42px; }
+  .or-title-foot { margin-top: var(--or-s2); }
+}
+
 /* A phone held upright: one column, top to bottom — the name, what is next,
    the menu, then the level and today's three. */
 @media (max-width: 620px) {
@@ -1561,10 +1636,6 @@
     grid-template-rows: auto auto auto auto auto minmax(0, 1fr);
     grid-template-areas: "brand" "next" "friends" "menu" "career" "foot";
     align-content: start;
-    overflow-y: auto;
-    /* The page is touch-action: none so a thumb never scrolls the game; a
-       list that does scroll has to say so, or on a phone it cannot. */
-    touch-action: pan-y;
     column-gap: 0;
   }
   .or-brand { margin-bottom: var(--or-s4); }

@@ -405,12 +405,14 @@ car.reset(0, -260, 0);
 const traffic = createTraffic(world, ground, { density: 30 });
 const drift = createDrift({ ground });
 const errors = [];
+// Every toast the goals layer raises lands here, to be read like any screen.
+const toasts = [];
 const guard = (what, fn) => { try { return fn(); } catch (err) { errors.push(`${what}: ${err.message}`); return null; } };
 
 const hud = guard('createHUD', () => createHUD(hudRoot, { world: null }));
 const goals = guard('createGoals', () => createGoals({
   world, ground, car, cars: CARS, storage: memoryStorage(), sfx: false, drift, traffic, camera: { fov: 60 },
-  today: () => '2026-09-23', root: hudRoot, createOverlay: createObjectives, toast: () => {},
+  today: () => '2026-09-23', root: hudRoot, createOverlay: createObjectives, toast: (m) => toasts.push(String(m)),
 }));
 const menus = guard('createMenus', () => createMenus(menuRoot, { world, settings: {}, handleEscape: true }));
 const touch = guard('createTouchControls', () => createTouchControls(touchRoot));
@@ -514,6 +516,21 @@ console.log('\n-- the goals overlay and its moments --');
   check('every moment shows, with no emoji', goals.errors === 0 && errors.length === 0 && p.emoji.length === 0 && seen.length > 20,
     `${moments.length} moments, ${seen.length} strings, ${goals.errors} frames threw${p.emoji.length ? `; EMOJI: ${p.emoji.join(' | ')}` : ''}`);
   check('...and none of them scolds', p.harsh.length === 0, p.harsh.length ? p.harsh.slice(0, 5).join(' | ') : 'no fire, damage or "don\'t crash"');
+
+  // Toasts are words a kid reads too. The ones this drive raised, plus a
+  // GPS cycle, plus every toast the goals layer can say at all: its literal
+  // lines are read from the source, with each ${...} as a placeholder, so a
+  // line only a rare path reaches (a drift zone missed, a race respawn) is
+  // checked without having to stage it.
+  guard('cycleTarget', () => goals.cycleTarget());
+  const src = readFileSync(join(ROOT, 'src/game/goals.js'), 'utf8');
+  // abandonRace(msg) hands its line on to toast(), so it is read too.
+  const literal = [...src.matchAll(/\b(?:toast|abandonRace)\(\s*(['`])((?:\\.|(?!\1)[^\\])*)\1/g)].map((m) => m[2].replace(/\$\{[^}]*\}/g, 'Name'));
+  const said = [...new Set([...toasts, ...literal])];
+  const t = copyProblems(said);
+  check('every toast is kind, with no emoji', toasts.length >= 2 && literal.length >= 5 && t.emoji.length === 0 && t.harsh.length === 0,
+    t.harsh.length || t.emoji.length ? [...t.harsh, ...t.emoji].slice(0, 5).join(' | ')
+      : `${toasts.length} raised in play, ${literal.length} lines in goals.js: "${toasts[0]}"`);
   goals.demo('chain');
   for (let i = 0; i < 5; i++) goals.update(1 / 60, ctx);
   goals.demo('lost');
@@ -611,6 +628,54 @@ console.log('\n-- the stylesheets --');
   const roundOk = round.every((sel) => /hud__mapCanvas|hud__dial|hud__limit|touch__(rim|hub|knob|wheel)|touch__knob::after/.test(sel));
   check('no pill chips, no frosted glass, round only where round is real', pills === 0 && blur.length === 0 && roundOk,
     `${pills} pills, blur in ${blur.join(', ') || 'nothing'}; round: ${round.map((r) => r.replace(/\s+/g, ' ')).join('; ')}`);
+
+  // The title never overlaps itself or leaves a row out of reach, at any
+  // window size. This harness has no layout engine, so it holds the grid to
+  // the two rules that make that true whatever the window is, in the base
+  // rule and every media rule that re-lays it out:
+  //   - a row with something in it, and something in a row after it, may not
+  //     shrink below its content (minmax(0, ...) or a fixed height), or its
+  //     content runs under the next row. That is how Settings ended up under
+  //     the key strip, and off the bottom, in a 1366x768 laptop's Chrome;
+  //   - the grid scrolls, so content taller than the window is still there.
+  {
+    const blocks = [...css['styles/ui.css'].matchAll(/\.or-title-inner\s*\{([^}]*)\}/g)].map((m) => m[1]);
+    const tracks = (v) => {
+      const out = []; let depth = 0, cur = '';
+      for (const ch of v.trim()) {
+        if (ch === '(') depth++;
+        if (ch === ')') depth--;
+        if (/\s/.test(ch) && depth === 0) { if (cur) out.push(cur); cur = ''; } else cur += ch;
+      }
+      if (cur) out.push(cur);
+      return out;
+    };
+    const shrinks = (t) => /^minmax\(\s*0(px)?\s*,/.test(t) || /^[\d.]+(px|rem|em|vh|%)$/.test(t);
+    const base = blocks[0] || '';
+    const baseRows = (base.match(/grid-template-rows:\s*([^;]+);/) || [])[1];
+    const baseAreas = (base.match(/grid-template-areas:\s*((?:"[^"]*"\s*)+)/) || [])[1];
+    const bad = [];
+    let layouts = 0;
+    for (const b of blocks) {
+      const rowsDecl = (b.match(/grid-template-rows:\s*([^;]+);/) || [])[1];
+      const areasDecl = (b.match(/grid-template-areas:\s*((?:"[^"]*"\s*)+)/) || [])[1];
+      if (!rowsDecl && !areasDecl) continue;
+      layouts++;
+      const rows = tracks(rowsDecl || baseRows || '');
+      const areas = [...(areasDecl || baseAreas || '').matchAll(/"([^"]*)"/g)].map((m) => m[1].trim().split(/\s+/));
+      if (rows.length !== areas.length) { bad.push(`${rows.length} rows for ${areas.length} area rows`); continue; }
+      const used = areas.map((r) => r.some((c) => !/^\.+$/.test(c)));
+      const lastUsed = used.lastIndexOf(true);
+      rows.forEach((t, i) => {
+        if (used[i] && i < lastUsed && shrinks(t)) bad.push(`"${areas[i].join(' ')}" is ${t}`);
+      });
+    }
+    const scrolls = /overflow(-y)?:\s*(\w+\s+)?(auto|scroll)\s*;/.test(base);
+    const clipped = blocks.slice(1).filter((b) => /overflow(-y)?:\s*(\w+\s+)?(visible|hidden|clip)\s*;/.test(b)).length;
+    check('the title cannot overlap itself or put a row out of reach', layouts >= 4 && bad.length === 0 && scrolls && clipped === 0,
+      bad.length ? `a row that can shrink under its content: ${bad.join('; ')}`
+        : `${layouts} layouts, every occupied row at least its content; ${scrolls ? 'scrolls when taller than the window' : 'DOES NOT SCROLL'}${clipped ? `; ${clipped} media rules stop it scrolling` : ''}`);
+  }
 
   // A chain or a drift that ends early settles; it does not shake.
   const shakes = [];

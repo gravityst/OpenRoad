@@ -315,7 +315,7 @@ export const TRAFFIC = [
     spec: { mass: 2350, wheelbase: 3.45, track: 1.70, wheelRadius: 0.36, rideHeight: 0.34 },
   },
   {
-    id: 'workmate', brand: 'Norvex', model: 'Workmate', role: 'pickup', body: 'pickup', share: 0.07,
+    id: 'brannic', brand: 'Norvex', model: 'Brannic', role: 'pickup', body: 'pickup', share: 0.07,
     colours: [0xf1f1ee, 0x9a2f2a, 0x2f3a44, 0x6b7a3a, 0xb9bcc0, 0x1c1e21],
     roads: [...PAVED, 'gravel', 'dirt', 'track'], top: 27, accel: [1.5, 2.4], alat: 3.0, length: 5.5,
     spec: { mass: 2250, wheelbase: 3.30, track: 1.72, wheelRadius: 0.40, rideHeight: 0.40 },
@@ -327,7 +327,7 @@ export const TRAFFIC = [
     spec: { mass: 7500, wheelbase: 4.2, track: 1.90, wheelRadius: 0.46, rideHeight: 0.46 },
   },
   {
-    id: 'bus', brand: 'Caldwell', model: 'Countrylink', role: 'bus', body: 'bus', share: 0.04,
+    id: 'bus', brand: 'Caldwell', model: 'Ostrel', role: 'bus', body: 'bus', share: 0.04,
     colours: [0xeae8e2],
     roads: [...PAVED], top: 21, accel: [0.6, 0.9], alat: 1.8, length: 12.4,
     spec: { mass: 12500, wheelbase: 6.1, track: 2.05, wheelRadius: 0.50, rideHeight: 0.50 },

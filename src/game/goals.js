@@ -298,23 +298,26 @@ export function createGoals(opts) {
   // fifth car is "Collector") waits for the road rather than going unseen.
   const celebrations = [];
   function celebrate(ev) {
-    if (!overlay) return;
+    // The punch and the sparkle are the world's; the cards are the overlay's,
+    // which may not exist — the moment still lands without it.
+    const o = overlay || {};
     if (ev.type === 'level') {
       // The medal card already says LEVEL n and what it paid.
       if (ev.onCard) return;
-      if (overlay.celebrate) overlay.celebrate('level', `LEVEL ${ev.level}!`, rewardText(ev.reward), ev.reward);
+      if (o.celebrate) o.celebrate('level', `LEVEL ${ev.level}!`, rewardText(ev.reward), ev.reward);
       kick(5); flash(0.45);
       if (particles && particles.emitSparks) particles.emitSparks(car.x, car.y + 1.4, car.z, 90, 0, 0);
     } else if (ev.type === 'trophy') {
-      if (overlay.trophy) overlay.trophy(ev.name, ev.desc, ev.xp);
+      if (o.trophy) o.trophy(ev.name, ev.desc, ev.xp);
     } else if (ev.type === 'daily') {
-      if (overlay.note) overlay.note('daily', 'DAILY DONE', ev.text, `+$${ev.cash}  +${ev.xp} XP`);
+      if (o.note) o.note('daily', 'DAILY DONE', ev.text, `+$${ev.cash}  +${ev.xp} XP`);
     } else if (ev.type === 'sweep') {
-      if (overlay.celebrate) overlay.celebrate('sweep', 'ALL THREE DAILIES!', `Bonus +$${ev.cash}  +${ev.xp} XP`, null);
+      if (o.celebrate) o.celebrate('sweep', 'ALL THREE DAILIES!', `Bonus +$${ev.cash}  +${ev.xp} XP`, null);
       kick(4); flash(0.35);
     } else if (ev.type === 'streak') {
-      if (overlay.note) overlay.note('streak', `${ev.count}-DAY STREAK`, 'Come back tomorrow to keep it going', '');
+      if (o.note) o.note('streak', `${ev.count}-DAY STREAK`, 'Come back tomorrow to keep it going', '');
     } else if (ev.type === 'welcome') {
+      if (!overlay) return;
       const bits = [];
       if (ev.cash) bits.push(`$${ev.cash.toLocaleString('en')}`);
       for (const c of ev.cars) bits.push(c);
@@ -904,12 +907,31 @@ export function createGoals(opts) {
 
   // ---- the frame ------------------------------------------------------------------------
 
+  // How many frames threw, and the first error — see update().
+  let errors = 0;
+
+  /**
+   * One frame. The overlay's visibility is settled FIRST, and everything else
+   * runs inside a guard: this is called from inside main.js's frame, so an
+   * exception here used to abort the whole frame — nothing rendered, the
+   * world froze — while the DOM overlay stayed exactly as it was, medal card
+   * and all, over whatever menu came up next. A bug in the goals must cost
+   * the goals, not the game.
+   */
   function update(dt, ctx) {
+    driving = !!(ctx && ctx.driving);
+    if (overlay) overlay.setVisible(driving);
+    try { frame(dt, ctx); } catch (err) {
+      if (!errors) console.error('[goals] frame failed:', err);
+      errors++;
+    }
+  }
+
+  function frame(dt, ctx) {
     // Belt and braces: whatever happened in the physics loop, the ramps are
     // never left in the ground for the renderers to stream into chunks.
     rampGround.disable();
     clock += dt;
-    driving = !!(ctx && ctx.driving);
     vs.time = clock;
     vs.driving = driving;
     const moved = Math.hypot(car.x - prevX, car.z - prevZ);
@@ -1003,7 +1025,7 @@ export function createGoals(opts) {
 
     vs.target = target; vs.race = race.c; vs.nextGate = race.next; vs.zone = zone.c;
     if (view) view.update(dt, vs);
-    if (overlay) { overlay.setVisible(driving); overlay.update(dt, ui); }
+    if (overlay) overlay.update(dt, ui);
 
     prevX = car.x; prevZ = car.z; prevValid = true;
   }
@@ -1138,6 +1160,8 @@ export function createGoals(opts) {
     /** The special paint car `carId` wears, as a hex, or null. */
     paintFor: (carId) => progress.paintHex(carId),
     get paint() { return wantPaint; },
+    /** Frames whose update threw (0 in a healthy game; the first is logged). */
+    get errors() { return errors; },
     /**
      * Shows a moment without earning it, for looking at the UI (the way
      * main.js's detonate() shows a blast without a crash). 'chain' adds five

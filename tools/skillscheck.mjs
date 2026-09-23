@@ -28,6 +28,7 @@ import {
 } from '../src/game/career.js';
 import { createProgress, migrate, sanitize, PROGRESS_KEY, PROGRESS_VERSION, CAR_PRICES } from '../src/game/progress.js';
 import { generateChallenges, speedProfile } from '../src/game/challenges.js';
+import { createGoals } from '../src/game/goals.js';
 
 let fail = 0;
 const check = (name, ok, detail) => {
@@ -584,6 +585,69 @@ console.log('\n-- the real car in real traffic --');
   p.bankChain(1, twenty, 0);
   check('twenty minutes of play is several level-ups', levelFor(p.xp).level >= 4,
     `~${Math.round(xpPerMin)} XP/min from cautious chains + 4 bronzes + 8 tokens = ${twenty} XP: level ${levelFor(p.xp).level} (round one's curve: level ${(() => { let l = 1; while (100 * (l + 1) * l <= twenty) l++; return l; })()})`);
+}
+
+// ---------------------------------------------------------------------------
+// The goals layer with all of it wired in, the way main.js wires it: real
+// traffic, the drift scorer, a car model to paint. No overlay (that is DOM),
+// which is exactly the degraded case main.js allows for.
+console.log('\n-- the goals layer, wired as main.js wires it --');
+{
+  const world = buildWorld();
+  const ground = createGround(world);
+  const car = createVehicle({ ground, spec: specFor('kaida2'), isPlayer: true });
+  car.reset(0, -260, 0);
+  const traffic = createTraffic(world, ground, { density: 44 });
+  const drift = createDrift({ ground });
+  const camera = { fov: 60 };
+  const goals = createGoals({
+    world, ground, car, cars: CARS, storage: memoryStorage(), sfx: false, drift, traffic, camera,
+    today: () => '2026-09-23',
+  });
+  // A stand-in for carModel.js: the two things paintStep touches.
+  const model = { group: { userData: { paint: 0xf2f4f6 } }, setPaint(hex) { this.group.userData.paint = hex; } };
+  goals.progress.bankChain(1, 0, 5000);
+  goals.progress.buyPaint('flamingo');
+  goals.previewPaint(goals.progress.paints.find((q) => q.id === 'flamingo').hex);
+  goals.placeInitial();
+  const ctx = { driving: true, model };
+  const PH = 1 / 120;
+  let crashes = 0, frames = 0;
+  for (let step = 0; step < 120 * 40; step++) {
+    car.input.throttle = 0.6; car.input.brake = 0; car.input.steer = Math.sin(step * 0.004) * 0.2; car.input.handbrake = 0;
+    goals.preStep();
+    car.step(PH);
+    goals.step(PH);
+    if (step % 2 === 1) {
+      traffic.update(PH * 2, car.x, car.z, car.speed, car.yaw);
+      drift.update(PH * 2, car);
+      goals.update(PH * 2, ctx);
+      frames++;
+      if (step === 120 * 20 + 1) { goals.onCrash(0.9); crashes++; }
+    }
+  }
+  check('the goals frame runs clean with skills, traffic and drift wired in', goals.errors === 0 && frames > 2000,
+    `${frames} frames, ${goals.errors} threw; chain ${goals.skills.state.live ? 'live' : 'idle'}, ${goals.progress.stats.km.toFixed(2)} km counted`);
+  check('the paint shop\'s paint goes on the car main.js built', model.group.userData.paint === 0xff5fa2,
+    `model painted #${model.group.userData.paint.toString(16)}`);
+  model.group.userData.paint = 0x123456;            // main.js rebuilds it in a factory colour
+  goals.update(1 / 60, ctx);
+  check('...and back on it after main.js rebuilds the model', model.group.userData.paint === 0xff5fa2, 'repainted the same frame');
+  goals.previewPaint(null);
+  model.group.userData.paint = 0x123456;
+  goals.update(1 / 60, ctx);
+  check('...and never over a factory colour', model.group.userData.paint === 0x123456, 'factory colour left alone');
+  const f0 = camera.fov;
+  goals.demo('level');
+  goals.update(1 / 60, ctx);
+  check('a level-up punches the camera wider, never past 100 degrees', camera.fov > f0 && camera.fov <= 100,
+    `${f0.toFixed(1)} -> ${camera.fov.toFixed(1)} deg (main.js's setFov eases it back)`);
+  const hid = { driving: false, model };
+  goals.demo('trophy');
+  goals.update(1 / 60, hid);
+  check('the dailies were drawn for a world with traffic and a drift scorer', goals.progress.daily().list.length === 3,
+    goals.progress.daily().list.map((d) => d.text).join(' / '));
+  goals.dispose();
 }
 
 console.log(fail ? `\n${fail} skill check(s) FAILED` : '\nAll skill checks passed.');

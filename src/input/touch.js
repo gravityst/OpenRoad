@@ -21,6 +21,11 @@
 //    from wherever the thumb landed, so there is no "reach for the control"
 //    moment, and the origin is dragged along at full lock so a reversal bites
 //    immediately instead of after a dead sweep back across the old travel.
+//    The wheel is a picture of a wheel over the same sideways slide: it
+//    used to read the finger's ANGLE round the hub, so a kid sliding right
+//    along its lower half (where a thumb in the bottom-left corner lands)
+//    steered left, and from the hub it did not steer at all. Slide right,
+//    go right, wherever the thumb lands; the wheel still turns to match.
 //
 // 3. Nothing may latch on. A phone call, a notification pulling focus, or the
 //    overlay being hidden mid-corner must not leave the throttle pinned. Every
@@ -35,7 +40,6 @@
 
 import { icon } from '../game/icons.js';
 
-const TAU = Math.PI * 2;
 const DEG = Math.PI / 180;
 
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
@@ -68,7 +72,6 @@ const DEFAULTS = {
   feather: 0.42,           // pedal value once the thumb has slid to the bottom of its travel
 };
 
-const WHEEL_HUB = 26;      // px; inside this radius the finger's angle is meaningless
 const SLIDER_MIN = 78;     // px of travel for full lock, floor and ceiling
 const SLIDER_MAX = 210;
 const TILT_WAIT = 1500;    // ms to wait for a first sensor reading before giving up
@@ -215,9 +218,8 @@ export function createTouchControls(root, opts = {}) {
   // Steering geometry, kept between events so a move does not have to re-derive it.
   let steerRaw = 0;        // -1..1 straight off the finger, before curve and smoothing
   let steerOut = 0;        // what read() reports
-  let wheelAng = 0;        // rad of accumulated wheel rotation
-  let lastAng = 0;         // rad, previous finger angle, for unwrapping
-  let originX = 0;         // px, slider origin
+  let wheelAng = 0;        // rad the wheel is drawn turned, for debug()
+  let originX = 0;         // px, where the slide is measured from
 
   // ---- pointer handling ---------------------------------------------------
   function grab(c, e) {
@@ -257,38 +259,20 @@ export function createTouchControls(root, opts = {}) {
   function steerMove(x, y) {
     const r = steer.rect;
     if (!r) return;
-    // Keep the live finger position, so a relayout can re-anchor the wheel's
-    // reference angle to the new centre instead of integrating the jump.
     steer.px = x;
     steer.py = y;
-    if (layout === 'wheel') {
-      const cx = r.left + r.width * 0.5;
-      const cy = r.top + r.height * 0.5;
-      const dx = x - cx;
-      const dy = y - cy;
-      // atan2(dx, -dy) is 0 at twelve o'clock and grows clockwise, which is the
-      // direction that has to mean "steer right" (+X).
-      const a = Math.atan2(dx, -dy);
-      if (dx * dx + dy * dy > WHEEL_HUB * WHEEL_HUB) {
-        let d = a - lastAng;
-        if (d > Math.PI) d -= TAU; else if (d < -Math.PI) d += TAU;
-        // Clamping the accumulator, not just the output, means the wheel can
-        // never be wound up past lock and then need unwinding before it reacts.
-        const lock = settings.wheelLock * DEG;
-        wheelAng = clamp(wheelAng + d, -lock, lock);
-      }
-      // Track the angle even inside the hub, so dragging through the centre
-      // cannot come out the far side as a full-lock flick.
-      lastAng = a;
-      steerRaw = wheelAng / (settings.wheelLock * DEG);
-    } else {
-      const span = clamp(r.width * settings.sliderSpan, SLIDER_MIN, SLIDER_MAX);
-      // Drag the origin along once the finger is past full travel. Without this
-      // a thumb that ran out of screen has to sweep all the way back across the
-      // dead travel before the car answers.
-      originX = clamp(originX, x - span, x + span);
-      steerRaw = clamp((x - originX) / span, -1, 1);
-    }
+    // The wheel and the slider are the same slide: sideways from where the
+    // thumb landed, right is right, wherever on the zone it landed — the
+    // wheel's hub and lower half included. Measured in screen pixels on both
+    // ends, so a relayout that moves the zone under a still thumb (a URL bar
+    // sliding away) changes nothing.
+    const span = clamp(r.width * settings.sliderSpan, SLIDER_MIN, SLIDER_MAX);
+    // Drag the origin along once the finger is past full travel. Without this
+    // a thumb that ran out of screen has to sweep all the way back across the
+    // dead travel before the car answers.
+    originX = clamp(originX, x - span, x + span);
+    steerRaw = clamp((x - originX) / span, -1, 1);
+    wheelAng = steerRaw * settings.wheelLock * DEG;
   }
 
   // The pedals are pressure pads: full on press, easing off as the thumb slides
@@ -320,13 +304,8 @@ export function createTouchControls(root, opts = {}) {
     grab(c, e);
 
     if (c === steer) {
-      const r = c.rect;
-      if (layout === 'wheel') {
-        lastAng = Math.atan2(e.clientX - (r.left + r.width * 0.5), -(e.clientY - (r.top + r.height * 0.5)));
-        wheelAng = 0;
-      } else {
-        originX = e.clientX;
-      }
+      originX = e.clientX;
+      wheelAng = 0;
       steerRaw = 0;
     } else if (c === gas || c === brake) {
       c.feather = 1;
@@ -383,16 +362,6 @@ export function createTouchControls(root, opts = {}) {
     ro = new ResizeObserver(() => {
       for (let i = 0; i < ALL.length; i++) {
         if (ALL[i].pointer >= 0) ALL[i].rect = ALL[i].el.getBoundingClientRect();
-      }
-      // Moving the wheel out from under a stationary thumb changes the angle
-      // that thumb subtends, and the wheel integrates angle DELTAS — so
-      // without re-anchoring, a URL bar sliding away mid-corner is indis-
-      // tinguishable from the player spinning the wheel, and lands as a real
-      // steering input of tens of degrees. Re-anchoring makes the relayout
-      // contribute exactly nothing.
-      if (layout === 'wheel' && steer.pointer >= 0 && steer.rect) {
-        const r = steer.rect;
-        lastAng = Math.atan2(steer.px - (r.left + r.width * 0.5), -(steer.py - (r.top + r.height * 0.5)));
       }
     });
     ro.observe(el);
